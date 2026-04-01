@@ -21,6 +21,8 @@ test.describe("E2E mock build", () => {
     await search.fill("Sample");
     await page.getByRole("button", { name: /Sample Entity/ }).click();
     await expect(page.getByRole("heading", { name: "Node detail" })).toBeVisible();
-    await expect(page.getByText("Sample Entity")).toBeVisible();
+    await expect(
+      page.getByRole("dialog", { name: "Node detail" }).getByText("Sample Entity"),
+    ).toBeVisible();
   });
 });
