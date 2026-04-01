@@ -1,0 +1,37 @@
+[package]
+name = "cognito"
+version = "0.1.0"
+description = "Cognito local-first knowledge desktop"
+authors = ["Cognito"]
+edition = "2021"
+
+[lib]
+name = "cognito_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "process", "io-util", "time"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+thiserror = "2"
+parking_lot = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+globset = "0.4"
+walkdir = "2"
+duckdb = { version = "1.1", features = ["bundled"] }
+notify-debouncer-mini = "0.5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

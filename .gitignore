@@ -1,0 +1,16 @@
+node_modules/
+dist/
+src-tauri/target/
+sidecar/.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+/test-results/
+/playwright-report/
+/playwright/.cache/
+
+# Tauri packaged sidecar (keep .gitkeep for empty bundle path)
+src-tauri/resources/sidecar/**
+!src-tauri/resources/sidecar/.gitkeep
