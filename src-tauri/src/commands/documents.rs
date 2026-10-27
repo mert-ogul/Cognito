@@ -5,30 +5,80 @@ use crate::models::{DocumentPreview, DocumentRow, ImportProgress};
 use crate::services::import_job;
 use crate::services::ingest;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
+use super::run_blocking;
+
 #[tauri::command]
-pub fn list_documents(state: tauri::State<'_, SharedState>) -> Result<Vec<DocumentRow>, String> {
-    state
-        .with_sqlite(|c| sqlite::list_documents(c))
-        .map_err(|e| e.to_string())
+pub async fn list_documents(
+    state: tauri::State<'_, SharedState>,
+) -> Result<Vec<DocumentRow>, String> {
+    run_blocking(state, |st| st.with_sqlite(|c| sqlite::list_documents(c))).await
 }
 
 #[tauri::command]
-pub fn get_document_preview(
+pub async fn get_document_preview(
     state: tauri::State<'_, SharedState>,
     document_id: String,
     highlight_snippet: Option<String>,
 ) -> Result<DocumentPreview, String> {
-    let text = state
-        .with_sqlite(|c| sqlite::document_preview_text(c, &document_id))
-        .map_err(|e| e.to_string())?;
-    Ok(DocumentPreview {
-        document_id,
-        text,
-        highlight_snippet,
+    run_blocking(state, move |st| {
+        let text = st.with_sqlite(|c| sqlite::document_preview_text(c, &document_id))?;
+        Ok(DocumentPreview {
+            document_id,
+            text,
+            highlight_snippet,
+        })
     })
+    .await
+}
+
+fn spawn_import_job(
+    app: AppHandle,
+    state: &SharedState,
+    job_id: String,
+    vault: PathBuf,
+    paths: Vec<PathBuf>,
+    embed: String,
+    chat: String,
+) -> Result<(), String> {
+    if state.import_running.swap(true, Ordering::SeqCst) {
+        return Err("An import is already running.".to_string());
+    }
+    let st: SharedState = state.clone();
+    let app_c = app.clone();
+    let jid = job_id.clone();
+    std::thread::spawn(move || {
+        let res = ingest::run_import_job(
+            st.clone(),
+            Some(app_c.clone()),
+            jid.clone(),
+            vault,
+            paths,
+            embed,
+            chat,
+        );
+        if let Err(ref e) = res {
+            let _ = st.with_sqlite(|c| import_job::complete_fail(c, &jid, &e.to_string()));
+            let _ = app_c.emit(
+                IMPORT_PROGRESS,
+                &ImportProgress {
+                    job_id: jid.clone(),
+                    status: "failed".into(),
+                    total_files: 0,
+                    completed_files: 0,
+                    failed_files: 0,
+                    phase: "error".into(),
+                    path: None,
+                    error_message: Some(e.to_string()),
+                },
+            );
+        }
+        st.import_running.store(false, Ordering::SeqCst);
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -64,30 +114,15 @@ pub async fn import_documents(
     if paths.is_empty() {
         return Err("No PDF or Markdown files found.".to_string());
     }
-    let st: SharedState = (*state).clone();
-    let app_c = app.clone();
-    let jid = job_id.clone();
-    let embed = settings.embed_model.clone();
-    let chat = settings.chat_model.clone();
-    std::thread::spawn(move || {
-        let res = ingest::run_import_job(st.clone(), app_c.clone(), jid.clone(), vault, paths, embed, chat);
-        if let Err(ref e) = res {
-            let _ = st.with_sqlite(|c| import_job::complete_fail(c, &jid, &e.to_string()));
-            let _ = app_c.emit(
-                IMPORT_PROGRESS,
-                &ImportProgress {
-                    job_id: jid.clone(),
-                    status: "failed".into(),
-                    total_files: 0,
-                    completed_files: 0,
-                    failed_files: 0,
-                    phase: "error".into(),
-                    path: None,
-                    error_message: Some(e.to_string()),
-                },
-            );
-        }
-    });
+    spawn_import_job(
+        app,
+        &*state,
+        job_id.clone(),
+        vault,
+        paths,
+        settings.embed_model.clone(),
+        settings.chat_model.clone(),
+    )?;
     Ok(job_id)
 }
 
@@ -112,29 +147,14 @@ pub async fn retry_failed_import(
         return Err("No failed documents to retry.".to_string());
     }
     let paths: Vec<PathBuf> = paths_str.iter().map(PathBuf::from).collect();
-    let st: SharedState = (*state).clone();
-    let app_c = app.clone();
-    let jid = job_id.clone();
-    let embed = settings.embed_model.clone();
-    let chat = settings.chat_model.clone();
-    std::thread::spawn(move || {
-        let res = ingest::run_import_job(st.clone(), app_c.clone(), jid.clone(), vault, paths, embed, chat);
-        if let Err(ref e) = res {
-            let _ = st.with_sqlite(|c| import_job::complete_fail(c, &jid, &e.to_string()));
-            let _ = app_c.emit(
-                IMPORT_PROGRESS,
-                &ImportProgress {
-                    job_id: jid.clone(),
-                    status: "failed".into(),
-                    total_files: 0,
-                    completed_files: 0,
-                    failed_files: 0,
-                    phase: "error".into(),
-                    path: None,
-                    error_message: Some(e.to_string()),
-                },
-            );
-        }
-    });
+    spawn_import_job(
+        app,
+        &*state,
+        job_id.clone(),
+        vault,
+        paths,
+        settings.embed_model.clone(),
+        settings.chat_model.clone(),
+    )?;
     Ok(job_id)
 }

@@ -154,13 +154,40 @@ pub fn document_id_by_path(conn: &Connection, path: &str) -> CognitoResult<Optio
 pub fn content_hash_by_path(conn: &Connection, path: &str) -> CognitoResult<Option<String>> {
     let row = conn
         .query_row(
-            "SELECT content_hash FROM documents WHERE path = ?1 AND status != 'removed'",
+            "SELECT content_hash FROM documents WHERE path = ?1 AND status = 'indexed'",
             [path],
             |r| r.get::<_, String>(0),
         )
         .optional()
         .map_err(|e| CognitoError::Database(e.to_string()))?;
     Ok(row)
+}
+
+/// Insert or update a document row as `failed` (clears hash so retry does not skip).
+pub fn record_failed_document(
+    conn: &Connection,
+    path: &str,
+    title: &str,
+    file_type: &str,
+    message: &str,
+) -> CognitoResult<()> {
+    let clip: String = message.chars().take(512).collect();
+    let now = chrono::Utc::now().to_rfc3339();
+    let id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO documents (id, path, title, file_type, content_hash, page_count, status, error_message, imported_at, indexed_at, modified_at, graph_status, graph_error)
+         VALUES (?1, ?2, ?3, ?4, '', NULL, 'failed', ?5, ?6, NULL, ?6, 'none', NULL)
+         ON CONFLICT(path) DO UPDATE SET
+           status = 'failed',
+           error_message = excluded.error_message,
+           content_hash = '',
+           graph_status = 'none',
+           graph_error = NULL,
+           modified_at = excluded.modified_at",
+        params![id, path, title, file_type, clip, now],
+    )
+    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(())
 }
 
 pub fn document_id_including_removed(conn: &Connection, path: &str) -> CognitoResult<Option<String>> {
@@ -418,5 +445,95 @@ mod tests {
             assert_eq!(n, 0);
         }
         let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn content_hash_by_path_only_indexed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("v.sqlite");
+        let c = open_sqlite(&p).expect("open");
+        insert_document_row(
+            &c,
+            "d1",
+            "/a.md",
+            "a",
+            "markdown",
+            "hash-failed",
+            None,
+            "failed",
+            Some("boom"),
+        )
+        .expect("insert failed");
+        assert!(content_hash_by_path(&c, "/a.md")
+            .expect("q")
+            .is_none());
+        insert_document_row(
+            &c,
+            "d2",
+            "/b.md",
+            "b",
+            "markdown",
+            "hash-ok",
+            None,
+            "indexed",
+            None,
+        )
+        .expect("insert indexed");
+        assert_eq!(
+            content_hash_by_path(&c, "/b.md").expect("q").as_deref(),
+            Some("hash-ok")
+        );
+    }
+
+    #[test]
+    fn record_failed_document_inserts_and_updates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("v.sqlite");
+        let c = open_sqlite(&p).expect("open");
+        record_failed_document(&c, "/x.md", "x", "markdown", "first").expect("insert");
+        let (status, hash, err): (String, String, String) = c
+            .query_row(
+                "SELECT status, content_hash, error_message FROM documents WHERE path = ?1",
+                ["/x.md"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("row");
+        assert_eq!(status, "failed");
+        assert_eq!(hash, "");
+        assert_eq!(err, "first");
+
+        insert_document_row(
+            &c,
+            "old",
+            "/y.md",
+            "y",
+            "markdown",
+            "keep-me",
+            None,
+            "indexing",
+            None,
+        )
+        .expect("indexing row");
+        record_failed_document(&c, "/y.md", "y", "markdown", &"e".repeat(600)).expect("upsert");
+        let (status, hash, err, gstat, gerr): (String, String, String, String, Option<String>) = c
+            .query_row(
+                "SELECT status, content_hash, error_message, graph_status, graph_error FROM documents WHERE path = ?1",
+                ["/y.md"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("row");
+        assert_eq!(status, "failed");
+        assert_eq!(hash, "");
+        assert_eq!(err.chars().count(), 512);
+        assert_eq!(gstat, "none");
+        assert!(gerr.is_none());
+        let n: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path = ?1",
+                ["/y.md"],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(n, 1);
     }
 }

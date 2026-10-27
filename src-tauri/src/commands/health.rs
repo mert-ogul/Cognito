@@ -3,15 +3,17 @@ use crate::models::AppHealth;
 use crate::services::health_snapshot;
 use serde_json::{json, Value};
 
+use super::run_blocking;
+
 #[tauri::command]
-pub fn get_app_health(state: tauri::State<'_, SharedState>) -> Result<AppHealth, String> {
-    health_snapshot::read_app_health(&state).map_err(|e| e.to_string())
+pub async fn get_app_health(state: tauri::State<'_, SharedState>) -> Result<AppHealth, String> {
+    run_blocking(state, |st| health_snapshot::read_app_health(&st)).await
 }
 
 #[tauri::command]
-pub fn ping_sidecar(state: tauri::State<'_, SharedState>) -> Result<Value, String> {
-    state
-        .sidecar
-        .with_session(|s| s.request("ping", json!({})))
-        .map_err(|e| e.to_string())
+pub async fn ping_sidecar(state: tauri::State<'_, SharedState>) -> Result<Value, String> {
+    run_blocking(state, |st| {
+        st.sidecar.with_session(|s| s.request("ping", json!({})))
+    })
+    .await
 }
