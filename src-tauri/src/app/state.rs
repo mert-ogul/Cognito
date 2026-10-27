@@ -7,6 +7,7 @@ use crate::sidecar::SidecarPool;
 use duckdb::Connection as DuckConn;
 use rusqlite::Connection as SqlConn;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -24,6 +25,7 @@ pub struct AppState {
     pub watcher_tx: Mutex<Option<Sender<PathBuf>>>,
     /// `None` = warm-up not finished yet.
     pub chat_warm: Mutex<Option<ChatWarmResult>>,
+    pub import_running: AtomicBool,
 }
 
 impl AppState {
@@ -39,6 +41,7 @@ impl AppState {
             duck: Mutex::new(None),
             watcher_tx: Mutex::new(None),
             chat_warm: Mutex::new(None),
+            import_running: AtomicBool::new(false),
         }
     }
 
