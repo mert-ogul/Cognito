@@ -1,12 +1,14 @@
-//! Background graph extraction: one sidecar call per chunk.
+//! Background graph extraction: Ollama structured extract in Rust, DuckDB store via sidecar.
 
 use crate::app::state::SharedState;
 use crate::db::sqlite;
 use crate::errors::CognitoResult;
 use crate::events::{GRAPH_EXTRACTION_PROGRESS, LIBRARY_CHANGED};
 use crate::models::GraphExtractionProgress;
+use crate::services::graph_extract;
 use serde_json::json;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
@@ -51,12 +53,33 @@ pub(crate) fn emit_graph(
     );
 }
 
+fn wait_while_chat_in_flight(
+    state: &SharedState,
+    document_id: &str,
+) -> CognitoResult<bool> {
+    // Returns Ok(false) when the document should stop (status left running or disabled).
+    while state.chat_in_flight.load(Ordering::SeqCst) > 0 {
+        let still = state.with_sqlite(|c| sqlite::document_graph_still_running(c, document_id))?;
+        if !still {
+            return Ok(false);
+        }
+        let enabled = state
+            .with_sqlite(|c| sqlite::load_settings(c))?
+            .graph_extraction_enabled;
+        if !enabled {
+            state.with_sqlite(|c| sqlite::mark_document_graph_pending(c, document_id))?;
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    Ok(true)
+}
+
 fn process_one_document(
     state: &SharedState,
     app: Option<&AppHandle>,
     document_id: &str,
 ) -> CognitoResult<()> {
-    let sqlite_path = state.sqlite_path();
     let duck_path = state.duckdb_path();
     let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
     if !settings.graph_extraction_enabled {
@@ -78,17 +101,38 @@ fn process_one_document(
             state.with_sqlite(|c| sqlite::mark_document_graph_pending(c, document_id))?;
             return Ok(());
         }
+        if !wait_while_chat_in_flight(state, document_id)? {
+            return Ok(());
+        }
         let detail = format!("chunk {} of {}", i + 1, total);
         emit_graph(app, None, document_id, "extract", Some(&detail));
+        let text = state
+            .with_sqlite(|c| sqlite::chunk_text_by_id(c, chunk_id))?
+            .unwrap_or_default();
+        let graph = match tauri::async_runtime::block_on(graph_extract::extract_chunk(
+            &settings.chat_model,
+            &text,
+        )) {
+            Ok(g) => g,
+            Err(e) => {
+                let msg = e.to_string();
+                state.with_sqlite(|c| sqlite::mark_document_graph_failed(c, document_id, &msg))?;
+                emit_graph(app, None, document_id, "failed", Some(&msg));
+                if let Some(a) = app {
+                    let _ = a.emit(LIBRARY_CHANGED, &());
+                }
+                return Ok(());
+            }
+        };
         let res = state.sidecar.with_session(|s| {
             s.request(
-                "extract_graph_chunk",
+                "store_graph_chunk",
                 json!({
-                    "sqlitePath": sp(&sqlite_path),
                     "duckPath": sp(&duck_path),
                     "documentId": document_id,
                     "chunkId": chunk_id,
-                    "chatModel": settings.chat_model,
+                    "entities": graph.entities,
+                    "relations": graph.relations,
                 }),
             )
         });
@@ -99,7 +143,7 @@ fn process_one_document(
                     let err = v
                         .get("error")
                         .and_then(|x| x.as_str())
-                        .unwrap_or("graph extraction failed");
+                        .unwrap_or("graph store failed");
                     state.with_sqlite(|c| sqlite::mark_document_graph_failed(c, document_id, err))?;
                     emit_graph(app, None, document_id, "failed", Some(err));
                     if let Some(a) = app {

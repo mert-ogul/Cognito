@@ -10,8 +10,6 @@ dependencies = [
   "duckdb>=1.0",
   "pymupdf>=1.27.2.2",
   "sqlite-vec>=0.1.9",
-  "lightrag-hku>=1.4.12",
-  "ollama>=0.6.1",
 ]
 
 [project.optional-dependencies]

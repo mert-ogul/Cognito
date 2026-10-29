@@ -21,6 +21,7 @@ export function GraphPanel() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [fitKey, setFitKey] = useState(0);
   const [centerOn, setCenterOn] = useState<string | null>(null);
+  const [showUnconnected, setShowUnconnected] = useState(false);
   const highlightNodeIds = useSidePaneStore((s) => s.highlightNodeIds);
 
   const settingsQ = useQuery({ queryKey: ["settings"], queryFn: getSettings });
@@ -42,6 +43,15 @@ export function GraphPanel() {
     if (!snapshot?.nodes?.length) return false;
     return snapshot.nodes.length >= limit;
   }, [snapshot, limit]);
+  const unconnectedCount = useMemo(() => {
+    if (!snapshot?.nodes?.length) return 0;
+    const connected = new Set<string>();
+    for (const e of snapshot.edges ?? []) {
+      connected.add(e.sourceNodeId);
+      connected.add(e.targetNodeId);
+    }
+    return snapshot.nodes.filter((n) => !connected.has(n.nodeId)).length;
+  }, [snapshot]);
 
   const emptyMessage = graphEnabled
     ? "The graph fills in as documents are indexed."
@@ -87,6 +97,16 @@ export function GraphPanel() {
               Load more ({SNAPSHOT_STEPS[limitIdx + 1]})
             </Button>
           ) : null}
+          {unconnectedCount > 0 ? (
+            <Button
+              type="button"
+              variant="quiet"
+              aria-pressed={showUnconnected}
+              onClick={() => setShowUnconnected((v) => !v)}
+            >
+              {showUnconnected ? "Hide unconnected" : "Show unconnected"}
+            </Button>
+          ) : null}
         </div>
         {debouncedSearch.trim().length >= 2 && searchQ.data && searchQ.data.length > 0 ? (
           <ul
@@ -127,6 +147,7 @@ export function GraphPanel() {
           fitKey={fitKey}
           centerOnNodeId={centerOn}
           emptyMessage={emptyMessage}
+          showUnconnected={showUnconnected}
         />
         <GraphNodeDetailSheet
           nodeId={sheetOpen ? selectedNodeId : null}

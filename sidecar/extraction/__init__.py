@@ -1,1 +1,1 @@
-"""Graph extraction (LightRAG) and DuckDB persistence."""
+"""Graph persistence helpers (DuckDB merge)."""

@@ -68,7 +68,7 @@ See [docs/packaging-local.md](docs/packaging-local.md) and [docs/release-checkli
 |-------|------|
 | Tauri / Rust | Window, vault paths, SQLite, import jobs, sidecar lifecycle |
 | React | Shell UI, chat, sources, graph |
-| Python sidecar | Parse, chunk, embed, graph extract, retrieval prep |
+| Python sidecar | Parse, chunk, embed, graph store, retrieval prep |
 | SQLite | Documents, chunks, embeddings |
 | DuckDB | Graph nodes and edges |
 | Ollama | Local chat and embedding API |

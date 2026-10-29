@@ -1,5 +1,5 @@
-import { listen } from "@/lib/tauri-events";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { e2eEmit } from "@/lib/tauri-events";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SourcesPanel } from "./SourcesPanel";
@@ -10,13 +10,8 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 
-vi.mock("@/lib/tauri-events", () => ({
-  listen: vi.fn(),
-}));
-
 describe("SourcesPanel", () => {
   beforeEach(() => {
-    vi.mocked(listen).mockImplementation(async () => () => {});
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "list_documents") {
         return [
@@ -79,30 +74,24 @@ describe("SourcesPanel", () => {
   });
 
   it("shows import progress when import-progress event fires", async () => {
-    vi.mocked(listen).mockImplementation(async (event, handler) => {
-      if (event === "import-progress") {
-        queueMicrotask(() => {
-          handler({
-            payload: {
-              jobId: "j1",
-              status: "running",
-              totalFiles: 10,
-              completedFiles: 4,
-              failedFiles: 0,
-              phase: "parse",
-              path: "/vault/x.pdf",
-            },
-          });
-        });
-      }
-      return () => {};
-    });
     const client = new QueryClient();
     render(
       <QueryClientProvider client={client}>
         <SourcesPanel />
       </QueryClientProvider>,
     );
+    await screen.findByText("a.pdf");
+    act(() => {
+      e2eEmit("import-progress", {
+        jobId: "j1",
+        status: "running",
+        totalFiles: 10,
+        completedFiles: 4,
+        failedFiles: 0,
+        phase: "parse",
+        path: "/vault/x.pdf",
+      });
+    });
     expect(await screen.findByText(/Indexing 4 of 10, x\.pdf/)).toBeInTheDocument();
   });
 

@@ -1,7 +1,7 @@
 import type { GraphSnapshot } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import cytoscape, { type Core } from "cytoscape";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 type Props = {
   snapshot: GraphSnapshot | null;
@@ -12,6 +12,7 @@ type Props = {
   centerOnNodeId?: string | null;
   className?: string;
   emptyMessage: string;
+  showUnconnected?: boolean;
 };
 
 type Theme = {
@@ -31,6 +32,28 @@ function readTheme(): Theme {
     line: pick("--line"),
     accent: pick("--accent"),
     pane: pick("--bg-pane"),
+  };
+}
+
+function connectedNodeIds(snapshot: GraphSnapshot): Set<string> {
+  const ids = new Set<string>();
+  for (const e of snapshot.edges) {
+    ids.add(e.sourceNodeId);
+    ids.add(e.targetNodeId);
+  }
+  return ids;
+}
+
+/** Drop nodes with no edges in the current snapshot unless showUnconnected is set. */
+export function visibleSnapshot(
+  snapshot: GraphSnapshot,
+  showUnconnected: boolean,
+): GraphSnapshot {
+  if (showUnconnected) return snapshot;
+  const connected = connectedNodeIds(snapshot);
+  return {
+    nodes: snapshot.nodes.filter((n) => connected.has(n.nodeId)),
+    edges: snapshot.edges,
   };
 }
 
@@ -123,19 +146,24 @@ export function GraphCyCanvas({
   centerOnNodeId,
   className,
   emptyMessage,
+  showUnconnected = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
+  const display = useMemo(
+    () => (snapshot ? visibleSnapshot(snapshot, showUnconnected) : null),
+    [snapshot, showUnconnected],
+  );
 
   useEffect(() => {
     const el = containerRef.current;
-    if (!el || !snapshot || snapshot.nodes.length === 0) {
+    if (!el || !display || display.nodes.length === 0) {
       return;
     }
     const theme = readTheme();
     const cy = cytoscape({
       container: el,
-      elements: buildElements(snapshot),
+      elements: buildElements(display),
       style: [],
       layout: {
         name: "cose",
@@ -168,13 +196,13 @@ export function GraphCyCanvas({
       cyRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- highlight updates via the effect below
-  }, [snapshot, onNodeTap]);
+  }, [display, onNodeTap]);
 
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy) return;
     applyHighlight(cy, highlightNodeIds, selectedNodeId, readTheme());
-  }, [highlightNodeIds, selectedNodeId, snapshot]);
+  }, [highlightNodeIds, selectedNodeId, display]);
 
   useEffect(() => {
     const cy = cyRef.current;
@@ -194,7 +222,7 @@ export function GraphCyCanvas({
     }
   }, [centerOnNodeId]);
 
-  if (!snapshot || snapshot.nodes.length === 0) {
+  if (!display || display.nodes.length === 0) {
     return (
       <div className={cn("flex min-h-[200px] items-center justify-center p-3 text-muted", className)}>
         {emptyMessage}

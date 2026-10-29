@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ChatPanel,
@@ -8,14 +9,10 @@ import {
   linkifyCitationMarkers,
 } from "./ChatPanel";
 import { SidePane } from "@/components/layout/SidePane";
-import { listen } from "@/lib/tauri-events";
+import { e2eEmit } from "@/lib/tauri-events";
 import { getDocumentPreview, openDocument, sendChatQuery } from "@/lib/tauri";
 import type { CitationItem } from "@/lib/tauri";
 import { useSidePaneStore } from "@/stores/sidePaneStore";
-
-vi.mock("@/lib/tauri-events", () => ({
-  listen: vi.fn(async () => () => {}),
-}));
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/tauri")>();
@@ -105,7 +102,6 @@ describe("ChatPanel helpers", () => {
 
 describe("ChatPanel", () => {
   beforeEach(() => {
-    vi.mocked(listen).mockImplementation(async () => () => {});
     vi.mocked(sendChatQuery).mockReset();
     vi.mocked(getDocumentPreview).mockReset();
     vi.mocked(openDocument).mockReset();
@@ -142,36 +138,17 @@ describe("ChatPanel", () => {
   });
 
   it("clears busy when chat-final arrives before sendChatQuery resolves", async () => {
-    let chatFinal:
-      | ((ev: {
-          payload: {
-            messageId: string;
-            citations: [];
-            retrievalMode: string;
-            error?: string | null;
-          };
-        }) => void)
-      | undefined;
-    vi.mocked(listen).mockImplementation(async (event, handler) => {
-      if (event === "chat-final") {
-        chatFinal = handler as typeof chatFinal;
-      }
-      return () => {};
-    });
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
-      chatFinal?.({
-        payload: {
-          messageId,
-          citations: [],
-          retrievalMode: "error",
-          error: "fast fail",
-        },
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [],
+        retrievalMode: "error",
+        error: "fast fail",
       });
       await new Promise((r) => setTimeout(r, 20));
       return messageId;
     });
     renderChat();
-    await waitFor(() => expect(chatFinal).toBeDefined());
     await sendPrompt("race");
     expect(await screen.findByText("fast fail")).toBeInTheDocument();
     await waitFor(() => {
@@ -179,38 +156,44 @@ describe("ChatPanel", () => {
     });
   });
 
-  it("superscript citation opens Passage mode with the cited chunk marked", async () => {
-    let chatStream:
-      | ((ev: { payload: { messageId: string; token: string } }) => void)
-      | undefined;
-    let chatFinal:
-      | ((ev: {
-          payload: {
-            messageId: string;
-            citations: CitationItem[];
-            retrievalMode: string;
-            error?: string | null;
-          };
-        }) => void)
-      | undefined;
-    vi.mocked(listen).mockImplementation(async (event, handler) => {
-      if (event === "chat-stream") chatStream = handler as typeof chatStream;
-      if (event === "chat-final") chatFinal = handler as typeof chatFinal;
-      return () => {};
-    });
+  it("under StrictMode each streamed token appears once", async () => {
+    let assistantId = "";
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
-      chatStream?.({ payload: { messageId, token: "Answer cites [2] only." } });
+      assistantId = messageId;
+      return messageId;
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    render(
+      <StrictMode>
+        <QueryClientProvider client={client}>
+          <ChatPanel health={health} />
+        </QueryClientProvider>
+      </StrictMode>,
+    );
+    await sendPrompt("stream me");
+    await waitFor(() => expect(assistantId).toBeTruthy());
+    act(() => {
+      e2eEmit("chat-stream", { messageId: assistantId, token: "One" });
+      e2eEmit("chat-stream", { messageId: assistantId, token: " interesting" });
+    });
+    expect(await screen.findByText("One interesting")).toBeInTheDocument();
+    expect(screen.queryByText("OneOne interesting interesting")).not.toBeInTheDocument();
+  });
+
+  it("superscript citation opens Passage mode with the cited chunk marked", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      e2eEmit("chat-stream", { messageId, token: "Answer cites [2] only." });
       await Promise.resolve();
-      chatFinal?.({
-        payload: {
-          messageId,
-          citations: [
-            cite(1, "One", "/vault/one.pdf"),
-            { ...cite(2, "Two", "/vault/two.pdf"), pageStart: 3, pageEnd: 3 },
-          ],
-          retrievalMode: "hybrid",
-          error: null,
-        },
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [
+          cite(1, "One", "/vault/one.pdf"),
+          { ...cite(2, "Two", "/vault/two.pdf"), pageStart: 3, pageEnd: 3 },
+        ],
+        retrievalMode: "hybrid",
+        error: null,
       });
       return messageId;
     });
@@ -227,7 +210,6 @@ describe("ChatPanel", () => {
         <SidePane />
       </>,
     );
-    await waitFor(() => expect(chatFinal).toBeDefined());
     await sendPrompt("ask");
     expect(await screen.findByLabelText("Source 2")).toBeInTheDocument();
     expect(screen.getByText("Sources")).toBeInTheDocument();
@@ -246,38 +228,17 @@ describe("ChatPanel", () => {
   });
 
   it("lists all passages under Retrieved passages when none are cited", async () => {
-    let chatStream:
-      | ((ev: { payload: { messageId: string; token: string } }) => void)
-      | undefined;
-    let chatFinal:
-      | ((ev: {
-          payload: {
-            messageId: string;
-            citations: CitationItem[];
-            retrievalMode: string;
-            error?: string | null;
-          };
-        }) => void)
-      | undefined;
-    vi.mocked(listen).mockImplementation(async (event, handler) => {
-      if (event === "chat-stream") chatStream = handler as typeof chatStream;
-      if (event === "chat-final") chatFinal = handler as typeof chatFinal;
-      return () => {};
-    });
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
-      chatStream?.({ payload: { messageId, token: "No numbers here." } });
-      chatFinal?.({
-        payload: {
-          messageId,
-          citations: [cite(1, "One", "/vault/one.pdf"), cite(2, "Two", "/vault/two.pdf")],
-          retrievalMode: "vector_only",
-          error: null,
-        },
+      e2eEmit("chat-stream", { messageId, token: "No numbers here." });
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [cite(1, "One", "/vault/one.pdf"), cite(2, "Two", "/vault/two.pdf")],
+        retrievalMode: "vector_only",
+        error: null,
       });
       return messageId;
     });
     renderChat();
-    await waitFor(() => expect(chatFinal).toBeDefined());
     await sendPrompt("ask");
     expect(await screen.findByText("Retrieved passages")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "one.pdf" })).toBeInTheDocument();
@@ -285,40 +246,20 @@ describe("ChatPanel", () => {
   });
 
   it("renders Markdown lists as ul and li", async () => {
-    let chatStream:
-      | ((ev: { payload: { messageId: string; token: string } }) => void)
-      | undefined;
-    let chatFinal:
-      | ((ev: {
-          payload: {
-            messageId: string;
-            citations: CitationItem[];
-            retrievalMode: string;
-            error?: string | null;
-          };
-        }) => void)
-      | undefined;
-    vi.mocked(listen).mockImplementation(async (event, handler) => {
-      if (event === "chat-stream") chatStream = handler as typeof chatStream;
-      if (event === "chat-final") chatFinal = handler as typeof chatFinal;
-      return () => {};
-    });
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
-      chatStream?.({
-        payload: { messageId, token: "Items:\n\n- alpha\n- beta" },
+      e2eEmit("chat-stream", {
+        messageId,
+        token: "Items:\n\n- alpha\n- beta",
       });
-      chatFinal?.({
-        payload: {
-          messageId,
-          citations: [],
-          retrievalMode: "vector_only",
-          error: null,
-        },
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [],
+        retrievalMode: "vector_only",
+        error: null,
       });
       return messageId;
     });
     renderChat();
-    await waitFor(() => expect(chatFinal).toBeDefined());
     await sendPrompt("list");
     const answer = await screen.findByText("alpha");
     const list = answer.closest("ul");
@@ -327,33 +268,13 @@ describe("ChatPanel", () => {
   });
 
   it("Show related entities switches the pane to Graph", async () => {
-    let chatStream:
-      | ((ev: { payload: { messageId: string; token: string } }) => void)
-      | undefined;
-    let chatFinal:
-      | ((ev: {
-          payload: {
-            messageId: string;
-            citations: CitationItem[];
-            retrievalMode: string;
-            error?: string | null;
-          };
-        }) => void)
-      | undefined;
-    vi.mocked(listen).mockImplementation(async (event, handler) => {
-      if (event === "chat-stream") chatStream = handler as typeof chatStream;
-      if (event === "chat-final") chatFinal = handler as typeof chatFinal;
-      return () => {};
-    });
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
-      chatStream?.({ payload: { messageId, token: "Uses graph [2]." } });
-      chatFinal?.({
-        payload: {
-          messageId,
-          citations: [cite(1), cite(2, "Two", "/vault/two.pdf")],
-          retrievalMode: "hybrid",
-          error: null,
-        },
+      e2eEmit("chat-stream", { messageId, token: "Uses graph [2]." });
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [cite(1), cite(2, "Two", "/vault/two.pdf")],
+        retrievalMode: "hybrid",
+        error: null,
       });
       return messageId;
     });
@@ -363,7 +284,6 @@ describe("ChatPanel", () => {
         <SidePane />
       </>,
     );
-    await waitFor(() => expect(chatFinal).toBeDefined());
     await sendPrompt("ask");
     fireEvent.click(await screen.findByRole("button", { name: "Show related entities in the graph" }));
     expect(useSidePaneStore.getState().open).toBe(true);
@@ -373,25 +293,13 @@ describe("ChatPanel", () => {
   });
 
   it("sends history that skips error messages", async () => {
-    let chatFinal:
-      | ((ev: {
-          payload: {
-            messageId: string;
-            citations: CitationItem[];
-            retrievalMode: string;
-            error?: string | null;
-          };
-        }) => void)
-      | undefined;
-    vi.mocked(listen).mockImplementation(async (event, handler) => {
-      if (event === "chat-final") chatFinal = handler as typeof chatFinal;
-      return () => {};
-    });
     renderChat();
-    await waitFor(() => expect(chatFinal).toBeDefined());
     vi.mocked(sendChatQuery).mockImplementationOnce(async (_q, messageId) => {
-      chatFinal?.({
-        payload: { messageId, citations: [], retrievalMode: "vector_only", error: null },
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [],
+        retrievalMode: "vector_only",
+        error: null,
       });
       return messageId;
     });
@@ -404,8 +312,11 @@ describe("ChatPanel", () => {
       expect(q).toBe("again");
       expect(history?.every((t) => t.content !== "boom")).toBe(true);
       expect(history?.some((t) => t.content === "first ok")).toBe(true);
-      chatFinal?.({
-        payload: { messageId, citations: [], retrievalMode: "vector_only", error: null },
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [],
+        retrievalMode: "vector_only",
+        error: null,
       });
       return messageId;
     });

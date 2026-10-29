@@ -8,10 +8,11 @@ import { SourcesPanel } from "@/components/sources/SourcesPanel";
 import { useAppHealth } from "@/hooks/useAppHealth";
 import { useLibraryRefresh } from "@/hooks/useLibraryRefresh";
 import { listDocuments, type ImportProgress } from "@/lib/tauri";
-import { listen } from "@/lib/tauri-events";
+import { useTauriEvent } from "@/lib/tauri-events";
 import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+
 
 export function AppShell() {
   const { data: health } = useAppHealth();
@@ -36,20 +37,12 @@ export function AppShell() {
     [docs.data],
   );
 
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void listen<ImportProgress>("import-progress", (ev) => {
-      setImportProgress(ev.payload);
-      if (ev.payload.phase === "done" || ev.payload.status === "completed") {
-        setImportProgress(null);
-      }
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => {
-      unlisten?.();
-    };
-  }, []);
+  useTauriEvent<ImportProgress>("import-progress", (ev) => {
+    setImportProgress(ev.payload);
+    if (ev.payload.phase === "done" || ev.payload.status === "completed") {
+      setImportProgress(null);
+    }
+  });
 
   return (
     <div className="flex h-screen flex-col bg-bg text-text">

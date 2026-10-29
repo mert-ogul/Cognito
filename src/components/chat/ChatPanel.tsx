@@ -7,13 +7,14 @@ import {
   type ChatTurn,
   type CitationItem,
 } from "@/lib/tauri";
-import { listen } from "@/lib/tauri-events";
+import { useTauriEvent } from "@/lib/tauri-events";
 import { cn } from "@/lib/utils";
 import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+
 
 type ChatMessage = {
   id: string;
@@ -135,53 +136,41 @@ export function ChatPanel({ health }: Props) {
     void retryWarmUp();
   }, [health?.ollamaModelReady, health?.warmUpError, retryWarmUp]);
 
-  useEffect(() => {
-    const un: Array<() => void> = [];
-    let cancelled = false;
-    void (async () => {
-      const u1 = await listen<{ messageId: string; token: string }>("chat-stream", (ev) => {
-        const { messageId, token } = ev.payload;
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === messageId && m.role === "assistant" ? { ...m, text: m.text + token } : m,
-          ),
-        );
-      });
-      const u2 = await listen<{
-        messageId: string;
-        citations: CitationItem[];
-        retrievalMode: string;
-        error?: string | null;
-      }>("chat-final", (ev) => {
-        const p = ev.payload;
-        setBusyId(null);
-        if (p.error) {
-          setRetryUserText(lastSentRef.current);
-        } else {
-          setRetryUserText(null);
-        }
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === p.messageId && m.role === "assistant"
-              ? {
-                  ...m,
-                  citations: p.citations,
-                  retrievalMode: p.retrievalMode,
-                  error: p.error ?? undefined,
-                }
-              : m,
-          ),
-        );
-      });
-      if (!cancelled) {
-        un.push(u1, u2);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      un.forEach((f) => f());
-    };
-  }, []);
+  useTauriEvent<{ messageId: string; token: string }>("chat-stream", (ev) => {
+    const { messageId, token } = ev.payload;
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === messageId && m.role === "assistant" ? { ...m, text: m.text + token } : m,
+      ),
+    );
+  });
+
+  useTauriEvent<{
+    messageId: string;
+    citations: CitationItem[];
+    retrievalMode: string;
+    error?: string | null;
+  }>("chat-final", (ev) => {
+    const p = ev.payload;
+    setBusyId(null);
+    if (p.error) {
+      setRetryUserText(lastSentRef.current);
+    } else {
+      setRetryUserText(null);
+    }
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === p.messageId && m.role === "assistant"
+          ? {
+              ...m,
+              citations: p.citations,
+              retrievalMode: p.retrievalMode,
+              error: p.error ?? undefined,
+            }
+          : m,
+      ),
+    );
+  });
 
   const openCitation = useCallback(
     async (c: CitationItem) => {

@@ -12,10 +12,11 @@ import {
   type GraphExtractionProgress,
   type ImportProgress,
 } from "@/lib/tauri";
-import { listen } from "@/lib/tauri-events";
+import { useTauriEvent } from "@/lib/tauri-events";
 import { cn } from "@/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
+
 
 function fileName(path: string): string {
   const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
@@ -107,29 +108,18 @@ export function SourcesPanel() {
     void qc.invalidateQueries({ queryKey: ["documents"] });
   }, [qc]);
 
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let unGraph: (() => void) | undefined;
-    void listen<ImportProgress>("import-progress", (ev) => {
-      setProgress(ev.payload);
-      if (ev.payload.phase === "done" || ev.payload.status === "completed") {
-        setGraphProgress(null);
-      }
-      invalidateDocs();
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    void listen<GraphExtractionProgress>("graph-extraction-progress", (ev) => {
-      setGraphProgress(ev.payload);
-      invalidateDocs();
-    }).then((fn) => {
-      unGraph = fn;
-    });
-    return () => {
-      unlisten?.();
-      unGraph?.();
-    };
-  }, [invalidateDocs]);
+  useTauriEvent<ImportProgress>("import-progress", (ev) => {
+    setProgress(ev.payload);
+    if (ev.payload.phase === "done" || ev.payload.status === "completed") {
+      setGraphProgress(null);
+    }
+    invalidateDocs();
+  });
+
+  useTauriEvent<GraphExtractionProgress>("graph-extraction-progress", (ev) => {
+    setGraphProgress(ev.payload);
+    invalidateDocs();
+  });
 
   useEffect(() => {
     let un: (() => void) | undefined;

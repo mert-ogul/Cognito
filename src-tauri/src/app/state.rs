@@ -5,7 +5,7 @@ use crate::errors::{CognitoError, CognitoResult};
 use crate::sidecar::SidecarPool;
 use rusqlite::Connection as SqlConn;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +23,8 @@ pub struct AppState {
     /// `None` = warm-up not finished yet.
     pub chat_warm: Mutex<Option<ChatWarmResult>>,
     pub import_running: AtomicBool,
+    /// Active `send_chat_query` tasks; graph worker pauses while this is above zero.
+    pub chat_in_flight: AtomicUsize,
 }
 
 impl AppState {
@@ -39,6 +41,7 @@ impl AppState {
             graph_tx: Mutex::new(None),
             chat_warm: Mutex::new(None),
             import_running: AtomicBool::new(false),
+            chat_in_flight: AtomicUsize::new(0),
         }
     }
 

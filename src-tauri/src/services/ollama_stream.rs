@@ -3,6 +3,9 @@
 use futures_util::StreamExt;
 use serde_json::Value;
 
+/// Context window for every chat-model request. Keep in sync with sidecar `CHAT_CONTEXT_TOKENS`.
+pub const CHAT_CONTEXT_TOKENS: u64 = 8192;
+
 pub(crate) fn ollama_base_url() -> String {
     let raw = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
     if raw.starts_with("http://") || raw.starts_with("https://") {
@@ -23,6 +26,7 @@ pub async fn stream_chat_completion(
         "model": model,
         "messages": messages,
         "stream": true,
+        "options": { "num_ctx": CHAT_CONTEXT_TOKENS },
     });
     let res = client
         .post(&url)

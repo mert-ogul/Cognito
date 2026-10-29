@@ -6,7 +6,7 @@ Phases (seconds):
   parse, chunk, sqlite insert, embed, graph extraction (optional), query (optional)
 
 Requires: sidecar deps (`uv sync`). Default uses COGNITO_MOCK_EMBED=1 so Ollama is not needed
-for parse/chunk/embed timings. Graph extraction still calls the LLM unless --skip-graph.
+for parse/chunk/embed timings. Graph extraction runs in the Rust desktop app (not timed here).
 
 Memory: `getrusage` max RSS at start/end (`memoryMaxRssBytes`); **macOS reports bytes**, Linux reports KiB converted to bytes in the script.
 """
@@ -14,7 +14,6 @@ Memory: `getrusage` max RSS at start/end (`memoryMaxRssBytes`); **macOS reports 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import os
 import resource
@@ -32,7 +31,6 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from ingestion.chunking import estimate_tokens, hash_chunk_text
-from extraction.extraction_service import extract_document_graph_async
 from ingestion.rpc_ingest import rpc_chunk_documents, rpc_embed_chunks, rpc_parse_documents
 from query.chat_pipeline import prepare_chat_retrieval
 
@@ -95,17 +93,7 @@ def main() -> int:
         default=True,
         help="Use COGNITO_MOCK_EMBED=1 (default: true)",
     )
-    parser.add_argument(
-        "--graph",
-        action="store_true",
-        help="Time graph extraction (requires Ollama + chat model; slow)",
-    )
     parser.add_argument("--skip-query", action="store_true", help="Skip prepare_chat_retrieval timing")
-    parser.add_argument(
-        "--chat-model",
-        default=os.environ.get("COGNITO_BENCH_CHAT_MODEL", "phi4-mini"),
-        help="Chat model for graph extraction",
-    )
     parser.add_argument(
         "--embed-model",
         default=os.environ.get("COGNITO_BENCH_EMBED_MODEL", "nomic-embed-text"),
@@ -152,7 +140,6 @@ def main() -> int:
         import sqlite3
 
         now = "2020-01-01T00:00:00Z"
-        doc_ids: list[str] = []
         by_path = {str(Path(it["path"]).resolve()): it for it in items}
 
         # --- insert rows + embed per document ---
@@ -166,7 +153,6 @@ def main() -> int:
             if not src:
                 continue
             doc_id = f"bench-doc-{idx}"
-            doc_ids.append(doc_id)
             con = sqlite3.connect(db)
             con.execute(
                 """INSERT INTO documents (id, path, title, file_type, content_hash, page_count,
@@ -233,19 +219,6 @@ def main() -> int:
         db_s = time.perf_counter() - t_db0 - t_embed_total
         embed_s = t_embed_total
 
-        graph_s = None
-        graph_chunks = 0
-        if args.graph:
-            t_g0 = time.perf_counter()
-            for doc_id in doc_ids:
-                out = asyncio.run(
-                    extract_document_graph_async(
-                        str(db), str(duck), doc_id, args.chat_model
-                    )
-                )
-                graph_chunks += int(out.get("chunksProcessed") or 0)
-            graph_s = time.perf_counter() - t_g0
-
         query_s = None
         if not args.skip_query:
             t_q0 = time.perf_counter()
@@ -281,9 +254,6 @@ def main() -> int:
             "totalWallSeconds": round(total_s, 4),
             "mockEmbed": args.mock_embed,
         }
-        if graph_s is not None:
-            report["timingsSeconds"]["graphExtraction"] = round(graph_s, 4)
-            report["graphChunksProcessed"] = graph_chunks
         if query_s is not None:
             report["timingsSeconds"]["queryLatencyThreeCalls"] = round(query_s, 4)
             report["timingsSeconds"]["queryLatencyAvgPerCall"] = round(query_s / 3.0, 4)

@@ -22,7 +22,9 @@ from extraction.node_normalizer import normalize_name
 
 _CITE_MARK_RE = re.compile(r"\[\d+\]")
 _HISTORY_TURN_CAP = 2000
-_HISTORY_TOTAL_CAP = 6000
+_HISTORY_TOTAL_CAP = 4000
+_GRAPH_BLOCK_CAP = 3000
+_PROMPT_TOTAL_CAP = 24000
 
 
 class EmbeddingDimMismatch(Exception):
@@ -378,9 +380,13 @@ def prepare_chat_retrieval(
     for i, c in enumerate(prompt_chunks):
         n = i + 1
         snippet = (c["text"] or "")[:1200]
-        evidence_parts.append(
-            f"[{n}] title={c['title']} document_id={c['document_id']} chunk_id={c['chunk_id']}\n{snippet}"
-        )
+        title = c["title"] or ""
+        page = c.get("page_start")
+        if page is not None:
+            label = f"[{n}] {title}, p. {page}"
+        else:
+            label = f"[{n}] {title}"
+        evidence_parts.append(f"{label}\n{snippet}")
         nids = chunk_node_ids.get(c["chunk_id"], []) if retrieval_mode == "hybrid" else []
         citations.append(
             {
@@ -400,18 +406,27 @@ def prepare_chat_retrieval(
     if len(evidence_body) > max_evidence_chars:
         evidence_body = evidence_body[:max_evidence_chars] + "\n…"
 
+    if len(graph_block) > _GRAPH_BLOCK_CAP:
+        graph_block = graph_block[:_GRAPH_BLOCK_CAP] + "\n…"
+
     sys_prompt = (
-        "You are a careful assistant. Answer using ONLY the numbered evidence [1]…[n] and GRAPH_EVIDENCE below. "
-        "Cite the numbers you use inline as [n] right after the sentence they support. "
-        "Use only listed numbers. If the evidence does not answer the question, say so briefly. "
-        "If GRAPH_EVIDENCE says it is unavailable, do not invent graph facts. "
-        "Do not fabricate citations. Keep answers concise unless the user asks for detail."
+        "Answer only from the numbered passages. "
+        "Put the passage number in square brackets right after the sentence it supports, like [2]. "
+        'Never write ids, file paths, or the word "document" before a number. '
+        "If the passages do not answer the question, say so in one sentence."
     )
-    user_content = (
-        f"Question:\n{query}\n\n"
-        f"{evidence_body}\n\n"
-        f"{graph_block}"
-    )
+
+    def _prompt_len(hist: list[dict[str, str]], graph: str) -> int:
+        user = f"Question:\n{query}\n\n{evidence_body}\n\n{graph}"
+        return len(sys_prompt) + sum(len(m["content"]) for m in hist) + len(user)
+
+    while _prompt_len(hist_msgs, graph_block) > _PROMPT_TOTAL_CAP and hist_msgs:
+        hist_msgs.pop(0)
+    if _prompt_len(hist_msgs, graph_block) > _PROMPT_TOTAL_CAP and graph_block:
+        over = _prompt_len(hist_msgs, graph_block) - _PROMPT_TOTAL_CAP
+        keep = max(0, len(graph_block) - over - 1)
+        graph_block = (graph_block[:keep] + "…") if keep else ""
+    user_content = f"Question:\n{query}\n\n{evidence_body}\n\n{graph_block}"
 
     return {
         "retrievalMode": retrieval_mode,
@@ -419,7 +434,7 @@ def prepare_chat_retrieval(
         "messages": [
             {"role": "system", "content": sys_prompt},
             *hist_msgs,
-            {"role": "user", "content": user_content[:14000]},
+            {"role": "user", "content": user_content},
         ],
         "graphAugmented": graph_augmented,
         "graphNodeIds": graph_node_ids,

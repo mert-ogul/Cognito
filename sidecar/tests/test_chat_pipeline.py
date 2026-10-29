@@ -88,7 +88,10 @@ def test_evidence_numbered_and_citations_carry_index(
     d = tempfile.mkdtemp()
     out = cp.prepare_chat_retrieval(str(Path(d) / "v.sqlite"), None, "what is ml", "nomic-embed-text")
     user = out["messages"][-1]["content"]
-    assert "[1]" in user and "[2]" in user
+    assert "[1] ML, p. 1" in user and "[2] ML, p. 2" in user
+    assert "document_id=" not in user
+    assert "chunk_id=" not in user
+    assert "d1" not in user and "c1" not in user and "c2" not in user
     assert [c["index"] for c in out["citations"]] == [1, 2]
 
 
@@ -169,9 +172,48 @@ def test_history_inserted_stripped_and_capped(mock_embed: None, monkeypatch: pyt
         if m["role"] == "assistant":
             assert "[1]" not in m["content"] and "[2]" not in m["content"]
         assert len(m["content"]) <= 2000
-    assert sum(len(m["content"]) for m in mid) <= 6000
+    assert sum(len(m["content"]) for m in mid) <= 4000
     # Oldest turns dropped first when over cap.
     assert not any(m["content"] == "first question" for m in mid)
+
+
+def test_prompt_stays_under_budget_with_long_history(
+    mock_embed: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import query.chat_pipeline as cp
+
+    long_chunks = [
+        {
+            "chunk_id": f"c{i}",
+            "document_id": f"d{i}",
+            "text": "passage body " * 80,
+            "page_start": i if i % 2 else None,
+            "page_end": i if i % 2 else None,
+            "title": f"Title {i}",
+            "path": f"/vault/doc{i}.pdf",
+        }
+        for i in range(1, 9)
+    ]
+    monkeypatch.setattr(cp, "vector_top_k", lambda *a, **k: long_chunks)
+    d = tempfile.mkdtemp()
+    history = [{"role": "user" if i % 2 == 0 else "assistant", "content": "h" * 1900} for i in range(12)]
+    out = cp.prepare_chat_retrieval(
+        str(Path(d) / "v.sqlite"),
+        None,
+        "current question",
+        "nomic-embed-text",
+        history=history,
+    )
+    msgs = out["messages"]
+    assert msgs[0]["role"] == "system"
+    total = sum(len(m["content"]) for m in msgs)
+    assert total <= 24000
+    joined = "\n".join(m["content"] for m in msgs)
+    assert "document_id=" not in joined
+    assert "chunk_id=" not in joined
+    assert "d1" not in joined
+    assert "[1] Title 1, p. 1" in joined
+    assert "[2] Title 2\n" in joined
 
 
 def test_embed_query_includes_previous_user_question() -> None:

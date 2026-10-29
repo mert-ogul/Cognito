@@ -3,10 +3,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import App from "./App";
 
-vi.mock("@/lib/tauri-events", () => ({
-  listen: vi.fn(async () => () => {}),
-}));
-
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (cmd: string) => {
     if (cmd === "get_app_health") {

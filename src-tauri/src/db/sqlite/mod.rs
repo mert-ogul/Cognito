@@ -8,6 +8,7 @@ use std::path::Path;
 const MIGRATION_001: &str = include_str!("../../../migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("../../../migrations/002_sqlite_vec_prep.sql");
 const MIGRATION_003: &str = include_str!("../../../migrations/003_graph_stage.sql");
+const MIGRATION_004: &str = include_str!("../../../migrations/004_requeue_graph.sql");
 
 pub fn open_sqlite(path: &Path) -> CognitoResult<Connection> {
     let conn = Connection::open(path).map_err(|e| CognitoError::Database(e.to_string()))?;
@@ -50,6 +51,17 @@ fn migrate(conn: &Connection) -> CognitoResult<()> {
             .map_err(|e| CognitoError::Database(e.to_string()))?;
         let _ = conn.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (3, datetime('now'))",
+            [],
+        );
+        v = 3;
+    }
+    if v < 4 {
+        conn.execute_batch(MIGRATION_004)
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        conn.execute("PRAGMA user_version = 4", [])
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        let _ = conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (4, datetime('now'))",
             [],
         );
     }
@@ -396,6 +408,18 @@ pub fn list_chunk_ids_for_document(conn: &Connection, doc_id: &str) -> CognitoRe
     Ok(out)
 }
 
+pub fn chunk_text_by_id(conn: &Connection, chunk_id: &str) -> CognitoResult<Option<String>> {
+    let row = conn
+        .query_row(
+            "SELECT text FROM chunks WHERE id = ?1",
+            [chunk_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(row)
+}
+
 pub fn next_pending_graph_document(conn: &Connection) -> CognitoResult<Option<String>> {
     let row = conn
         .query_row(
@@ -577,7 +601,7 @@ mod tests {
             let v: i32 = c
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .expect("uv");
-            assert_eq!(v, 3);
+            assert_eq!(v, 4);
             let n: i32 = c
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_embeddings'",

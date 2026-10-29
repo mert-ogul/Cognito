@@ -26,7 +26,7 @@ logging.basicConfig(
 log = logging.getLogger("cognito.sidecar")
 
 from common.ollama import warm_model
-from ingestion.rpc_graph import rpc_extract_graph_chunk, rpc_purge_graph_document
+from ingestion.rpc_graph import rpc_purge_graph_document, rpc_store_graph_chunk
 from ingestion.rpc_ingest import (
     rpc_chunk_documents,
     rpc_embed_chunks,
@@ -69,8 +69,8 @@ def dispatch(method: str, params: dict) -> Any:
         return rpc_purge_chunk_embeddings(params)
     if method == "reset_index":
         return rpc_reset_index(params)
-    if method == "extract_graph_chunk":
-        return rpc_extract_graph_chunk(params)
+    if method == "store_graph_chunk":
+        return rpc_store_graph_chunk(params)
     if method == "purge_graph_document":
         return rpc_purge_graph_document(params)
     if method == "prepare_chat_retrieval":

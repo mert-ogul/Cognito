@@ -11,7 +11,6 @@ import duckdb
 
 from common.duckdb_util import ensure_schema
 from extraction.extraction_result import ExtractedEdge, ExtractedEntity
-from extraction.node_normalizer import normalize_name
 
 
 def node_id_from_normalized(normalized: str) -> str:
@@ -68,59 +67,6 @@ def purge_document_graph(duck_path: str, document_id: str) -> None:
         con.commit()
     finally:
         con.close()
-
-
-def lightrag_maps_to_records(
-    maybe_nodes: dict[str, Any],
-    maybe_edges: dict[tuple[str, str], Any],
-) -> tuple[list[ExtractedEntity], list[ExtractedEdge]]:
-    """Convert LightRAG per-chunk dicts into merge records (names normalized)."""
-    entities: list[ExtractedEntity] = []
-    seen: set[str] = set()
-    for name, recs in maybe_nodes.items():
-        if not recs:
-            continue
-        first = recs[0]
-        kind = str(first.get("entity_type", "concept"))[:64]
-        norm = normalize_name(name)
-        if len(norm) < 2:
-            continue
-        key = norm
-        if key in seen:
-            continue
-        seen.add(key)
-        conf = 0.82
-        entities.append(
-            ExtractedEntity(
-                display_name=str(name)[:512],
-                kind=kind,
-                normalized_name=norm,
-                confidence=conf,
-            )
-        )
-    edges: list[ExtractedEdge] = []
-    for (src, tgt), recs in maybe_edges.items():
-        if not recs:
-            continue
-        first = recs[0]
-        w = float(first.get("weight", 1.0))
-        w = max(0.0, min(1.0, w))
-        desc = str(first.get("description", "") or first.get("keywords", "") or "related")[
-            :512
-        ]
-        sn = normalize_name(src)
-        tn = normalize_name(tgt)
-        if len(sn) < 2 or len(tn) < 2:
-            continue
-        edges.append(
-            ExtractedEdge(
-                source_normalized=sn,
-                target_normalized=tn,
-                relation=desc[:256] if desc else "related",
-                confidence=w,
-            )
-        )
-    return entities, edges
 
 
 def _ensure_stub_node(
