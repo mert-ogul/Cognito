@@ -48,8 +48,12 @@ jobs:
             libwebkit2gtk-4.1-dev libgtk-3-dev libglib2.0-dev \
             libayatana-appindicator3-dev librsvg2-dev patchelf
       # tauri.conf.json bundles resources/sidecar; that path is gitignored — package-sidecar creates it.
+      # package:sidecar installs a standalone CPython into resources/; cargo --include-ignored
+      # still uses the repo sidecar/.venv (see ingest integration test ignore reason).
       - run: npm ci
       - run: npm run package:sidecar
+      - working-directory: sidecar
+        run: uv sync
       - working-directory: src-tauri
         run: cargo test -- --include-ignored
       - working-directory: src-tauri
