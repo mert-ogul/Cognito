@@ -5,13 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import duckdb
+
+from common.duckdb_util import ensure_schema
 from common.ollama import embed_text
 from common.sqlite_vec_util import (
+    MOCK_EMBED_DIM,
     connect_with_vec,
     delete_embeddings_for_chunk_ids,
     ensure_chunk_embedding_table,
     insert_chunk_embedding,
     mock_embed_enabled,
+    table_dimension,
 )
 from ingestion.chunking import chunk_semantic, estimate_tokens, hash_chunk_text
 from ingestion.parsing import parse_file
@@ -62,25 +67,24 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
 
 def _embed_one(model: str, text: str) -> list[float]:
     if mock_embed_enabled():
-        return [0.0] * 768
+        return [0.0] * MOCK_EMBED_DIM
     return embed_text(model, text[:8000])
 
 
 def rpc_embed_chunks(params: dict[str, Any]) -> dict[str, Any]:
     sqlite_path = str(params["sqlitePath"])
     model = str(params["embedModel"])
-    document_id = str(params.get("documentId", ""))
     items = params["items"]
     con = connect_with_vec(sqlite_path)
-    ensure_chunk_embedding_table(con)
     failed: list[dict[str, str]] = []
     try:
         for item in items:
             cid = str(item["chunkId"])
             text = str(item["text"])
-            ord_i = int(item.get("ordinal", 0))
             try:
                 vec = _embed_one(model, text)
+                if table_dimension(con) is None:
+                    ensure_chunk_embedding_table(con, len(vec))
                 insert_chunk_embedding(con, cid, vec)
             except Exception as exc:  # noqa: BLE001
                 failed.append({"chunkId": cid, "error": str(exc)[:240]})
@@ -96,10 +100,30 @@ def rpc_purge_chunk_embeddings(params: dict[str, Any]) -> dict[str, Any]:
     if not ids:
         return {"ok": True}
     con = connect_with_vec(sqlite_path)
-    ensure_chunk_embedding_table(con)
     try:
+        if table_dimension(con) is None:
+            return {"ok": True}
         delete_embeddings_for_chunk_ids(con, ids)
         con.commit()
     finally:
         con.close()
+    return {"ok": True}
+
+
+def rpc_reset_index(params: dict[str, Any]) -> dict[str, Any]:
+    sqlite_path = str(params["sqlitePath"])
+    duck_path = str(params["duckPath"])
+    con = connect_with_vec(sqlite_path)
+    try:
+        con.execute("DROP TABLE IF EXISTS chunk_embeddings")
+        con.commit()
+    finally:
+        con.close()
+    ensure_schema(duck_path)
+    duck = duckdb.connect(duck_path)
+    try:
+        duck.execute("DELETE FROM graph_edges")
+        duck.execute("DELETE FROM graph_nodes")
+    finally:
+        duck.close()
     return {"ok": True}

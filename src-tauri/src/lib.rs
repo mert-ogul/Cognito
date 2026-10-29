@@ -91,6 +91,7 @@ pub fn run() {
             commands::send_chat_query,
             commands::import_documents,
             commands::retry_failed_import,
+            commands::rebuild_index,
             commands::get_settings,
             commands::update_settings,
             commands::search_graph,

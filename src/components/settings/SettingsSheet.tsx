@@ -3,23 +3,29 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { getSettings, updateSettings } from "@/lib/tauri";
+import { getSettings, listDocuments, rebuildIndex, updateSettings } from "@/lib/tauri";
 import { getVersion } from "@tauri-apps/api/app";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 };
 
+type ConfirmKind = "save-rebuild" | "rebuild" | null;
+
 export function SettingsSheet({ open, onOpenChange }: Props) {
   const qc = useQueryClient();
   const { data } = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: open });
+  const docs = useQuery({ queryKey: ["documents"], queryFn: listDocuments, enabled: open });
   const [chat, setChat] = useState("phi4-mini");
   const [embed, setEmbed] = useState("nomic-embed-text");
   const [graphOn, setGraphOn] = useState(true);
   const [ver, setVer] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmKind>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -37,9 +43,28 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     setChat(data.chatModel);
     setEmbed(data.embedModel);
     setGraphOn(data.graphExtractionEnabled);
+    setConfirm(null);
+    setActionError(null);
   }, [data]);
 
-  const save = useMutation({
+  const docCount = docs.data?.length ?? 0;
+  const embedChanged = !!data && embed.trim() !== data.embedModel;
+  const needsRebuildSave = embedChanged && docCount > 0;
+  const confirmModel = confirm === "save-rebuild" ? embed.trim() : (data?.embedModel ?? embed);
+
+  const confirmText = useMemo(() => {
+    if (!confirm) return null;
+    return `All ${docCount} documents will be indexed again with ${confirmModel}, and the graph will be rebuilt.`;
+  }, [confirm, confirmModel, docCount]);
+
+  const invalidate = () => {
+    void qc.invalidateQueries({ queryKey: ["settings"] });
+    void qc.invalidateQueries({ queryKey: ["health"] });
+    void qc.invalidateQueries({ queryKey: ["documents"] });
+    void qc.invalidateQueries({ queryKey: ["graph-snapshot"] });
+  };
+
+  const savePlain = useMutation({
     mutationFn: () =>
       updateSettings({
         vaultPath: data?.vaultPath ?? null,
@@ -47,11 +72,53 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
         embedModel: embed,
         graphExtractionEnabled: graphOn,
       }),
+    onMutate: () => setActionError(null),
     onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["settings"] });
-      void qc.invalidateQueries({ queryKey: ["health"] });
+      invalidate();
     },
+    onError: (e) => setActionError(String(e)),
   });
+
+  const onSaveClick = () => {
+    setActionError(null);
+    if (needsRebuildSave) {
+      setConfirm("save-rebuild");
+      return;
+    }
+    savePlain.mutate();
+  };
+
+  const cancelConfirm = () => {
+    if (confirm === "save-rebuild" && data) {
+      setEmbed(data.embedModel);
+    }
+    setConfirm(null);
+  };
+
+  const runConfirmed = async () => {
+    if (!data || !confirm) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      if (confirm === "save-rebuild") {
+        await updateSettings({
+          vaultPath: data.vaultPath ?? null,
+          chatModel: chat,
+          embedModel: data.embedModel,
+          graphExtractionEnabled: graphOn,
+        });
+        await rebuildIndex(embed.trim());
+      } else {
+        await rebuildIndex();
+      }
+      setConfirm(null);
+      invalidate();
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -95,12 +162,45 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
           <p className="font-mono">App version: {ver ?? "…"}</p>
           <p className="mt-1">First-import document cap: 100 (MVP).</p>
         </div>
-        <div className="flex justify-end gap-2">
+        {confirm ? (
+          <div className="space-y-2 rounded-md border border-[var(--border)] p-3">
+            <p className="text-xs">{confirmText}</p>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" size="sm" disabled={busy} onClick={() => void runConfirmed()}>
+                {busy ? "Working…" : "Confirm"}
+              </Button>
+              <Button type="button" size="sm" variant="outline" disabled={busy} onClick={cancelConfirm}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : null}
+        {actionError ? (
+          <p className="text-xs text-red-500" role="alert">
+            {actionError}
+          </p>
+        ) : null}
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy || savePlain.isPending || docCount === 0}
+            onClick={() => {
+              setActionError(null);
+              setConfirm("rebuild");
+            }}
+          >
+            Rebuild index
+          </Button>
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             Close
           </Button>
-          <Button type="button" onClick={() => save.mutate()} disabled={save.isPending}>
-            Save
+          <Button
+            type="button"
+            onClick={onSaveClick}
+            disabled={busy || savePlain.isPending || !!confirm}
+          >
+            {needsRebuildSave ? "Save and rebuild index" : "Save"}
           </Button>
         </div>
       </DialogContent>

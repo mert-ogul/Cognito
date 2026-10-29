@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from common.sqlite_vec_util import connect_with_vec, ensure_chunk_embedding_table
+from common.sqlite_vec_util import connect_with_vec
 from ingestion.chunking import chunk_semantic, estimate_tokens, hash_chunk_text
 from ingestion.parsing import parse_file
 from ingestion.rpc_ingest import rpc_embed_chunks
@@ -100,7 +100,6 @@ def test_five_markdown_files_indexed(tmp_path: Path, mock_embed: None) -> None:
         assert out.get("ok") is True
 
     con = connect_with_vec(str(db))
-    ensure_chunk_embedding_table(con)
     n_vec = con.execute("SELECT COUNT(*) FROM chunk_embeddings").fetchone()[0]
     con.close()
     n_chunks = sqlite3.connect(db).execute("SELECT COUNT(*) FROM chunks").fetchone()[0]

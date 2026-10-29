@@ -24,6 +24,17 @@ pub async fn update_settings(
     let prev = st
         .with_sqlite(|c| sqlite::load_settings(c))
         .map_err(|e| e.to_string())?;
+    let index_embed = st
+        .with_sqlite(|c| sqlite::get_setting(c, "index_embed_model"))
+        .map_err(|e| e.to_string())?;
+    let active = st
+        .with_sqlite(|c| sqlite::count_active_documents(c))
+        .map_err(|e| e.to_string())?;
+    if let Some(ref indexed) = index_embed {
+        if payload.embed_model != *indexed && active > 0 {
+            return Err("Changing the embedding model requires rebuilding the index.".into());
+        }
+    }
     let chat_changed = payload.chat_model != prev.chat_model;
     let graph_turned_on =
         payload.graph_extraction_enabled && !prev.graph_extraction_enabled;

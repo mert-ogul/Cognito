@@ -32,6 +32,7 @@ from ingestion.rpc_ingest import (
     rpc_embed_chunks,
     rpc_parse_documents,
     rpc_purge_chunk_embeddings,
+    rpc_reset_index,
 )
 from common.duckdb_util import ensure_schema
 from query.graph_read import node_detail as graph_node_detail
@@ -73,6 +74,8 @@ def dispatch(method: str, params: dict) -> Any:
         return rpc_embed_chunks(params)
     if method == "purge_chunk_embeddings":
         return rpc_purge_chunk_embeddings(params)
+    if method == "reset_index":
+        return rpc_reset_index(params)
     if method == "extract_graph_chunk":
         return rpc_extract_graph_chunk(params)
     if method == "purge_graph_document":
