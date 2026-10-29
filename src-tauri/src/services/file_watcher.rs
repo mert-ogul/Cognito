@@ -3,6 +3,7 @@
 use crate::app::state::SharedState;
 use crate::db::sqlite;
 use crate::errors::{CognitoError, CognitoResult};
+use crate::events::LIBRARY_CHANGED;
 use crate::services::ingest;
 use crate::services::watcher_action;
 use crate::vault;
@@ -13,6 +14,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use tauri::{AppHandle, Emitter};
 
 fn sp(path: &Path) -> String {
     path.to_string_lossy().into_owned()
@@ -49,7 +51,7 @@ fn purge_then_remove(state: &SharedState, path: &Path) -> CognitoResult<()> {
     Ok(())
 }
 
-pub fn handle_watch_paths(state: &SharedState, paths: &[PathBuf]) {
+pub fn handle_watch_paths(state: &SharedState, app: Option<&AppHandle>, paths: &[PathBuf]) {
     let Ok((vault, embed, chat)) = load_context(state) else {
         return;
     };
@@ -65,6 +67,9 @@ pub fn handle_watch_paths(state: &SharedState, paths: &[PathBuf]) {
                 let _ = ingest::run_single_file(state, None, &vault, p, &embed, &chat);
             }
         }
+    }
+    if let Some(a) = app {
+        let _ = a.emit(LIBRARY_CHANGED, &());
     }
 }
 
@@ -108,6 +113,7 @@ fn restart_watcher(
 
 fn coordinator_loop(
     state: SharedState,
+    app: AppHandle,
     reload_rx: Receiver<PathBuf>,
     file_rx: Receiver<Vec<PathBuf>>,
     file_tx: Sender<Vec<PathBuf>>,
@@ -118,7 +124,7 @@ fn coordinator_loop(
             restart_watcher(&mut active, p, file_tx.clone());
         }
         match file_rx.recv_timeout(Duration::from_millis(400)) {
-            Ok(paths) => handle_watch_paths(&state, &paths),
+            Ok(paths) => handle_watch_paths(&state, Some(&app), &paths),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -129,9 +135,9 @@ fn coordinator_loop(
     }
 }
 
-pub fn spawn_background(state: SharedState, reload_rx: Receiver<PathBuf>) {
+pub fn spawn_background(state: SharedState, app: AppHandle, reload_rx: Receiver<PathBuf>) {
     let (file_tx, file_rx) = mpsc::channel::<Vec<PathBuf>>();
     let tx_loop = file_tx.clone();
     let st = state.clone();
-    thread::spawn(move || coordinator_loop(st, reload_rx, file_rx, tx_loop));
+    thread::spawn(move || coordinator_loop(st, app, reload_rx, file_rx, tx_loop));
 }

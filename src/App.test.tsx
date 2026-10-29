@@ -42,8 +42,6 @@ vi.mock("@tauri-apps/api/core", () => ({
         vaultPath: null,
         chatModel: "phi4-mini",
         embedModel: "nomic-embed-text",
-        telemetryOptIn: false,
-        crashReportingOptIn: false,
         graphExtractionEnabled: true,
       };
     }

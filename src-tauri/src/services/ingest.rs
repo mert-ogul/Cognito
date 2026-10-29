@@ -421,6 +421,9 @@ pub fn run_import_job(
         None,
         None,
     );
+    if let Some(ref a) = app {
+        let _ = a.emit(crate::events::LIBRARY_CHANGED, &());
+    }
     state.notify_graph_worker();
     Ok(())
 }
@@ -751,7 +754,7 @@ mod tests {
             .expect("assert reindex graph ok");
 
         std::fs::remove_file(&note_abs).expect("delete note.md");
-        file_watcher::handle_watch_paths(&state, &[note_abs.clone()]);
+        file_watcher::handle_watch_paths(&state, None, &[note_abs.clone()]);
         state
             .with_sqlite(|conn| {
                 let status: String = conn

@@ -1,6 +1,6 @@
 use crate::app::state::SharedState;
 use crate::db::sqlite;
-use crate::events::IMPORT_PROGRESS;
+use crate::events::{IMPORT_PROGRESS, LIBRARY_CHANGED};
 use crate::models::{DocumentPreview, DocumentRow, ImportProgress};
 use crate::services::import_job;
 use crate::services::ingest;
@@ -75,6 +75,7 @@ fn spawn_import_job(
                     error_message: Some(e.to_string()),
                 },
             );
+            let _ = app_c.emit(LIBRARY_CHANGED, &());
         }
         st.import_running.store(false, Ordering::SeqCst);
     });

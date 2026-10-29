@@ -130,13 +130,25 @@ export function ChatPanel({ health }: Props) {
       setRetryUserText(null);
       lastSentRef.current = query;
       const userId = crypto.randomUUID();
-      const assistantId = await sendChatQuery(query);
+      const assistantId = crypto.randomUUID();
       setMessages((prev) => [
         ...prev,
         { id: userId, role: "user", text: query },
         { id: assistantId, role: "assistant", text: "" },
       ]);
       setBusyId(assistantId);
+      try {
+        await sendChatQuery(query, assistantId);
+      } catch (e) {
+        const msg = String(e);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId && m.role === "assistant" ? { ...m, error: msg } : m,
+          ),
+        );
+        setBusyId(null);
+        setRetryUserText(query);
+      }
     },
     [ready, busyId],
   );
