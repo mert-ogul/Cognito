@@ -1,9 +1,8 @@
-"""PDF (PyMuPDF) and Markdown text extraction with heading context."""
+"""PDF (PyMuPDF) and Markdown text extraction."""
 
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -13,37 +12,21 @@ def hash_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def read_pdf_text(path: Path) -> tuple[str, int]:
+def read_pdf_text(path: Path) -> tuple[str, list[dict], int]:
     doc = fitz.open(path)
     try:
-        parts: list[str] = []
+        pages: list[dict] = []
         for i in range(len(doc)):
             page = doc.load_page(i)
-            parts.append(page.get_text("text") or "")
-        return "\n\n".join(parts), len(doc)
+            pages.append({"page": i + 1, "text": page.get_text("text") or ""})
+        text = "\n\n".join(p["text"] for p in pages)
+        return text, pages, len(doc)
     finally:
         doc.close()
 
 
-def read_markdown_with_context(path: Path) -> tuple[str, int | None]:
-    raw = path.read_text(encoding="utf-8", errors="replace")
-    lines = raw.splitlines()
-    sections: list[str] = []
-    trail: list[str] = []
-    for line in lines:
-        if re.match(r"^#{1,6}\s+", line):
-            if trail:
-                sections.append("\n".join(trail))
-                trail = []
-            trail.append(line)
-        else:
-            trail.append(line)
-    if trail:
-        sections.append("\n".join(trail))
-    merged = "\n\n".join(s for s in sections if s.strip())
-    if not merged.strip():
-        merged = raw
-    return merged, None
+def read_markdown_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def parse_file(path: Path) -> dict:
@@ -51,20 +34,24 @@ def parse_file(path: Path) -> dict:
     chash = hash_bytes(raw)
     suf = path.suffix.lower()
     if suf == ".pdf":
-        text, pages = read_pdf_text(path)
-        ftype = "pdf"
-        page_count: int | None = pages
-    elif suf in (".md", ".markdown"):
-        text, _ = read_markdown_with_context(path)
-        ftype = "markdown"
-        page_count = None
-    else:
-        raise ValueError(f"unsupported file type: {suf}")
-    return {
-        "path": str(path.resolve()),
-        "title": path.stem,
-        "fileType": ftype,
-        "pageCount": page_count,
-        "text": text,
-        "contentHash": chash,
-    }
+        text, pages, page_count = read_pdf_text(path)
+        return {
+            "path": str(path.resolve()),
+            "title": path.stem,
+            "fileType": "pdf",
+            "pageCount": page_count,
+            "text": text,
+            "pages": pages,
+            "contentHash": chash,
+        }
+    if suf in (".md", ".markdown"):
+        text = read_markdown_text(path)
+        return {
+            "path": str(path.resolve()),
+            "title": path.stem,
+            "fileType": "markdown",
+            "pageCount": None,
+            "text": text,
+            "contentHash": chash,
+        }
+    raise ValueError(f"unsupported file type: {suf}")

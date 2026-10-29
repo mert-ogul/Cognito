@@ -46,6 +46,10 @@ pub struct DocumentPreview {
     /// Optional passage to scroll/highlight in the preview UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highlight_snippet: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_end: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

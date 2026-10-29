@@ -139,24 +139,35 @@ export type CitationItem = {
 
 export async function getDocumentPreview(
   documentId: string,
-  highlightSnippet?: string | null,
+  chunkId?: string | null,
 ): Promise<{
   documentId: string;
   text: string | null;
   highlightSnippet: string | null;
+  pageStart: number | null;
+  pageEnd: number | null;
 }> {
   if (e2e) {
     const t = "Intro\n\nfixture evidence text\n\noutro";
     return {
       documentId,
       text: t,
-      highlightSnippet: highlightSnippet ?? null,
+      highlightSnippet: "fixture evidence text",
+      pageStart: null,
+      pageEnd: null,
     };
   }
   return invoke("get_document_preview", {
     documentId,
-    highlightSnippet: highlightSnippet ?? null,
+    chunkId: chunkId ?? null,
   });
+}
+
+export async function openDocument(documentId: string): Promise<void> {
+  if (e2e) {
+    return;
+  }
+  return invoke("open_document", { documentId });
 }
 
 export async function sendChatQuery(query: string, messageId: string): Promise<string> {

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import fitz
 
-from ingestion.parsing import parse_file, read_markdown_with_context
+from ingestion.parsing import parse_file, read_markdown_text
 
 
 def _write_mini_pdf(path: Path) -> None:
@@ -26,12 +26,13 @@ def test_parse_markdown_fixture(tmp_path: Path) -> None:
     assert out["fileType"] == "markdown"
     assert "Section A" in out["text"]
     assert out["pageCount"] is None
+    assert "pages" not in out
 
 
-def test_markdown_heading_context(tmp_path: Path) -> None:
+def test_markdown_text_includes_headings(tmp_path: Path) -> None:
     p = tmp_path / "h.md"
     p.write_text("# H1\n\n## H2\n\nbody\n", encoding="utf-8")
-    text, _pages = read_markdown_with_context(p)
+    text = read_markdown_text(p)
     assert "H2" in text and "body" in text
 
 
@@ -43,3 +44,5 @@ def test_parse_pdf_fixture(tmp_path: Path) -> None:
     assert out["pageCount"] == 1
     assert "Hello PDF" in out["text"]
     assert len(out["contentHash"]) == 64
+    assert out["pages"] == [{"page": 1, "text": out["pages"][0]["text"]}]
+    assert "Hello PDF" in out["pages"][0]["text"]

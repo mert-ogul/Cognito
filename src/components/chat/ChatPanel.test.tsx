@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatPanel } from "./ChatPanel";
+import { ChatPanel, PreviewBody } from "./ChatPanel";
 import { RetrievalModeProvider } from "@/context/RetrievalModeContext";
 import { listen } from "@/lib/tauri-events";
-import { sendChatQuery } from "@/lib/tauri";
+import { getDocumentPreview, openDocument, sendChatQuery } from "@/lib/tauri";
 
 vi.mock("@/lib/tauri-events", () => ({
   listen: vi.fn(async () => () => {}),
@@ -17,6 +17,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
     sendChatQuery: vi.fn(),
     warmChatModel: vi.fn(async () => {}),
     getDocumentPreview: vi.fn(),
+    openDocument: vi.fn(async () => {}),
   };
 });
 
@@ -39,6 +40,8 @@ describe("ChatPanel", () => {
   beforeEach(() => {
     vi.mocked(listen).mockImplementation(async () => () => {});
     vi.mocked(sendChatQuery).mockReset();
+    vi.mocked(getDocumentPreview).mockReset();
+    vi.mocked(openDocument).mockReset();
   });
 
   it("disables send when model not warmed", () => {
@@ -123,5 +126,92 @@ describe("ChatPanel", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("Chat message")).not.toBeDisabled();
     });
+  });
+
+  it("highlights the whole cited chunk and Open file calls openDocument", async () => {
+    let chatFinal:
+      | ((ev: {
+          payload: {
+            messageId: string;
+            citations: Array<{
+              documentId: string;
+              title: string;
+              path: string;
+              pageStart: number | null;
+              pageEnd: number | null;
+              chunkId: string;
+              snippet: string;
+              nodeIds: string[];
+            }>;
+            retrievalMode: string;
+            error?: string | null;
+          };
+        }) => void)
+      | undefined;
+    vi.mocked(listen).mockImplementation(async (event, handler) => {
+      if (event === "chat-final") {
+        chatFinal = handler as typeof chatFinal;
+      }
+      return () => {};
+    });
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      chatFinal?.({
+        payload: {
+          messageId,
+          citations: [
+            {
+              documentId: "doc-1",
+              title: "Report",
+              path: "/vault/report.pdf",
+              pageStart: 12,
+              pageEnd: 12,
+              chunkId: "chunk-1",
+              snippet: "cited body",
+              nodeIds: [],
+            },
+          ],
+          retrievalMode: "hybrid",
+          error: null,
+        },
+      });
+      return messageId;
+    });
+    vi.mocked(getDocumentPreview).mockResolvedValue({
+      documentId: "doc-1",
+      text: "prev\n\ncited body\n\nnext",
+      highlightSnippet: "cited body",
+      pageStart: 12,
+      pageEnd: 12,
+    });
+    const client = new QueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <RetrievalModeProvider>
+          <ChatPanel health={health} />
+        </RetrievalModeProvider>
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(chatFinal).toBeDefined());
+    fireEvent.change(screen.getByLabelText("Chat message"), { target: { value: "ask" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Report/ }));
+    await waitFor(() => {
+      expect(getDocumentPreview).toHaveBeenCalledWith("doc-1", "chunk-1");
+    });
+    expect(await screen.findByText("Report · p. 12")).toBeInTheDocument();
+    const mark = await screen.findByText("cited body");
+    expect(mark.tagName.toLowerCase()).toBe("mark");
+    fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+    await waitFor(() => {
+      expect(openDocument).toHaveBeenCalledWith("doc-1");
+    });
+  });
+});
+
+describe("PreviewBody", () => {
+  it("marks the exact highlight substring", () => {
+    render(<PreviewBody text={"aaa\n\nwhole cited chunk\n\nbbb"} highlight="whole cited chunk" />);
+    const mark = screen.getByText("whole cited chunk");
+    expect(mark.tagName.toLowerCase()).toBe("mark");
   });
 });
