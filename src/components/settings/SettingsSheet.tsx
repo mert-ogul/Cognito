@@ -20,6 +20,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
   const [embed, setEmbed] = useState("nomic-embed-text");
   const [tel, setTel] = useState(false);
   const [crash, setCrash] = useState(false);
+  const [graphOn, setGraphOn] = useState(true);
   const [ver, setVer] = useState<string | null>(null);
 
   useEffect(() => {
@@ -39,6 +40,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     setEmbed(data.embedModel);
     setTel(data.telemetryOptIn);
     setCrash(data.crashReportingOptIn);
+    setGraphOn(data.graphExtractionEnabled);
   }, [data]);
 
   const save = useMutation({
@@ -49,6 +51,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
         embedModel: embed,
         telemetryOptIn: tel,
         crashReportingOptIn: crash,
+        graphExtractionEnabled: graphOn,
       }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["settings"] });
@@ -95,6 +98,19 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
             <p className="text-[10px] text-[var(--muted)]">Send crash dumps when enabled (off by default)</p>
           </div>
           <Switch checked={crash} onCheckedChange={setCrash} aria-label="Crash reporting opt-in" />
+        </div>
+        <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--border)] px-3 py-2">
+          <div>
+            <p className="text-sm font-medium">Build knowledge graph</p>
+            <p className="text-[10px] text-[var(--muted)]">
+              Runs the chat model on every chunk. Slow on large libraries.
+            </p>
+          </div>
+          <Switch
+            checked={graphOn}
+            onCheckedChange={setGraphOn}
+            aria-label="Build knowledge graph"
+          />
         </div>
         <div className="rounded-md bg-[var(--surface)] p-3 text-[10px] text-[var(--muted)]">
           <p className="font-mono">App version: {ver ?? "…"}</p>

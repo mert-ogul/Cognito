@@ -70,6 +70,10 @@ pub struct GraphExtractionProgress {
     pub detail: Option<String>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsPayload {
@@ -78,6 +82,8 @@ pub struct SettingsPayload {
     pub embed_model: String,
     pub telemetry_opt_in: bool,
     pub crash_reporting_opt_in: bool,
+    #[serde(default = "default_true")]
+    pub graph_extraction_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

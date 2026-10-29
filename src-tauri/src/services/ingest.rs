@@ -6,7 +6,7 @@ use crate::errors::{CognitoError, CognitoResult};
 use crate::events::IMPORT_PROGRESS;
 use crate::models::ImportProgress;
 use crate::services::import_job;
-use crate::services::ingest_graph::{run_graph_extraction, sidecar_purge_graph};
+use crate::services::graph_worker::sidecar_purge_graph;
 use crate::vault::IMPORT_BATCH;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -202,8 +202,6 @@ fn process_one_parsed(
     embed: &str,
     chat: &str,
     parsed: &Value,
-    app: Option<&AppHandle>,
-    job_id: Option<&str>,
 ) -> CognitoResult<bool> {
     let path = parsed
         .get("path")
@@ -290,7 +288,6 @@ fn process_one_parsed(
     })?;
     if embed_payload.is_empty() {
         state.with_sqlite(|conn| sqlite::mark_document_indexed(conn, &doc_id))?;
-        run_graph_extraction(state, app, job_id, sqlite_path, duck_path, chat, &doc_id)?;
         return Ok(true);
     }
     let emb = embed_items_rpc(
@@ -314,7 +311,6 @@ fn process_one_parsed(
         return Ok(false);
     }
     state.with_sqlite(|conn| sqlite::mark_document_indexed(conn, &doc_id))?;
-    run_graph_extraction(state, app, job_id, sqlite_path, duck_path, chat, &doc_id)?;
     Ok(true)
 }
 
@@ -388,8 +384,6 @@ pub fn run_import_job(
                 &embed_model,
                 &chat_model,
                 p,
-                app.as_ref(),
-                Some(&job_id),
             );
             match r {
                 Ok(true) => done += 1,
@@ -427,6 +421,7 @@ pub fn run_import_job(
         None,
         None,
     );
+    state.notify_graph_worker();
     Ok(())
 }
 
@@ -475,8 +470,6 @@ pub fn run_single_file(
             embed_model,
             chat_model,
             p,
-            app,
-            Some("watcher"),
         )?;
     }
     emit_job(
@@ -490,6 +483,7 @@ pub fn run_single_file(
         Some(&sp(file_path)),
         None,
     );
+    state.notify_graph_worker();
     Ok(())
 }
 
@@ -499,6 +493,7 @@ mod tests {
     use crate::app::state::AppState;
     use crate::services::file_watcher;
     use crate::services::graph_index_service;
+    use crate::services::graph_worker;
     use crate::sidecar::SidecarPool;
     use std::sync::mpsc;
     use std::sync::Arc;
@@ -589,7 +584,7 @@ mod tests {
                         |r| r.get(0),
                     )
                     .map_err(|e| CognitoError::Database(e.to_string()))?;
-                assert_eq!(graph_status, "ok");
+                assert_eq!(graph_status, "pending");
                 let chunk_n: i64 = conn
                     .query_row(
                         "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.path = ?1",
@@ -610,11 +605,49 @@ mod tests {
             })
             .expect("assert first import rows");
 
+        let processed = graph_worker::process_pending(&state, None);
+        assert!(processed >= 1, "expected process_pending to handle note.md");
+        state
+            .with_sqlite(|conn| {
+                let graph_status: String = conn
+                    .query_row(
+                        "SELECT graph_status FROM documents WHERE path = ?1",
+                        [&note_s],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(graph_status, "ok");
+                Ok(())
+            })
+            .expect("graph ok after process_pending");
         let snap = graph_index_service::get_graph_snapshot(&state, 400).expect("snapshot");
         let nodes = snap["nodes"].as_array().expect("nodes");
         let edges = snap["edges"].as_array().expect("edges");
         assert!(nodes.len() >= 2, "expected at least 2 graph nodes");
         assert!(edges.len() >= 1, "expected at least 1 graph edge");
+
+        let removed_path = vault.path().join("skip-me.md");
+        std::fs::write(&removed_path, "Skip this note.\n\nSecond.\n\nThird.\n").expect("skip md");
+        let removed_abs = removed_path
+            .canonicalize()
+            .unwrap_or_else(|_| removed_path.clone());
+        run_single_file(
+            &state,
+            None,
+            &vault_root,
+            &removed_abs,
+            "nomic-embed-text",
+            "phi4-mini",
+        )
+        .expect("index skip-me");
+        let removed_s = sp(&removed_abs);
+        state
+            .with_sqlite(|c| {
+                sqlite::mark_document_removed(c, &removed_s)?;
+                Ok(())
+            })
+            .expect("mark removed");
+        let _ = graph_worker::process_pending(&state, None);
 
         // Lock still usable from the test thread (no permanent deadlock).
         state
@@ -698,10 +731,24 @@ mod tests {
                     )
                     .map_err(|e| CognitoError::Database(e.to_string()))?;
                 assert_eq!(status, "indexed");
+                assert_eq!(gstat, "pending");
+                Ok(())
+            })
+            .expect("assert reindex pending");
+        let _ = graph_worker::process_pending(&state, None);
+        state
+            .with_sqlite(|conn| {
+                let gstat: String = conn
+                    .query_row(
+                        "SELECT graph_status FROM documents WHERE path = ?1",
+                        [&note_s],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
                 assert_eq!(gstat, "ok");
                 Ok(())
             })
-            .expect("assert reindex");
+            .expect("assert reindex graph ok");
 
         std::fs::remove_file(&note_abs).expect("delete note.md");
         file_watcher::handle_watch_paths(&state, &[note_abs.clone()]);

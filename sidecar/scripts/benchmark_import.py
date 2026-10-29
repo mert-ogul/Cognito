@@ -14,6 +14,7 @@ Memory: `getrusage` max RSS at start/end (`memoryMaxRssBytes`); **macOS reports 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import resource
@@ -31,7 +32,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from ingestion.chunking import estimate_tokens, hash_chunk_text
-from ingestion.rpc_graph import rpc_extract_graph_document
+from extraction.extraction_service import extract_document_graph_async
 from ingestion.rpc_ingest import rpc_chunk_documents, rpc_embed_chunks, rpc_parse_documents
 from query.chat_pipeline import prepare_chat_retrieval
 
@@ -237,13 +238,10 @@ def main() -> int:
         if args.graph:
             t_g0 = time.perf_counter()
             for doc_id in doc_ids:
-                out = rpc_extract_graph_document(
-                    {
-                        "sqlitePath": str(db),
-                        "duckPath": str(duck),
-                        "documentId": doc_id,
-                        "chatModel": args.chat_model,
-                    }
+                out = asyncio.run(
+                    extract_document_graph_async(
+                        str(db), str(duck), doc_id, args.chat_model
+                    )
                 )
                 graph_chunks += int(out.get("chunksProcessed") or 0)
             graph_s = time.perf_counter() - t_g0

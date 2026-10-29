@@ -140,21 +140,29 @@ pub async fn retry_failed_import(
         .clone()
         .ok_or_else(|| "Configure a vault folder first.".to_string())?;
     let vault = PathBuf::from(&vault_str);
+    let graph_n = state
+        .with_sqlite(|c| sqlite::requeue_failed_graphs(c))
+        .map_err(|e| e.to_string())?;
     let paths_str = state
         .with_sqlite(|c| sqlite::failed_document_paths(c, 100))
         .map_err(|e| e.to_string())?;
-    if paths_str.is_empty() {
+    if paths_str.is_empty() && graph_n == 0 {
         return Err("No failed documents to retry.".to_string());
     }
-    let paths: Vec<PathBuf> = paths_str.iter().map(PathBuf::from).collect();
-    spawn_import_job(
-        app,
-        &*state,
-        job_id.clone(),
-        vault,
-        paths,
-        settings.embed_model.clone(),
-        settings.chat_model.clone(),
-    )?;
+    if graph_n > 0 {
+        state.notify_graph_worker();
+    }
+    if !paths_str.is_empty() {
+        let paths: Vec<PathBuf> = paths_str.iter().map(PathBuf::from).collect();
+        spawn_import_job(
+            app,
+            &*state,
+            job_id.clone(),
+            vault,
+            paths,
+            settings.embed_model.clone(),
+            settings.chat_model.clone(),
+        )?;
+    }
     Ok(job_id)
 }
