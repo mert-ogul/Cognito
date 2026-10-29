@@ -1,9 +1,6 @@
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { FIRST_IMPORT_DOC_CAP } from "@/components/sources/constants";
-import { DocumentStatusBadge } from "@/components/sources/DocumentStatusBadge";
-import { DocumentTypeIcon } from "@/components/sources/DocumentTypeIcon";
 import {
   getSettings,
   importDocuments,
@@ -16,6 +13,7 @@ import {
   type ImportProgress,
 } from "@/lib/tauri";
 import { listen } from "@/lib/tauri-events";
+import { cn } from "@/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -24,9 +22,23 @@ function fileName(path: string): string {
   return i >= 0 ? path.slice(i + 1) : path;
 }
 
-function formatWhen(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  return iso.slice(0, 19).replace("T", " ");
+function folderName(path: string | null | undefined): string {
+  if (!path) return "";
+  const trimmed = path.replace(/[/\\]+$/, "");
+  const i = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return i >= 0 ? trimmed.slice(i + 1) : trimmed;
+}
+
+function typeLine(d: DocumentRow): string {
+  const ft = d.fileType.toLowerCase();
+  if (ft === "pdf") {
+    return d.pageCount != null ? `PDF, ${d.pageCount} pages` : "PDF";
+  }
+  return "Markdown";
+}
+
+function sortByName(a: DocumentRow, b: DocumentRow): number {
+  return fileName(a.path).localeCompare(fileName(b.path), undefined, { sensitivity: "base" });
 }
 
 export function SourcesPanel() {
@@ -146,15 +158,14 @@ export function SourcesPanel() {
     };
   }, [runImport]);
 
-  const rows: DocumentRow[] = docs.data ?? [];
-  const showEmpty = rows.length === 0 && !docs.isLoading;
-  const vaultSet = !!settings.data?.vaultPath;
-  const importPct = useMemo(() => {
-    if (!progress?.totalFiles) return 0;
-    return Math.round((100 * progress.completedFiles) / progress.totalFiles);
-  }, [progress]);
-
+  const rows = useMemo(
+    () => [...(docs.data ?? [])].sort(sortByName),
+    [docs.data],
+  );
+  const vaultPath = settings.data?.vaultPath ?? null;
+  const vaultSet = !!vaultPath;
   const underCap = rows.length < FIRST_IMPORT_DOC_CAP;
+  const failedCount = rows.filter((d) => d.status === "failed" || d.errorMessage).length;
   const graphWaiting = useMemo(
     () =>
       rows.filter(
@@ -164,16 +175,22 @@ export function SourcesPanel() {
       ).length,
     [rows],
   );
-  const graphFileName = useMemo(() => {
-    if (!graphProgress?.documentId) return null;
-    const row = rows.find((d) => d.id === graphProgress.documentId);
-    return row ? fileName(row.path) : null;
-  }, [graphProgress, rows]);
   const graphEnabled = settings.data?.graphExtractionEnabled !== false;
+  const importActive =
+    !!progress &&
+    progress.totalFiles > 0 &&
+    progress.status !== "completed" &&
+    progress.phase !== "done";
+  const importPct = importActive
+    ? Math.round((100 * progress.completedFiles) / progress.totalFiles)
+    : 0;
 
   return (
-    <Card
-      className={`flex h-full min-h-0 flex-col ${dragOver ? "ring-2 ring-[var(--ring)]" : ""}`}
+    <div
+      className={cn(
+        "flex h-full min-h-0 flex-col",
+        dragOver ? "outline outline-2 outline-accent outline-offset-[-2px]" : "",
+      )}
       onDragEnter={(e) => {
         e.preventDefault();
         setDragOver(true);
@@ -184,158 +201,128 @@ export function SourcesPanel() {
       }}
       onDragLeave={() => setDragOver(false)}
     >
-      <CardHeader>
-        <CardTitle>Sources</CardTitle>
-      </CardHeader>
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
-        {progress && progress.totalFiles > 0 ? (
-          <div className="space-y-1">
-            <Progress value={importPct} aria-label="Import progress" />
-            <p className="text-xs text-[var(--muted)]">
-              Import {progress.completedFiles}/{progress.totalFiles} · {progress.phase}
-              {progress.path ? ` · ${fileName(progress.path)}` : ""}
-              {progress.errorMessage ? ` · ${progress.errorMessage}` : ""}
+      <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
+        <div className="min-w-0 flex-1">
+          <p className="font-medium text-text">Library</p>
+          {vaultSet ? (
+            <p className="truncate text-muted" title={vaultPath}>
+              {folderName(vaultPath)}
             </p>
-          </div>
-        ) : progress ? (
-          <p className="text-xs text-[var(--muted)]">
-            Import {progress.completedFiles}/{progress.totalFiles || "…"} · {progress.phase}
-            {progress.path ? ` · ${fileName(progress.path)}` : ""}
-          </p>
-        ) : null}
-        {!graphEnabled ? (
-          <p className="text-xs text-[var(--muted)]">Graph extraction is off</p>
-        ) : (
-          <>
-            {graphWaiting > 0 ? (
-              <p className="text-xs text-[var(--muted)]">
-                Graph: {graphWaiting} documents waiting
-              </p>
-            ) : null}
-            {graphProgress ? (
-              <p className="text-xs text-[var(--muted)]">
-                Graph {graphProgress.phase}
-                {graphProgress.detail ? ` · ${graphProgress.detail}` : ""}
-                {graphFileName ? ` · ${graphFileName}` : ""}
-              </p>
-            ) : null}
-          </>
-        )}
-        {showEmpty && (
-          <div className="rounded-md border border-dashed border-[var(--border)] p-3 text-xs text-[var(--muted)]">
-            <p className="mb-2 font-medium text-[var(--foreground)]">Local library</p>
-            <ul className="list-inside list-disc space-y-1">
-              <li>Everything stays on this device — no accounts, no cloud sync.</li>
-              <li>PDF and Markdown only.</li>
-              <li>First library capped at {FIRST_IMPORT_DOC_CAP} documents.</li>
-              <li>Drop a folder here or choose a folder.</li>
-            </ul>
-            {!vaultSet ? (
-              <Button
-                type="button"
-                className="mt-3"
-                disabled={chooseFolder.isPending}
-                onClick={() => chooseFolder.mutate()}
-              >
-                {chooseFolder.isPending ? "Opening…" : "Choose a folder"}
-              </Button>
-            ) : null}
-          </div>
-        )}
-        <p className="text-xs text-[var(--muted)]">
-          Files are indexed in place, metadata lives under the app data directory.
-        </p>
+          ) : null}
+        </div>
         {vaultSet ? (
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="default"
-              disabled={runImport.isPending}
-              onClick={() => runImport.mutate(null)}
-            >
-              {runImport.isPending ? "Importing…" : "Import"}
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={retry.isPending}
-              onClick={() => retry.mutate()}
-            >
-              Retry failed
-            </Button>
-          </div>
+          <Button
+            type="button"
+            variant="quiet"
+            disabled={runImport.isPending}
+            onClick={() => runImport.mutate(null)}
+          >
+            {runImport.isPending ? "Importing…" : "Import"}
+          </Button>
         ) : null}
-        {actionError ? (
-          <p className="text-xs text-red-500" role="alert">
-            {actionError}
+      </div>
+
+      {!vaultSet ? (
+        <div className="flex flex-1 flex-col gap-3 p-3">
+          <p className="text-muted">
+            Pick a folder of PDF and Markdown files. Cognito indexes it on this computer.
           </p>
-        ) : null}
-        {!underCap ? (
-          <p className="text-[10px] text-amber-600 dark:text-amber-400">
-            Document cap reached ({FIRST_IMPORT_DOC_CAP}). Remove files to add different ones.
-          </p>
-        ) : null}
-        <div className="min-h-0 flex-1 overflow-auto rounded-md border border-[var(--border)]">
-          <table className="w-full text-left text-xs">
-            <thead className="sticky top-0 bg-[var(--background)]">
-              <tr className="border-b border-[var(--border)]">
-                <th className="p-2 font-medium">File</th>
-                <th className="p-2 font-medium w-10" aria-label="Type" />
-                <th className="p-2 font-medium">Status</th>
-                <th className="p-2 font-medium">Pages</th>
-                <th className="p-2 font-medium">Modified</th>
-                <th className="p-2 font-medium">Indexed</th>
-                <th className="p-2 font-medium">Graph</th>
-                <th className="p-2 w-8" aria-label="Retry" />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((d) => (
-                <tr key={d.id} className="border-b border-[var(--border)]/60">
-                  <td className="p-2 align-top">
-                    <span className="line-clamp-2 break-all" title={d.path}>
-                      {fileName(d.path)}
-                    </span>
-                    {d.errorMessage ? (
-                      <span className="mt-1 inline-block rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] text-red-600 dark:text-red-400">
-                        Error
-                      </span>
-                    ) : null}
-                  </td>
-                  <td className="p-2 align-top">
-                    <DocumentTypeIcon fileType={d.fileType} />
-                  </td>
-                  <td className="p-2 align-top">
-                    <DocumentStatusBadge status={d.status} errorMessage={d.errorMessage} />
-                  </td>
-                  <td className="p-2 align-top">
-                    {d.fileType.toLowerCase() === "pdf" ? (d.pageCount ?? "—") : "—"}
-                  </td>
-                  <td className="p-2 align-top whitespace-nowrap">{formatWhen(d.modifiedAt)}</td>
-                  <td className="p-2 align-top whitespace-nowrap">{formatWhen(d.indexedAt)}</td>
-                  <td className="p-2 align-top">{d.graphStatus}</td>
-                  <td className="p-2 align-top">
-                    {(d.status === "failed" || d.errorMessage) && (
+          <Button
+            type="button"
+            variant="primary"
+            disabled={chooseFolder.isPending}
+            onClick={() => chooseFolder.mutate()}
+          >
+            {chooseFolder.isPending ? "Opening…" : "Choose a folder"}
+          </Button>
+          {actionError ? (
+            <p className="text-danger" role="alert">
+              {actionError}
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <>
+          <ul className="min-h-0 flex-1 overflow-auto">
+            {rows.map((d) => {
+              const indexing =
+                d.status === "pending" || d.status === "parsing" || d.status === "embedding";
+              const failed = d.status === "failed" || !!d.errorMessage;
+              return (
+                <li key={d.id} className="border-b border-line px-3 py-2">
+                  <p className="truncate text-text" title={d.path}>
+                    {fileName(d.path)}
+                  </p>
+                  <p className="text-muted">{typeLine(d)}</p>
+                  {indexing ? <p className="text-muted">Indexing</p> : null}
+                  {failed ? (
+                    <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                      <p className="text-danger" title={d.errorMessage ?? undefined}>
+                        Couldn&apos;t read this file
+                      </p>
                       <Button
                         type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-1 text-[10px]"
+                        variant="quiet"
                         disabled={retry.isPending}
                         onClick={() => retry.mutate()}
                         aria-label={`Retry failed imports including ${fileName(d.path)}`}
                       >
                         Retry
                       </Button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </CardContent>
-    </Card>
+                    </div>
+                  ) : null}
+                  {d.graphStatus === "failed" ? (
+                    <p className="text-danger" title={d.graphError ?? undefined}>
+                      Graph failed
+                    </p>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+
+          <div className="shrink-0 space-y-1.5 border-t border-line px-3 py-2">
+            {importActive ? (
+              <div className="space-y-1">
+                <p className="text-muted">
+                  Indexing {progress.completedFiles} of {progress.totalFiles}
+                  {progress.path ? `, ${fileName(progress.path)}` : ""}
+                </p>
+                <Progress value={importPct} aria-label="Import progress" />
+              </div>
+            ) : null}
+            {graphEnabled ? (
+              graphWaiting > 0 || graphProgress ? (
+                <p className="text-muted">
+                  Building graph, {graphWaiting} file{graphWaiting === 1 ? "" : "s"} left
+                </p>
+              ) : null
+            ) : (
+              <p className="text-muted">Graph building is off</p>
+            )}
+            {failedCount > 0 ? (
+              <Button
+                type="button"
+                variant="quiet"
+                disabled={retry.isPending}
+                onClick={() => retry.mutate()}
+              >
+                Retry failed
+              </Button>
+            ) : null}
+            {!underCap ? (
+              <p className="text-muted">
+                Document cap reached ({FIRST_IMPORT_DOC_CAP}). Remove files to add different ones.
+              </p>
+            ) : null}
+            {actionError ? (
+              <p className="text-danger" role="alert">
+                {actionError}
+              </p>
+            ) : null}
+          </div>
+        </>
+      )}
+    </div>
   );
 }

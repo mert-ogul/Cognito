@@ -15,6 +15,21 @@ type Props = {
   className?: string;
 };
 
+function readTheme() {
+  const s = getComputedStyle(document.documentElement);
+  const pick = (name: string, fallback: string) =>
+    s.getPropertyValue(name).trim() || fallback;
+  return {
+    bg: pick("--bg-pane", "#f4f4f3"),
+    text: pick("--text", "#1d1d1f"),
+    muted: pick("--text-muted", "#6b6b70"),
+    line: pick("--line", "#e2e2e0"),
+    accent: pick("--accent", "#1f6378"),
+    mark: pick("--mark", "#fff1a8"),
+    hover: pick("--bg-hover", "#ebebea"),
+  };
+}
+
 function buildElements(snapshot: GraphSnapshot) {
   const nodes = snapshot.nodes.map((n) => ({
     data: { id: n.nodeId, label: n.name, kind: n.kind },
@@ -30,16 +45,21 @@ function buildElements(snapshot: GraphSnapshot) {
   return [...nodes, ...edges];
 }
 
-function applyHighlight(cy: Core, highlightNodeIds: string[], selectedNodeId: string | null) {
+function applyHighlight(
+  cy: Core,
+  highlightNodeIds: string[],
+  selectedNodeId: string | null,
+  theme: ReturnType<typeof readTheme>,
+) {
   const hl = new Set(highlightNodeIds);
   cy.batch(() => {
     cy.nodes().forEach((n) => {
       const id = n.id();
       const isHl = hl.has(id);
       const isSel = selectedNodeId === id;
-      n.style("border-color", isHl ? "#fbbf24" : isSel ? "#38bdf8" : "#334155");
-      n.style("background-color", isHl ? "#422006" : "#1e293b");
-      n.style("border-width", isHl || isSel ? 3 : 2);
+      n.style("border-color", isHl ? theme.mark : isSel ? theme.accent : theme.line);
+      n.style("background-color", isHl ? theme.hover : theme.bg);
+      n.style("border-width", isHl || isSel ? 3 : 1.5);
     });
   });
 }
@@ -61,6 +81,7 @@ export function GraphCyCanvas({
     if (!el || !snapshot || snapshot.nodes.length === 0) {
       return;
     }
+    const theme = readTheme();
     const cy = cytoscape({
       container: el,
       elements: buildElements(snapshot),
@@ -72,20 +93,20 @@ export function GraphCyCanvas({
             "font-size": "10px",
             "text-wrap": "wrap",
             "text-max-width": "100px",
-            color: "#e2e8f0",
-            "background-color": "#1e293b",
+            color: theme.text,
+            "background-color": theme.bg,
             width: 28,
             height: 28,
-            "border-width": 2,
-            "border-color": "#334155",
+            "border-width": 1.5,
+            "border-color": theme.line,
           },
         },
         {
           selector: "edge",
           style: {
-            width: 1.5,
-            "line-color": "#475569",
-            "target-arrow-color": "#475569",
+            width: 1.25,
+            "line-color": theme.muted,
+            "target-arrow-color": theme.muted,
             "curve-style": "bezier",
             "target-arrow-shape": "triangle",
             opacity: 0.85,
@@ -102,7 +123,7 @@ export function GraphCyCanvas({
       onNodeTap(evt.target.id());
     });
     cyRef.current = cy;
-    applyHighlight(cy, highlightNodeIds, selectedNodeId);
+    applyHighlight(cy, highlightNodeIds, selectedNodeId, theme);
     return () => {
       cy.destroy();
       cyRef.current = null;
@@ -113,7 +134,7 @@ export function GraphCyCanvas({
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy) return;
-    applyHighlight(cy, highlightNodeIds, selectedNodeId);
+    applyHighlight(cy, highlightNodeIds, selectedNodeId, readTheme());
   }, [highlightNodeIds, selectedNodeId, snapshot]);
 
   useEffect(() => {
@@ -135,7 +156,7 @@ export function GraphCyCanvas({
     return (
       <div
         className={cn(
-          "flex min-h-[200px] items-center justify-center rounded-md border border-dashed border-[var(--border)] text-xs text-[var(--muted)]",
+          "flex min-h-[200px] items-center justify-center border border-dashed border-line text-muted",
           className,
         )}
       >
@@ -148,7 +169,7 @@ export function GraphCyCanvas({
     <div
       ref={containerRef}
       data-testid="graph-canvas"
-      className={cn("min-h-[280px] w-full flex-1 rounded-md border border-[var(--border)] bg-[#0f172a]", className)}
+      className={cn("min-h-[280px] w-full flex-1 border border-line bg-pane", className)}
     />
   );
 }

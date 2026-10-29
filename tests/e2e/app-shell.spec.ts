@@ -1,17 +1,23 @@
 import { expect, test } from "@playwright/test";
 
-test("shell renders three panels and status bar", async ({ page }) => {
+test("shell renders toolbar and panes", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByText("Cognito", { exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Sources" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Chat" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Graph" })).toBeVisible();
+  await expect(page.getByText("Library", { exact: true })).toBeVisible();
+  await expect(page.getByText("Chat", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Graph" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open settings" })).toBeVisible();
 });
 
 test.describe("E2E mock build", () => {
   test("fixture library, chat stream, citations, graph node detail", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByText("sample.md")).toBeVisible();
+    const graphToggle = page.getByRole("button", { name: "Graph" });
+    if ((await graphToggle.getAttribute("aria-pressed")) !== "true") {
+      await graphToggle.click();
+    }
+    await expect(page.getByText("Graph", { exact: true }).first()).toBeVisible();
     const input = page.getByRole("textbox", { name: "Chat message" });
     await input.fill("What is in the library?");
     await page.getByRole("button", { name: "Send" }).click();

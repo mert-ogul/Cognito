@@ -81,6 +81,7 @@ pub fn run() {
             commands::get_app_health,
             commands::ping_sidecar,
             commands::warm_chat_model,
+            commands::open_logs_folder,
             commands::list_documents,
             commands::get_document_preview,
             commands::open_document,

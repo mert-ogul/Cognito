@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 pub type ChatWarmResult = Result<(), String>;
 
 pub struct AppState {
-    #[allow(dead_code)]
     pub data_dir: PathBuf,
     sqlite_path: PathBuf,
     duckdb_path: PathBuf,

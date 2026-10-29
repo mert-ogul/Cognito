@@ -64,7 +64,7 @@ describe("SourcesPanel", () => {
     });
   });
 
-  it("renders document statuses, PDF page count, and error badge", async () => {
+  it("renders document list with type lines and failed state", async () => {
     const client = new QueryClient();
     render(
       <QueryClientProvider client={client}>
@@ -72,10 +72,10 @@ describe("SourcesPanel", () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByText("a.pdf")).toBeInTheDocument();
-    expect(screen.getByText("indexed")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
-    expect(screen.getByText("failed")).toBeInTheDocument();
-    expect(screen.getByText("Error")).toBeInTheDocument();
+    expect(screen.getByText("PDF, 3 pages")).toBeInTheDocument();
+    expect(screen.getByText("b.md")).toBeInTheDocument();
+    expect(screen.getByText("Markdown")).toBeInTheDocument();
+    expect(screen.getByText("Couldn't read this file")).toBeInTheDocument();
   });
 
   it("shows import progress when import-progress event fires", async () => {
@@ -103,11 +103,10 @@ describe("SourcesPanel", () => {
         <SourcesPanel />
       </QueryClientProvider>,
     );
-    expect(await screen.findByText(/Import 4\/10/)).toBeInTheDocument();
-    expect(screen.getByText(/parse/)).toBeInTheDocument();
+    expect(await screen.findByText(/Indexing 4 of 10, x\.pdf/)).toBeInTheDocument();
   });
 
-  it("shows empty-state guidance when there are no documents", async () => {
+  it("shows empty-state guidance when there is no vault", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "list_documents") return [];
       if (cmd === "get_settings") {
@@ -126,8 +125,12 @@ describe("SourcesPanel", () => {
         <SourcesPanel />
       </QueryClientProvider>,
     );
-    expect(await screen.findByText("Local library")).toBeInTheDocument();
-    expect(screen.getByText(/100 documents/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        /Pick a folder of PDF and Markdown files\. Cognito indexes it on this computer\./,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Choose a folder" })).toBeInTheDocument();
   });
 
   it("empty-state Choose a folder calls setVault", async () => {
@@ -212,7 +215,7 @@ describe("SourcesPanel", () => {
         <SourcesPanel />
       </QueryClientProvider>,
     );
-    expect(await screen.findByText("Graph: 2 documents waiting")).toBeInTheDocument();
+    expect(await screen.findByText("Building graph, 2 files left")).toBeInTheDocument();
   });
 
   it("shows rejected import error with role alert", async () => {

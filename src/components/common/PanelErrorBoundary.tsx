@@ -23,12 +23,12 @@ export class PanelErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.error) {
       return (
-        <div className="flex h-full min-h-0 flex-col gap-2 rounded-md border border-[var(--border)] p-3">
-          <p className="text-sm font-medium">This panel hit an error</p>
-          <p className="text-xs text-red-500" role="alert">
+        <div className="flex h-full min-h-0 flex-col gap-2 p-3">
+          <p className="font-medium text-text">This panel hit an error</p>
+          <p className="text-danger" role="alert">
             {this.state.error.message}
           </p>
-          <Button type="button" variant="outline" size="sm" onClick={() => this.setState({ error: null })}>
+          <Button type="button" variant="secondary" onClick={() => this.setState({ error: null })}>
             Try again
           </Button>
         </div>

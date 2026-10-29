@@ -4,6 +4,7 @@ use crate::services::health_snapshot;
 use crate::services::model_warm;
 use serde_json::{json, Value};
 use tauri::AppHandle;
+use tauri_plugin_opener::OpenerExt;
 
 use super::run_blocking;
 
@@ -33,5 +34,18 @@ pub async fn warm_chat_model(
     }
     state.clear_chat_warm();
     model_warm::spawn_warm_chat_model((*state).clone(), app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_logs_folder(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+) -> Result<(), String> {
+    let logs = state.data_dir.join("logs");
+    std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
+    app.opener()
+        .open_path(logs.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }

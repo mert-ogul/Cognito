@@ -7,6 +7,7 @@ import {
   clearLibrary,
   getSettings,
   listDocuments,
+  openLogsFolder,
   rebuildIndex,
   selectVaultFolder,
   setVault,
@@ -174,19 +175,16 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
         </DialogHeader>
-        <p className="text-xs text-[var(--muted)]">
-          Cognito works offline for your library. No account is required.
-        </p>
-        <div className="space-y-2 rounded-md border border-[var(--border)] p-3">
-          <p className="text-sm font-medium">Library</p>
-          <p className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 font-mono text-[11px] break-all">
+
+        <section className="space-y-2">
+          <h3 className="font-medium text-text">Library</h3>
+          <p className="break-all border border-line bg-pane px-2 py-1.5 font-mono text-[12px]">
             {folderLabel}
           </p>
           <div className="flex flex-wrap gap-2">
             <Button
               type="button"
-              size="sm"
-              variant="outline"
+              variant="secondary"
               disabled={busy || !!confirm}
               onClick={() => void onChangeFolder()}
             >
@@ -194,8 +192,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
             </Button>
             <Button
               type="button"
-              size="sm"
-              variant="outline"
+              variant="secondary"
               disabled={busy || !!confirm || docCount === 0 || !data?.vaultPath}
               onClick={() => {
                 setActionError(null);
@@ -206,8 +203,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
             </Button>
             <Button
               type="button"
-              size="sm"
-              variant="outline"
+              variant="secondary"
               disabled={busy || !!confirm || !data?.vaultPath}
               onClick={() => {
                 setActionError(null);
@@ -217,8 +213,10 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
               Remove library
             </Button>
           </div>
-        </div>
-        <div className="grid gap-3">
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-medium text-text">Models</h3>
           <div className="space-y-1">
             <Label htmlFor="chat-model">Chat model</Label>
             <Input id="chat-model" value={chat} onChange={(e) => setChat(e.target.value)} autoComplete="off" />
@@ -227,48 +225,64 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
             <Label htmlFor="embed-model">Embedding model</Label>
             <Input id="embed-model" value={embed} onChange={(e) => setEmbed(e.target.value)} autoComplete="off" />
           </div>
-        </div>
-        <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--border)] px-3 py-2">
-          <div>
-            <p className="text-sm font-medium">Build knowledge graph</p>
-            <p className="text-[10px] text-[var(--muted)]">
-              Runs the chat model on every chunk. Slow on large libraries.
-            </p>
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-medium text-text">Knowledge graph</h3>
+          <div className="flex items-center justify-between gap-3 border border-line px-3 py-2">
+            <div>
+              <p className="text-text">Build knowledge graph</p>
+              <p className="text-muted">
+                Runs the chat model on every chunk. Slow on large libraries.
+              </p>
+            </div>
+            <Switch
+              checked={graphOn}
+              onCheckedChange={setGraphOn}
+              aria-label="Build knowledge graph"
+            />
           </div>
-          <Switch
-            checked={graphOn}
-            onCheckedChange={setGraphOn}
-            aria-label="Build knowledge graph"
-          />
-        </div>
-        <div className="rounded-md bg-[var(--surface)] p-3 text-[10px] text-[var(--muted)]">
-          <p className="font-mono">App version: {ver ?? "…"}</p>
-          <p className="mt-1">First-import document cap: 100 (MVP).</p>
-        </div>
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-medium text-text">About</h3>
+          <p className="text-muted">Version {ver ?? "…"}</p>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              void openLogsFolder().catch((e) => setActionError(String(e)));
+            }}
+          >
+            Open logs folder
+          </Button>
+        </section>
+
         {confirm ? (
-          <div className="space-y-2 rounded-md border border-[var(--border)] p-3">
-            <p className="text-xs">{confirmText}</p>
+          <div className="space-y-2 border border-line p-3">
+            <p className="text-text">{confirmText}</p>
             <div className="flex flex-wrap gap-2">
-              <Button type="button" size="sm" disabled={busy} onClick={() => void runConfirmed()}>
+              <Button type="button" variant="primary" disabled={busy} onClick={() => void runConfirmed()}>
                 {busy ? "Working…" : "Confirm"}
               </Button>
-              <Button type="button" size="sm" variant="outline" disabled={busy} onClick={cancelConfirm}>
+              <Button type="button" variant="secondary" disabled={busy} onClick={cancelConfirm}>
                 Cancel
               </Button>
             </div>
           </div>
         ) : null}
         {actionError ? (
-          <p className="text-xs text-red-500" role="alert">
+          <p className="text-danger" role="alert">
             {actionError}
           </p>
         ) : null}
         <div className="flex flex-wrap justify-end gap-2">
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+          <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>
             Close
           </Button>
           <Button
             type="button"
+            variant="primary"
             onClick={onSaveClick}
             disabled={busy || savePlain.isPending || !!confirm}
           >

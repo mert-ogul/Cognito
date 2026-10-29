@@ -90,6 +90,13 @@ export async function warmChatModel(): Promise<void> {
   return invoke("warm_chat_model");
 }
 
+export async function openLogsFolder(): Promise<void> {
+  if (e2e) {
+    return;
+  }
+  return invoke("open_logs_folder");
+}
+
 export async function pingSidecar(): Promise<Record<string, unknown>> {
   if (e2e) {
     return { ok: true };

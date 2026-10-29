@@ -34,7 +34,7 @@ describe("OllamaSetupBanner", () => {
         }}
       />,
     );
-    expect(screen.getByText("Required Ollama models are missing.")).toBeInTheDocument();
+    expect(screen.getByText("Required Ollama models are missing")).toBeInTheDocument();
     expect(screen.getByText("ollama pull phi4-mini")).toBeInTheDocument();
     expect(screen.getByText("ollama pull nomic-embed-text")).toBeInTheDocument();
   });

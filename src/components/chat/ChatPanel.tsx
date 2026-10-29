@@ -1,6 +1,4 @@
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ChatWelcome } from "@/components/chat/ChatWelcome";
 import { useRetrievalMode } from "@/context/RetrievalModeContext";
 import {
   getDocumentPreview,
@@ -165,7 +163,7 @@ export function ChatPanel({ health }: Props) {
       const pageEnd = prev.pageEnd ?? c.pageEnd;
       let pageLabel = "";
       if (pageStart != null && pageEnd != null && pageEnd !== pageStart) {
-        pageLabel = ` · pp. ${pageStart}–${pageEnd}`;
+        pageLabel = ` · pp. ${pageStart}-${pageEnd}`;
       } else if (pageStart != null) {
         pageLabel = ` · p. ${pageStart}`;
       }
@@ -235,26 +233,23 @@ export function ChatPanel({ health }: Props) {
   const lastAssistantError = messages.filter((m) => m.role === "assistant" && m.error).pop();
 
   return (
-    <Card className="flex h-full min-h-0 flex-col">
-      <CardHeader className="shrink-0 pb-2">
-        <div className="flex items-start justify-between gap-2">
-          <CardTitle>Chat</CardTitle>
-          <Button type="button" variant="outline" size="sm" onClick={newChat}>
-            New chat
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3 py-2">
+        <p className="font-medium text-text">Chat</p>
+        <Button type="button" variant="quiet" onClick={newChat}>
+          New chat
+        </Button>
+      </div>
+      {health?.warmUpError ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
+          <p className="text-danger">{health.warmUpError}</p>
+          <Button type="button" variant="secondary" onClick={() => void retryWarmUp()}>
+            Retry
           </Button>
         </div>
-        {health?.warmUpError ? (
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="text-xs text-amber-600 dark:text-amber-400">{health.warmUpError}</p>
-            <Button type="button" variant="outline" size="sm" onClick={() => void retryWarmUp()}>
-              Retry
-            </Button>
-          </div>
-        ) : null}
-      </CardHeader>
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-2">
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto text-sm">
-          {messages.length === 0 ? <ChatWelcome modelReady={ready} /> : null}
+      ) : null}
+      <div className="flex min-h-0 flex-1 flex-col gap-2 p-3">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto">
           {messages.map((m) => {
             const used =
               m.role === "assistant" && m.citations?.length
@@ -271,8 +266,8 @@ export function ChatPanel({ health }: Props) {
                 key={m.id}
                 className={
                   m.role === "user"
-                    ? "ml-6 rounded-md bg-[var(--surface)] p-2"
-                    : "mr-4 rounded-md border border-[var(--border)] p-2"
+                    ? "ml-6 rounded-[6px] bg-pane p-2"
+                    : "mr-4 rounded-[6px] border border-line p-2"
                 }
               >
                 {m.role === "assistant" ? (
@@ -285,12 +280,7 @@ export function ChatPanel({ health }: Props) {
                   <p className="whitespace-pre-wrap">{m.text}</p>
                 )}
                 {m.role === "assistant" && m.retrievalMode ? (
-                  <p
-                    className={cn(
-                      "mt-1 text-[10px] uppercase",
-                      m.retrievalMode === "hybrid" ? "text-sky-300/90" : "text-[var(--muted)]",
-                    )}
-                  >
+                  <p className="mt-1 text-muted">
                     {m.retrievalMode === "hybrid"
                       ? "Hybrid retrieval"
                       : m.retrievalMode === "vector_only"
@@ -300,9 +290,9 @@ export function ChatPanel({ health }: Props) {
                 ) : null}
                 {m.error ? (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <p className="text-xs text-red-500">{m.error}</p>
+                    <p className="text-danger">{m.error}</p>
                     {retryUserText && m.id === lastAssistantError?.id ? (
-                      <Button type="button" variant="outline" size="sm" onClick={() => void retryLast()}>
+                      <Button type="button" variant="secondary" onClick={() => void retryLast()}>
                         Retry
                       </Button>
                     ) : null}
@@ -310,15 +300,13 @@ export function ChatPanel({ health }: Props) {
                 ) : null}
                 {chipCitations.length > 0 ? (
                   <div className="mt-2 space-y-1">
-                    {showAllRetrieved ? (
-                      <p className="text-[10px] uppercase text-[var(--muted)]">Retrieved</p>
-                    ) : null}
+                    {showAllRetrieved ? <p className="text-muted">Retrieved</p> : null}
                     <div className="flex flex-wrap gap-1">
                       {chipCitations.map((c, i) => (
                         <button
                           key={`${c.chunkId}-${i}`}
                           type="button"
-                          className="rounded-full border border-[var(--border)] bg-[var(--background)] px-2 py-0.5 text-[10px] hover:bg-[var(--surface)]"
+                          className="rounded-[6px] border border-line bg-bg px-2 py-0.5 text-[12px] hover:bg-hover"
                           onClick={() => void openCitation(c)}
                         >
                           [{c.index}] {c.title.slice(0, 24)}
@@ -335,7 +323,10 @@ export function ChatPanel({ health }: Props) {
         </div>
         <div className="flex shrink-0 gap-2">
           <textarea
-            className="min-h-[72px] flex-1 resize-none rounded-md border border-[var(--border)] bg-[var(--background)] p-2 text-sm"
+            className={cn(
+              "min-h-[72px] flex-1 resize-none rounded-[6px] border border-line bg-bg p-2 text-[13px]",
+              "placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
+            )}
             placeholder={
               ready
                 ? "Ask about your library…"
@@ -354,43 +345,38 @@ export function ChatPanel({ health }: Props) {
             }}
             aria-label="Chat message"
           />
-          <Button type="button" disabled={!ready || !!busyId} onClick={() => void send()}>
+          <Button type="button" variant="primary" disabled={!ready || !!busyId} onClick={() => void send()}>
             Send
           </Button>
         </div>
-      </CardContent>
+      </div>
       {preview ? (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
           role="dialog"
           aria-modal
         >
-          <div className="max-h-[80vh] w-full max-w-lg overflow-auto rounded-lg border border-[var(--border)] bg-[var(--background)] p-4 shadow-lg">
+          <div className="max-h-[80vh] w-full max-w-lg overflow-auto rounded-[10px] border border-line bg-bg p-4 shadow-[0_8px_30px_rgba(0,0,0,0.12)]">
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-medium">{preview.title}</h3>
+              <h3 className="font-medium text-text">{preview.title}</h3>
               <div className="flex items-center gap-2">
                 <Button
                   type="button"
-                  variant="outline"
-                  size="sm"
+                  variant="secondary"
                   onClick={() => void openDocument(preview.documentId)}
                 >
                   Open file
                 </Button>
-                <button
-                  type="button"
-                  className="text-xs text-[var(--muted)]"
-                  onClick={() => setPreview(null)}
-                >
+                <Button type="button" variant="quiet" onClick={() => setPreview(null)}>
                   Close
-                </button>
+                </Button>
               </div>
             </div>
             <PreviewBody text={preview.text} highlight={preview.highlight} />
           </div>
         </div>
       ) : null}
-    </Card>
+    </div>
   );
 }
 
@@ -414,7 +400,7 @@ function AssistantMarkdown({
         return (
           <button
             type="button"
-            className="mx-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded border border-[var(--border)] bg-[var(--surface)] px-1 align-super text-[10px] font-medium hover:bg-[var(--background)]"
+            className="mx-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded-[6px] border border-line bg-pane px-1 align-super text-[10px] font-medium hover:bg-hover"
             onClick={() => {
               if (c) onCite(c);
             }}
@@ -428,7 +414,7 @@ function AssistantMarkdown({
     },
   };
   return (
-    <div className="prose prose-sm dark:prose-invert max-w-none text-sm [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1">
+    <div className="prose prose-sm max-w-none font-read text-[13px] text-text [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1">
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {md}
       </ReactMarkdown>
@@ -438,10 +424,10 @@ function AssistantMarkdown({
 
 export function PreviewBody({ text, highlight }: { text: string | null; highlight: string | null }) {
   if (!text) {
-    return <p className="text-xs text-[var(--muted)]">No preview text.</p>;
+    return <p className="text-muted">No preview text.</p>;
   }
   if (!highlight) {
-    return <p className="whitespace-pre-wrap text-xs">{text}</p>;
+    return <p className="whitespace-pre-wrap font-read">{text}</p>;
   }
   let i = text.indexOf(highlight);
   if (i < 0) {
@@ -449,16 +435,16 @@ export function PreviewBody({ text, highlight }: { text: string | null; highligh
     const prefix = highlight.slice(0, prefixLen);
     i = text.indexOf(prefix);
     if (i < 0) {
-      return <p className="whitespace-pre-wrap text-xs">{text}</p>;
+      return <p className="whitespace-pre-wrap font-read">{text}</p>;
     }
   }
   const before = text.slice(0, i);
   const mid = text.slice(i, i + highlight.length);
   const after = text.slice(i + highlight.length);
   return (
-    <p className="whitespace-pre-wrap text-xs">
+    <p className="whitespace-pre-wrap font-read">
       {before}
-      <mark className="bg-yellow-200/40 dark:bg-yellow-500/30">{mid}</mark>
+      <mark className="bg-mark text-text">{mid}</mark>
       {after}
     </p>
   );
