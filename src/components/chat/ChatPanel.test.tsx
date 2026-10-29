@@ -19,6 +19,8 @@ const health = {
   chatModelWarmed: true,
   warmUpPending: false,
   warmUpError: null,
+  ollamaReachable: true,
+  missingModels: [] as string[],
 };
 
 describe("ChatPanel", () => {

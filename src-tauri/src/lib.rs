@@ -36,7 +36,10 @@ pub fn run() {
                 .map_err(|e| format!("app_data_dir: {}", e))?;
             std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
             let (main_py, cwd) = resolve_sidecar_paths(app.handle()).map_err(|e| e.to_string())?;
-            let pool = SidecarPool::new(main_py, cwd);
+            let logs_dir = data_dir.join("logs");
+            std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
+            let log_path = logs_dir.join("sidecar.log");
+            let pool = SidecarPool::new(main_py, cwd, log_path);
             let state: SharedState = Arc::new(AppState::new(data_dir, pool));
             state
                 .with_sqlite(|_| Ok(()))
@@ -80,6 +83,7 @@ pub fn run() {
             commands::select_vault_folder,
             commands::get_app_health,
             commands::ping_sidecar,
+            commands::warm_chat_model,
             commands::list_documents,
             commands::get_document_preview,
             commands::send_chat_query,

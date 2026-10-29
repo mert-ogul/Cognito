@@ -3,8 +3,13 @@
 use futures_util::StreamExt;
 use serde_json::Value;
 
-fn ollama_base_url() -> String {
-    std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string())
+pub(crate) fn ollama_base_url() -> String {
+    let raw = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw
+    } else {
+        format!("http://{raw}")
+    }
 }
 
 pub async fn stream_chat_completion(

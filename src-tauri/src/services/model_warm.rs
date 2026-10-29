@@ -35,7 +35,7 @@ pub fn spawn_warm_chat_model(state: SharedState, app: AppHandle) {
             }
             Err(e) => {
                 let msg = format!(
-                    "Model warm-up failed: {}. Start Ollama, run `ollama pull {}`, then restart Cognito.",
+                    "Model warm-up failed: {}. Start Ollama, run `ollama pull {}`, then click Retry.",
                     e, settings.chat_model
                 );
                 state.set_chat_warm(Err(msg.clone()));

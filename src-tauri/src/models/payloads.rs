@@ -15,6 +15,8 @@ pub struct AppHealth {
     /// Pending if warm-up has not finished; set when warm-up fails.
     pub warm_up_pending: bool,
     pub warm_up_error: Option<String>,
+    pub ollama_reachable: bool,
+    pub missing_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

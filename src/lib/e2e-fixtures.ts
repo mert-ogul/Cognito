@@ -9,6 +9,8 @@ export const E2E_HEALTH = {
   chatModelWarmed: true,
   warmUpPending: false,
   warmUpError: null,
+  ollamaReachable: true,
+  missingModels: [] as string[],
 } as const;
 
 export const E2E_DOCUMENTS = [

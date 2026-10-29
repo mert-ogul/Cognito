@@ -21,6 +21,8 @@ vi.mock("@tauri-apps/api/core", () => ({
         chatModelWarmed: true,
         warmUpPending: false,
         warmUpError: null,
+        ollamaReachable: true,
+        missingModels: [],
       };
     }
     if (cmd === "list_documents") {
