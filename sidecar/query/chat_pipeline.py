@@ -1,4 +1,4 @@
-"""Deterministic hybrid retrieval: vector top-k → entity terms → graph ≤2 hops → grounded context."""
+"""Deterministic hybrid retrieval: vector top-k → graph ≤2 hops → grounded context."""
 
 from __future__ import annotations
 
@@ -20,13 +20,13 @@ from common.sqlite_vec_util import (
 from common.ollama import embed_text
 from extraction.node_normalizer import normalize_name
 
+_CITE_MARK_RE = re.compile(r"\[\d+\]")
+_HISTORY_TURN_CAP = 2000
+_HISTORY_TOTAL_CAP = 6000
+
 
 class EmbeddingDimMismatch(Exception):
     """Query embedding length does not match the stored index."""
-
-
-def _words(text: str) -> set[str]:
-    return set(re.findall(r"\b[\w\-]{3,}\b", text.lower()))
 
 
 def _indexed_chunk_count(sqlite_path: str) -> int:
@@ -163,23 +163,96 @@ def _two_hop_subgraph(
     return nrows, erows, ordered
 
 
-def _match_seed_nodes(con: duckdb.DuckDBPyConnection, terms: set[str]) -> list[str]:
-    if not terms:
+def _seeds_from_chunk_edges(
+    con: duckdb.DuckDBPyConnection, chunk_ids: list[str]
+) -> list[str]:
+    if not chunk_ids:
         return []
-    norms = []
-    for t in terms:
-        n = normalize_name(t)
-        if len(n) >= 2:
-            norms.append(n)
-    norms = list(dict.fromkeys(norms))[:24]
-    if not norms:
-        return []
-    ph = ",".join(["?"] * len(norms))
+    ph = ",".join(["?"] * len(chunk_ids))
     rows = con.execute(
-        f"SELECT node_id FROM graph_nodes WHERE normalized_name IN ({ph}) LIMIT 16",
-        norms,
+        f"""
+        SELECT DISTINCT source_node_id, target_node_id
+        FROM graph_edges
+        WHERE chunk_id IN ({ph})
+        """,
+        chunk_ids,
     ).fetchall()
-    return [str(r[0]) for r in rows]
+    out: list[str] = []
+    seen: set[str] = set()
+    for s, t in rows:
+        for nid in (str(s), str(t)):
+            if nid not in seen:
+                seen.add(nid)
+                out.append(nid)
+    return out
+
+
+def _seeds_from_question_names(
+    con: duckdb.DuckDBPyConnection, question: str
+) -> list[str]:
+    nq = normalize_name(question)
+    if not nq:
+        return []
+    rows = con.execute(
+        "SELECT node_id, normalized_name FROM graph_nodes WHERE length(normalized_name) >= 3"
+    ).fetchall()
+    out: list[str] = []
+    for nid, nn in rows:
+        name = str(nn)
+        if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", nq):
+            out.append(str(nid))
+    return out
+
+
+def _node_ids_for_chunk(con: duckdb.DuckDBPyConnection, chunk_id: str) -> list[str]:
+    rows = con.execute(
+        """
+        SELECT DISTINCT source_node_id, target_node_id
+        FROM graph_edges WHERE chunk_id = ?
+        """,
+        [chunk_id],
+    ).fetchall()
+    out: list[str] = []
+    seen: set[str] = set()
+    for s, t in rows:
+        for nid in (str(s), str(t)):
+            if nid not in seen:
+                seen.add(nid)
+                out.append(nid)
+    return out
+
+
+def _strip_cite_markers(text: str) -> str:
+    return _CITE_MARK_RE.sub("", text)
+
+
+def prepare_history(history: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+    prepared: list[dict[str, str]] = []
+    for turn in history or []:
+        role = str(turn.get("role") or "")
+        if role not in ("user", "assistant", "system"):
+            continue
+        content = str(turn.get("content") or "")
+        if role == "assistant":
+            content = _strip_cite_markers(content)
+        content = content[:_HISTORY_TURN_CAP]
+        if not content.strip():
+            continue
+        prepared.append({"role": role, "content": content})
+    while sum(len(t["content"]) for t in prepared) > _HISTORY_TOTAL_CAP and prepared:
+        prepared.pop(0)
+    return prepared
+
+
+def embed_query_text(query: str, history: list[dict[str, Any]] | None) -> str:
+    prev_user = None
+    for turn in reversed(history or []):
+        if str(turn.get("role") or "") == "user":
+            prev_user = str(turn.get("content") or "").strip()
+            break
+    if prev_user:
+        return f"{prev_user}\n{query}"
+    return query
 
 
 def prepare_chat_retrieval(
@@ -190,21 +263,25 @@ def prepare_chat_retrieval(
     top_k: int = 12,
     max_chunks_in_prompt: int = 8,
     max_evidence_chars: int = 9000,
+    history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Deterministic pipeline (no routing classifier):
     1) vector top-k chunks
-    2) candidate terms from query + retrieved text
-    3) graph seeds + up to 2-hop subgraph when DuckDB available
+    2) graph seeds from chunk edges + question entity names
+    3) up to 2-hop subgraph when DuckDB available
     4) grounded prompt messages for the chat model
     """
+    hist_raw = list(history or [])
+    search_text = embed_query_text(query, hist_raw)
     try:
-        chunks = vector_top_k(sqlite_path, embed_model, query, top_k)
+        chunks = vector_top_k(sqlite_path, embed_model, search_text, top_k)
     except EmbeddingDimMismatch:
         return _query_embedding_failed(
             query,
             "The embedding model does not match the index. Open Settings and rebuild the index.",
         )
+    hist_msgs = prepare_history(hist_raw)
     if not chunks:
         if _indexed_chunk_count(sqlite_path) > 0:
             return _query_embedding_failed(
@@ -223,44 +300,64 @@ def prepare_chat_retrieval(
                     "role": "system",
                     "content": "You are a helpful assistant. There is no indexed content in the library yet.",
                 },
+                *hist_msgs,
                 {"role": "user", "content": query},
             ],
             "graphAugmented": False,
             "graphNodeIds": [],
+            "embedQuery": search_text,
         }
 
-    terms: set[str] = _words(query)
-    for c in chunks[:max_chunks_in_prompt]:
-        terms |= _words(c["text"][:2000])
+    prompt_chunks = chunks[:max_chunks_in_prompt]
+    chunk_index = {c["chunk_id"]: i + 1 for i, c in enumerate(prompt_chunks)}
+    retrieved_ids = [c["chunk_id"] for c in prompt_chunks]
 
     graph_block = ""
     graph_augmented = False
     graph_node_ids: list[str] = []
     edge_note_lines: list[str] = []
+    name_by_id: dict[str, str] = {}
+    chunk_node_ids: dict[str, list[str]] = {cid: [] for cid in retrieved_ids}
 
     if duck_path:
         try:
             ensure_schema(duck_path)
             gcon = duckdb.connect(duck_path)
             try:
-                seeds = _match_seed_nodes(gcon, terms)
+                seeds: list[str] = []
+                seen: set[str] = set()
+                for nid in _seeds_from_chunk_edges(gcon, retrieved_ids) + _seeds_from_question_names(
+                    gcon, query
+                ):
+                    if nid not in seen:
+                        seen.add(nid)
+                        seeds.append(nid)
+                    if len(seeds) >= 12:
+                        break
+                for cid in retrieved_ids:
+                    chunk_node_ids[cid] = _node_ids_for_chunk(gcon, cid)
                 if seeds:
                     nrows, erows, ordered = _two_hop_subgraph(gcon, seeds)
-                    graph_augmented = bool(nrows or erows)
+                    name_by_id = {str(r[0]): str(r[1]) for r in nrows}
                     graph_node_ids = ordered[:32]
-                    node_lines = [f"- {r[1]} ({r[2]}) [node:{r[0]}]" for r in nrows[:20]]
-                    for s, t, rel, did, cid in [
-                        (e[1], e[2], e[3], e[4], e[5]) for e in erows[:30]
-                    ]:
-                        edge_note_lines.append(
-                            f"- {s} —[{rel}]→ {t} (doc:{did[:8]}… chunk:{cid[:8]}…)"
-                        )
-                    parts = ["GRAPH_EVIDENCE (relations supported by stored extractions):"]
-                    if node_lines:
-                        parts.append("Nodes:\n" + "\n".join(node_lines))
-                    if edge_note_lines:
-                        parts.append("Edges:\n" + "\n".join(edge_note_lines))
-                    graph_block = "\n".join(parts)
+                    node_lines = [f"- {r[1]} ({r[2]})" for r in nrows[:20]]
+                    for e in erows[:30]:
+                        _eid, s, t, rel, _did, cid = e
+                        src = name_by_id.get(str(s), str(s))
+                        tgt = name_by_id.get(str(t), str(t))
+                        k = chunk_index.get(str(cid))
+                        if k is not None:
+                            edge_note_lines.append(f"- {src} —[{rel}]→ {tgt} (from [{k}])")
+                        else:
+                            edge_note_lines.append(f"- {src} —[{rel}]→ {tgt}")
+                    if nrows or erows:
+                        graph_augmented = True
+                        parts = ["GRAPH_EVIDENCE (relations supported by stored extractions):"]
+                        if node_lines:
+                            parts.append("Nodes:\n" + "\n".join(node_lines))
+                        if edge_note_lines:
+                            parts.append("Edges:\n" + "\n".join(edge_note_lines))
+                        graph_block = "\n".join(parts)
             finally:
                 gcon.close()
         except Exception:
@@ -272,18 +369,19 @@ def prepare_chat_retrieval(
         graph_block = (
             "(Graph evidence is not available for this answer — using retrieved chunks only.)"
         )
+        graph_augmented = False
     else:
         retrieval_mode = "hybrid"
 
     evidence_parts: list[str] = []
     citations: list[dict[str, Any]] = []
-    for i, c in enumerate(chunks[:max_chunks_in_prompt]):
-        label = f"CHUNK_EVIDENCE[{i + 1}]"
+    for i, c in enumerate(prompt_chunks):
+        n = i + 1
         snippet = (c["text"] or "")[:1200]
         evidence_parts.append(
-            f"{label} title={c['title']} document_id={c['document_id']} chunk_id={c['chunk_id']}\n{snippet}"
+            f"[{n}] title={c['title']} document_id={c['document_id']} chunk_id={c['chunk_id']}\n{snippet}"
         )
-        nids = list(graph_node_ids[:16]) if retrieval_mode == "hybrid" else []
+        nids = chunk_node_ids.get(c["chunk_id"], []) if retrieval_mode == "hybrid" else []
         citations.append(
             {
                 "documentId": c["document_id"],
@@ -293,7 +391,8 @@ def prepare_chat_retrieval(
                 "pageEnd": c["page_end"],
                 "chunkId": c["chunk_id"],
                 "snippet": (c["text"] or "")[:400],
-                "nodeIds": nids,
+                "nodeIds": nids[:16],
+                "index": n,
             }
         )
 
@@ -302,10 +401,11 @@ def prepare_chat_retrieval(
         evidence_body = evidence_body[:max_evidence_chars] + "\n…"
 
     sys_prompt = (
-        "You are a careful assistant. Answer using ONLY the labeled CHUNK_EVIDENCE and GRAPH_EVIDENCE above. "
+        "You are a careful assistant. Answer using ONLY the numbered evidence [1]…[n] and GRAPH_EVIDENCE below. "
+        "Cite the numbers you use inline as [n] right after the sentence they support. "
+        "Use only listed numbers. If the evidence does not answer the question, say so briefly. "
         "If GRAPH_EVIDENCE says it is unavailable, do not invent graph facts. "
-        "If evidence is insufficient, say you are uncertain. Do not fabricate citations. "
-        "Keep answers concise unless the user asks for detail."
+        "Do not fabricate citations. Keep answers concise unless the user asks for detail."
     )
     user_content = (
         f"Question:\n{query}\n\n"
@@ -318,10 +418,12 @@ def prepare_chat_retrieval(
         "citations": citations,
         "messages": [
             {"role": "system", "content": sys_prompt},
+            *hist_msgs,
             {"role": "user", "content": user_content[:14000]},
         ],
         "graphAugmented": graph_augmented,
         "graphNodeIds": graph_node_ids,
+        "embedQuery": search_text,
     }
 
 

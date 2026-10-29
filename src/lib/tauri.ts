@@ -135,6 +135,12 @@ export type CitationItem = {
   chunkId: string;
   snippet: string;
   nodeIds: string[];
+  index: number;
+};
+
+export type ChatTurn = {
+  role: "user" | "assistant" | "system";
+  content: string;
 };
 
 export async function getDocumentPreview(
@@ -170,11 +176,14 @@ export async function openDocument(documentId: string): Promise<void> {
   return invoke("open_document", { documentId });
 }
 
-export async function sendChatQuery(query: string, messageId: string): Promise<string> {
+export async function sendChatQuery(
+  query: string,
+  messageId: string,
+  history: ChatTurn[] = [],
+): Promise<string> {
   if (e2e) {
     window.setTimeout(() => {
-      e2eEmit("chat-stream", { messageId, token: "Hello " });
-      e2eEmit("chat-stream", { messageId, token: "world." });
+      e2eEmit("chat-stream", { messageId, token: "Hello world [1]." });
       e2eEmit("chat-final", {
         messageId,
         citations: [
@@ -187,6 +196,7 @@ export async function sendChatQuery(query: string, messageId: string): Promise<s
             chunkId: "c1",
             snippet: "fixture evidence text",
             nodeIds: ["n-e2e-1"],
+            index: 1,
           },
         ],
         retrievalMode: "hybrid",
@@ -195,7 +205,7 @@ export async function sendChatQuery(query: string, messageId: string): Promise<s
     }, 30);
     return messageId;
   }
-  return invoke<string>("send_chat_query", { query, messageId });
+  return invoke<string>("send_chat_query", { query, messageId, history });
 }
 
 export async function getGraphSnapshot(limitNodes?: number | null): Promise<GraphSnapshot> {

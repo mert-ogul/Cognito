@@ -4,7 +4,7 @@ use crate::app::state::SharedState;
 use crate::db::sqlite;
 use crate::errors::CognitoResult;
 use crate::events::{CHAT_FINAL, CHAT_STREAM};
-use crate::models::{ChatFinalResult, ChatStreamEvent, CitationItem};
+use crate::models::{ChatFinalResult, ChatStreamEvent, ChatTurn, CitationItem};
 use crate::services::ollama_stream;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
@@ -18,6 +18,7 @@ pub async fn run_chat_query(
     app: AppHandle,
     query: String,
     message_id: String,
+    history: Vec<ChatTurn>,
 ) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
     let duck_path = state.duckdb_path();
@@ -30,6 +31,7 @@ pub async fn run_chat_query(
                 "duckdb_path": sp(&duck_path),
                 "query": query,
                 "embed_model": settings.embed_model,
+                "history": history,
             }),
         )
     }) {
