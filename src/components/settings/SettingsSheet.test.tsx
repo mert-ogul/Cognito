@@ -43,6 +43,9 @@ describe("SettingsSheet", () => {
           },
         ];
       }
+      if (cmd === "select_vault_folder") {
+        return "/vault-b";
+      }
       return {};
     });
   });
@@ -68,5 +71,29 @@ describe("SettingsSheet", () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.getByLabelText("Embedding model")).toHaveValue("nomic-embed-text"));
+  });
+
+  it("shows Change folder confirmation with document count; Cancel leaves settings unchanged", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <SettingsSheet open onOpenChange={() => {}} />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("/vault")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Change folder" }));
+    expect(
+      await screen.findByText(
+        /Switching to \/vault-b removes the 1 documents from \/vault from Cognito\. Your files stay where they are\./,
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => {
+      expect(screen.queryByText(/Switching to/)).not.toBeInTheDocument();
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("set_vault", expect.anything());
+    expect(screen.getByText("/vault")).toBeInTheDocument();
   });
 });

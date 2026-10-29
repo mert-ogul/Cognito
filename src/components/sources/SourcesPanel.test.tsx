@@ -1,5 +1,5 @@
 import { listen } from "@/lib/tauri-events";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SourcesPanel } from "./SourcesPanel";
@@ -130,6 +130,36 @@ describe("SourcesPanel", () => {
     expect(screen.getByText(/100 documents/)).toBeInTheDocument();
   });
 
+  it("empty-state Choose a folder calls setVault", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_documents") return [];
+      if (cmd === "get_settings") {
+        return {
+          vaultPath: null,
+          chatModel: "phi4-mini",
+          embedModel: "nomic-embed-text",
+          graphExtractionEnabled: true,
+        };
+      }
+      if (cmd === "select_vault_folder") return "/chosen";
+      if (cmd === "set_vault") return "job-1";
+      return {};
+    });
+    const client = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <SourcesPanel />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Choose a folder" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("select_vault_folder");
+      expect(invokeMock).toHaveBeenCalledWith("set_vault", { path: "/chosen" });
+    });
+  });
+
   it("shows graph waiting count for pending documents", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "list_documents") {
@@ -209,7 +239,7 @@ describe("SourcesPanel", () => {
         <SourcesPanel />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByRole("button", { name: "Import vault" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Import" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "No PDF or Markdown files found.",
     );

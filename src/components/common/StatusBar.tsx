@@ -27,7 +27,6 @@ export function StatusBar({ health, onOpenSettings }: Props) {
         <Pill label="Ollama" ok={health?.ollamaModelReady} />
         <Pill label="Model ready" ok={modelReady} detail={health?.warmUpError} />
         <Pill label="SQLite" ok={health?.sqliteOk} />
-        <Pill label="DuckDB" ok={health?.duckdbOk} />
         <Pill label="Vault" ok={health?.vaultConfigured} />
         <RetrievalPill mode={lastRetrievalMode} />
         <Button

@@ -19,9 +19,7 @@ use services::graph_worker;
 use services::model_warm;
 use sidecar::SidecarPool;
 use sidecar_paths::resolve_sidecar_paths;
-use serde_json::json;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
 use tauri::Manager;
@@ -57,23 +55,7 @@ pub fn run() {
                     let _ = f.flush();
                 }
             }
-            {
-                let st = state.clone();
-                std::thread::spawn(move || {
-                    let duck = st.duckdb_path();
-                    let ok = st
-                        .sidecar
-                        .with_session(|s| {
-                            s.request(
-                                "init_graph_store",
-                                json!({ "duckdb_path": duck.to_string_lossy() }),
-                            )
-                        })
-                        .is_ok();
-                    st.graph_store_ready.store(ok, Ordering::SeqCst);
-                });
-            }
-            let (reload_tx, reload_rx) = mpsc::channel::<PathBuf>();
+            let (reload_tx, reload_rx) = mpsc::channel::<Option<PathBuf>>();
             {
                 let mut wg = state
                     .watcher_tx
@@ -84,7 +66,7 @@ pub fn run() {
             file_watcher::spawn_background(state.clone(), app.handle().clone(), reload_rx);
             if let Ok(s) = state.with_sqlite(|c| sqlite::load_settings(c)) {
                 if let Some(vp) = s.vault_path {
-                    let _ = reload_tx.send(PathBuf::from(vp));
+                    let _ = reload_tx.send(Some(PathBuf::from(vp)));
                 }
             }
             graph_worker::spawn(state.clone(), app.handle().clone());
@@ -94,6 +76,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::select_vault_folder,
+            commands::set_vault,
+            commands::clear_library,
             commands::get_app_health,
             commands::ping_sidecar,
             commands::warm_chat_model,

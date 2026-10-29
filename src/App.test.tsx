@@ -12,7 +12,6 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "get_app_health") {
       return {
         sqliteOk: true,
-        duckdbOk: true,
         sidecarReachable: true,
         ollamaModelReady: true,
         vaultConfigured: false,

@@ -5,7 +5,6 @@ import type { AppHealth } from "@/lib/tauri";
 
 const base: AppHealth = {
   sqliteOk: true,
-  duckdbOk: true,
   sidecarReachable: true,
   ollamaModelReady: false,
   vaultConfigured: true,

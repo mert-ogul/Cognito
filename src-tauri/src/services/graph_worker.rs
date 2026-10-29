@@ -118,6 +118,12 @@ fn process_one_document(
                 return Ok(());
             }
         }
+        let still_after =
+            state.with_sqlite(|c| sqlite::document_graph_still_running(c, document_id))?;
+        if !still_after {
+            sidecar_purge_graph(state, &duck_path, document_id)?;
+            return Ok(());
+        }
     }
     state.with_sqlite(|c| sqlite::mark_document_graph_ok(c, document_id))?;
     emit_graph(app, None, document_id, "ok", None);
@@ -145,7 +151,14 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> usize {
         let Some(doc_id) = next else {
             break;
         };
-        let _ = process_one_document(state, app, &doc_id);
+        if let Err(e) = process_one_document(state, app, &doc_id) {
+            let msg = e.to_string();
+            let _ = state.with_sqlite(|c| sqlite::mark_document_graph_failed(c, &doc_id, &msg));
+            emit_graph(app, None, &doc_id, "failed", Some(&msg));
+            if let Some(a) = app {
+                let _ = a.emit(LIBRARY_CHANGED, &());
+            }
+        }
         n += 1;
     }
     n
@@ -169,5 +182,63 @@ fn worker_loop(state: SharedState, app: AppHandle, rx: Receiver<()>) {
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::AppState;
+    use crate::sidecar::SidecarPool;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    #[test]
+    fn process_pending_marks_failed_when_purge_errors() {
+        let data = tempfile::tempdir().expect("data tempdir");
+        let pool = SidecarPool::new(
+            PathBuf::from("/nonexistent/cognito-sidecar/main.py"),
+            PathBuf::from("/nonexistent/cognito-sidecar"),
+            data.path().join("sidecar.log"),
+        );
+        let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
+        let doc_id = "doc-purge-fail";
+        state
+            .with_sqlite(|c| {
+                sqlite::insert_document_row(
+                    c,
+                    doc_id,
+                    "/tmp/note.md",
+                    "note",
+                    "markdown",
+                    "hash",
+                    None,
+                    "indexed",
+                    None,
+                )?;
+                c.execute(
+                    "UPDATE documents SET graph_status = 'pending' WHERE id = ?1",
+                    [doc_id],
+                )
+                .map_err(|e| crate::errors::CognitoError::Database(e.to_string()))?;
+                Ok(())
+            })
+            .expect("seed document");
+
+        let n = process_pending(&state, None);
+        assert_eq!(n, 1);
+
+        let (status, err): (String, Option<String>) = state
+            .with_sqlite(|c| {
+                c.query_row(
+                    "SELECT graph_status, graph_error FROM documents WHERE id = ?1",
+                    [doc_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|e| crate::errors::CognitoError::Database(e.to_string()))
+            })
+            .expect("read status");
+        assert_eq!(status, "failed");
+        assert!(err.as_ref().map(|e| !e.is_empty()).unwrap_or(false));
     }
 }

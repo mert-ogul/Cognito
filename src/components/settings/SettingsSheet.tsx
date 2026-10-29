@@ -3,7 +3,15 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { getSettings, listDocuments, rebuildIndex, updateSettings } from "@/lib/tauri";
+import {
+  clearLibrary,
+  getSettings,
+  listDocuments,
+  rebuildIndex,
+  selectVaultFolder,
+  setVault,
+  updateSettings,
+} from "@/lib/tauri";
 import { getVersion } from "@tauri-apps/api/app";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
@@ -13,7 +21,7 @@ type Props = {
   onOpenChange: (open: boolean) => void;
 };
 
-type ConfirmKind = "save-rebuild" | "rebuild" | null;
+type ConfirmKind = "save-rebuild" | "rebuild" | "change-folder" | "remove-library" | null;
 
 export function SettingsSheet({ open, onOpenChange }: Props) {
   const qc = useQueryClient();
@@ -24,6 +32,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
   const [graphOn, setGraphOn] = useState(true);
   const [ver, setVer] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmKind>(null);
+  const [pendingFolder, setPendingFolder] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -44,18 +53,29 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     setEmbed(data.embedModel);
     setGraphOn(data.graphExtractionEnabled);
     setConfirm(null);
+    setPendingFolder(null);
     setActionError(null);
   }, [data]);
 
   const docCount = docs.data?.length ?? 0;
+  const folderLabel = data?.vaultPath ?? "Not configured";
   const embedChanged = !!data && embed.trim() !== data.embedModel;
   const needsRebuildSave = embedChanged && docCount > 0;
   const confirmModel = confirm === "save-rebuild" ? embed.trim() : (data?.embedModel ?? embed);
 
   const confirmText = useMemo(() => {
     if (!confirm) return null;
+    if (confirm === "change-folder" && pendingFolder) {
+      return `Switching to ${pendingFolder} removes the ${docCount} documents from ${folderLabel} from Cognito. Your files stay where they are.`;
+    }
+    if (confirm === "rebuild") {
+      return `Every document in ${folderLabel} is indexed again and the graph is rebuilt.`;
+    }
+    if (confirm === "remove-library") {
+      return `Cognito forgets ${folderLabel} and deletes its index and graph. Your files stay where they are.`;
+    }
     return `All ${docCount} documents will be indexed again with ${confirmModel}, and the graph will be rebuilt.`;
-  }, [confirm, confirmModel, docCount]);
+  }, [confirm, confirmModel, docCount, folderLabel, pendingFolder]);
 
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: ["settings"] });
@@ -92,7 +112,30 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     if (confirm === "save-rebuild" && data) {
       setEmbed(data.embedModel);
     }
+    setPendingFolder(null);
     setConfirm(null);
+  };
+
+  const onChangeFolder = async () => {
+    setActionError(null);
+    try {
+      const picked = await selectVaultFolder();
+      if (!picked) return;
+      if (docCount === 0) {
+        setBusy(true);
+        try {
+          await setVault(picked);
+          invalidate();
+        } finally {
+          setBusy(false);
+        }
+        return;
+      }
+      setPendingFolder(picked);
+      setConfirm("change-folder");
+    } catch (e) {
+      setActionError(String(e));
+    }
   };
 
   const runConfirmed = async () => {
@@ -108,9 +151,14 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
           graphExtractionEnabled: graphOn,
         });
         await rebuildIndex(embed.trim());
-      } else {
+      } else if (confirm === "rebuild") {
         await rebuildIndex();
+      } else if (confirm === "change-folder" && pendingFolder) {
+        await setVault(pendingFolder);
+      } else if (confirm === "remove-library") {
+        await clearLibrary();
       }
+      setPendingFolder(null);
       setConfirm(null);
       invalidate();
     } catch (e) {
@@ -129,11 +177,46 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
         <p className="text-xs text-[var(--muted)]">
           Cognito works offline for your library. No account is required.
         </p>
-        <div className="space-y-2">
-          <Label htmlFor="vault-path">Vault folder</Label>
-          <p id="vault-path" className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 font-mono text-[11px] break-all">
-            {data?.vaultPath ?? "Not configured"}
+        <div className="space-y-2 rounded-md border border-[var(--border)] p-3">
+          <p className="text-sm font-medium">Library</p>
+          <p className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 font-mono text-[11px] break-all">
+            {folderLabel}
           </p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={busy || !!confirm}
+              onClick={() => void onChangeFolder()}
+            >
+              Change folder
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={busy || !!confirm || docCount === 0 || !data?.vaultPath}
+              onClick={() => {
+                setActionError(null);
+                setConfirm("rebuild");
+              }}
+            >
+              Rebuild index
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={busy || !!confirm || !data?.vaultPath}
+              onClick={() => {
+                setActionError(null);
+                setConfirm("remove-library");
+              }}
+            >
+              Remove library
+            </Button>
+          </div>
         </div>
         <div className="grid gap-3">
           <div className="space-y-1">
@@ -181,17 +264,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
           </p>
         ) : null}
         <div className="flex flex-wrap justify-end gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            disabled={busy || savePlain.isPending || docCount === 0}
-            onClick={() => {
-              setActionError(null);
-              setConfirm("rebuild");
-            }}
-          >
-            Rebuild index
-          </Button>
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             Close
           </Button>

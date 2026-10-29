@@ -2,7 +2,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
-import { useAppHealth } from "@/hooks/useAppHealth";
 import { getGraphSnapshot, searchGraphNodes, type GraphSnapshot } from "@/lib/tauri";
 import { useGraphSessionStore } from "@/stores/graphSessionStore";
 import { useQuery } from "@tanstack/react-query";
@@ -15,7 +14,6 @@ type SearchHit = { nodeId: string; name: string; kind: string; sourceCount?: num
 const SNAPSHOT_STEPS = [200, 400] as const;
 
 export function GraphPanel() {
-  const { data: health } = useAppHealth();
   const [limitIdx, setLimitIdx] = useState(0);
   const limit = SNAPSHOT_STEPS[limitIdx] ?? 200;
   const [search, setSearch] = useState("");
@@ -26,18 +24,15 @@ export function GraphPanel() {
   const [centerOn, setCenterOn] = useState<string | null>(null);
   const highlightNodeIds = useGraphSessionStore((s) => s.highlightNodeIds);
 
-  const duckOk = !!health?.duckdbOk;
-
   const snapQ = useQuery({
     queryKey: ["graph-snapshot", limit],
     queryFn: () => getGraphSnapshot(limit),
-    enabled: duckOk,
   });
 
   const searchQ = useQuery({
     queryKey: ["graph-search", debouncedSearch],
     queryFn: () => searchGraphNodes(debouncedSearch.trim(), 24) as Promise<SearchHit[]>,
-    enabled: duckOk && debouncedSearch.trim().length >= 2,
+    enabled: debouncedSearch.trim().length >= 2,
   });
 
   const snapshot = snapQ.data ?? null;
@@ -63,19 +58,6 @@ export function GraphPanel() {
     },
     [openNode],
   );
-
-  if (!duckOk) {
-    return (
-      <Card className="flex h-full min-h-0 flex-col">
-        <CardHeader>
-          <CardTitle>Graph</CardTitle>
-        </CardHeader>
-        <CardContent className="text-xs text-[var(--muted)]">
-          Graph store is not available yet. Retrieval will use vector-only until DuckDB is ready.
-        </CardContent>
-      </Card>
-    );
-  }
 
   return (
     <Card className="relative flex h-full min-h-0 flex-col overflow-hidden">
@@ -130,9 +112,12 @@ export function GraphPanel() {
       <CardContent className="flex min-h-0 flex-1 flex-col gap-2">
         {snapQ.isLoading ? <p className="text-xs text-[var(--muted)]">Loading graph…</p> : null}
         {snapQ.isError ? (
-          <p className="text-xs text-red-500" role="alert">
-            Could not load graph snapshot.
-          </p>
+          <div className="flex flex-wrap items-center gap-2" role="alert">
+            <p className="text-xs text-red-500">Couldn&apos;t load the graph</p>
+            <Button type="button" size="sm" variant="outline" onClick={() => void snapQ.refetch()}>
+              Retry
+            </Button>
+          </div>
         ) : null}
         <GraphCyCanvas
           snapshot={snapshot as GraphSnapshot | null}

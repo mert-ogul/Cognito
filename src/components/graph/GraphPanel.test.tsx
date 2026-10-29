@@ -1,22 +1,45 @@
 import { GraphPanel } from "@/components/graph/GraphPanel";
-import { useAppHealth } from "@/hooks/useAppHealth";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/hooks/useAppHealth", () => ({
-  useAppHealth: vi.fn(),
+const invokeMock = vi.fn();
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 
 describe("GraphPanel", () => {
-  it("shows unavailable message when DuckDB is not ready", () => {
-    vi.mocked(useAppHealth).mockReturnValue({ data: { duckdbOk: false } } as never);
-    const client = new QueryClient();
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("shows Retry when the snapshot fails", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_graph_snapshot") {
+        throw new Error("duckdb unavailable");
+      }
+      return {};
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
     render(
       <QueryClientProvider client={client}>
         <GraphPanel />
       </QueryClientProvider>,
     );
-    expect(screen.getByText(/Graph store is not available/)).toBeInTheDocument();
+    expect(await screen.findByText(/Couldn't load the graph/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_graph_snapshot") {
+        return { nodes: [], edges: [] };
+      }
+      return {};
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("get_graph_snapshot", expect.anything());
+    });
   });
 });

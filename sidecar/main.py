@@ -34,7 +34,6 @@ from ingestion.rpc_ingest import (
     rpc_purge_chunk_embeddings,
     rpc_reset_index,
 )
-from common.duckdb_util import ensure_schema
 from query.graph_read import node_detail as graph_node_detail
 from query.graph_read import search_nodes as graph_search_nodes
 from query.graph_read import snapshot as graph_snapshot
@@ -118,9 +117,6 @@ def dispatch(method: str, params: dict) -> Any:
             params["duckdb_path"],
             str(params["node_id"]),
         )
-    if method == "init_graph_store":
-        ensure_schema(str(params["duckdb_path"]))
-        return {"ok": True}
     raise ValueError(f"unknown method: {method}")
 
 

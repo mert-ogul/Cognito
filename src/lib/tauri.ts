@@ -6,7 +6,6 @@ const e2e = import.meta.env.VITE_E2E === true || import.meta.env.VITE_E2E === "t
 
 export type AppHealth = {
   sqliteOk: boolean;
-  duckdbOk: boolean;
   sidecarReachable: boolean;
   ollamaModelReady: boolean;
   vaultConfigured: boolean;
@@ -103,6 +102,21 @@ export async function selectVaultFolder(): Promise<string | null> {
     return "/fixture";
   }
   return invoke("select_vault_folder");
+}
+
+export async function setVault(path: string): Promise<string | null> {
+  if (e2e) {
+    void path;
+    return "e2e-set-vault";
+  }
+  return invoke("set_vault", { path });
+}
+
+export async function clearLibrary(): Promise<void> {
+  if (e2e) {
+    return;
+  }
+  return invoke("clear_library");
 }
 
 export async function listDocuments(): Promise<DocumentRow[]> {

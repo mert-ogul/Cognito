@@ -3,8 +3,8 @@ use crate::db::sqlite;
 use crate::events::{IMPORT_PROGRESS, LIBRARY_CHANGED};
 use crate::models::{DocumentPreview, DocumentRow, ImportProgress};
 use crate::services::import_job;
-use crate::services::index_rebuild;
 use crate::services::ingest;
+use crate::services::library;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter};
@@ -67,7 +67,19 @@ pub async fn open_document(
     Ok(())
 }
 
-pub(crate) fn spawn_import_job(
+pub(crate) fn try_lock_import(state: &SharedState) -> Result<(), String> {
+    if state.import_running.swap(true, Ordering::SeqCst) {
+        return Err("An import is already running.".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn release_import(state: &SharedState) {
+    state.import_running.store(false, Ordering::SeqCst);
+}
+
+/// Assumes the import lock is held; releases it when the thread ends.
+pub(crate) fn spawn_import_thread(
     app: AppHandle,
     state: &SharedState,
     job_id: String,
@@ -75,10 +87,7 @@ pub(crate) fn spawn_import_job(
     paths: Vec<PathBuf>,
     embed: String,
     chat: String,
-) -> Result<(), String> {
-    if state.import_running.swap(true, Ordering::SeqCst) {
-        return Err("An import is already running.".to_string());
-    }
+) {
     let st: SharedState = state.clone();
     let app_c = app.clone();
     let jid = job_id.clone();
@@ -111,7 +120,6 @@ pub(crate) fn spawn_import_job(
         }
         st.import_running.store(false, Ordering::SeqCst);
     });
-    Ok(())
 }
 
 #[tauri::command]
@@ -120,34 +128,59 @@ pub async fn import_documents(
     state: tauri::State<'_, SharedState>,
     folder: Option<String>,
 ) -> Result<String, String> {
+    try_lock_import(&*state)?;
     let job_id = Uuid::new_v4().to_string();
-    let settings = state
-        .with_sqlite(|c| sqlite::load_settings(c))
-        .map_err(|e| e.to_string())?;
-    let vault_str = settings
-        .vault_path
-        .clone()
-        .ok_or_else(|| "Configure a vault folder first.".to_string())?;
+    let settings = match state.with_sqlite(|c| sqlite::load_settings(c)) {
+        Ok(s) => s,
+        Err(e) => {
+            release_import(&*state);
+            return Err(e.to_string());
+        }
+    };
+    let vault_str = match settings.vault_path.clone() {
+        Some(v) => v,
+        None => {
+            release_import(&*state);
+            return Err("Configure a vault folder first.".to_string());
+        }
+    };
     let vault = PathBuf::from(&vault_str);
     let import_root = if let Some(ref f) = folder {
         let fp = PathBuf::from(f);
-        crate::vault::ensure_folder_in_vault(&vault, &fp).map_err(|e| e.to_string())?
+        match crate::vault::ensure_folder_in_vault(&vault, &fp) {
+            Ok(p) => p,
+            Err(e) => {
+                release_import(&*state);
+                return Err(e.to_string());
+            }
+        }
     } else {
         vault.clone()
     };
-    let active = state
-        .with_sqlite(|c| sqlite::count_active_documents(c))
-        .map_err(|e| e.to_string())?;
+    let active = match state.with_sqlite(|c| sqlite::count_active_documents(c)) {
+        Ok(n) => n,
+        Err(e) => {
+            release_import(&*state);
+            return Err(e.to_string());
+        }
+    };
     let slots = crate::vault::slots_remaining(active);
     if slots == 0 {
+        release_import(&*state);
         return Err("Maximum of 100 active documents reached.".to_string());
     }
-    let paths = crate::vault::collect_import_paths_bounded(&import_root, slots)
-        .map_err(|e| e.to_string())?;
+    let paths = match crate::vault::collect_import_paths_bounded(&import_root, slots) {
+        Ok(p) => p,
+        Err(e) => {
+            release_import(&*state);
+            return Err(e.to_string());
+        }
+    };
     if paths.is_empty() {
+        release_import(&*state);
         return Err("No PDF or Markdown files found.".to_string());
     }
-    spawn_import_job(
+    spawn_import_thread(
         app,
         &*state,
         job_id.clone(),
@@ -155,7 +188,7 @@ pub async fn import_documents(
         paths,
         settings.embed_model.clone(),
         settings.chat_model.clone(),
-    )?;
+    );
     Ok(job_id)
 }
 
@@ -164,22 +197,39 @@ pub async fn retry_failed_import(
     app: AppHandle,
     state: tauri::State<'_, SharedState>,
 ) -> Result<String, String> {
+    try_lock_import(&*state)?;
     let job_id = Uuid::new_v4().to_string();
-    let settings = state
-        .with_sqlite(|c| sqlite::load_settings(c))
-        .map_err(|e| e.to_string())?;
-    let vault_str = settings
-        .vault_path
-        .clone()
-        .ok_or_else(|| "Configure a vault folder first.".to_string())?;
+    let settings = match state.with_sqlite(|c| sqlite::load_settings(c)) {
+        Ok(s) => s,
+        Err(e) => {
+            release_import(&*state);
+            return Err(e.to_string());
+        }
+    };
+    let vault_str = match settings.vault_path.clone() {
+        Some(v) => v,
+        None => {
+            release_import(&*state);
+            return Err("Configure a vault folder first.".to_string());
+        }
+    };
     let vault = PathBuf::from(&vault_str);
-    let graph_n = state
-        .with_sqlite(|c| sqlite::requeue_failed_graphs(c))
-        .map_err(|e| e.to_string())?;
-    let paths_str = state
-        .with_sqlite(|c| sqlite::failed_document_paths(c, 100))
-        .map_err(|e| e.to_string())?;
+    let graph_n = match state.with_sqlite(|c| sqlite::requeue_failed_graphs(c)) {
+        Ok(n) => n,
+        Err(e) => {
+            release_import(&*state);
+            return Err(e.to_string());
+        }
+    };
+    let paths_str = match state.with_sqlite(|c| sqlite::failed_document_paths(c, 100)) {
+        Ok(p) => p,
+        Err(e) => {
+            release_import(&*state);
+            return Err(e.to_string());
+        }
+    };
     if paths_str.is_empty() && graph_n == 0 {
+        release_import(&*state);
         return Err("No failed documents to retry.".to_string());
     }
     if graph_n > 0 {
@@ -187,7 +237,7 @@ pub async fn retry_failed_import(
     }
     if !paths_str.is_empty() {
         let paths: Vec<PathBuf> = paths_str.iter().map(PathBuf::from).collect();
-        spawn_import_job(
+        spawn_import_thread(
             app,
             &*state,
             job_id.clone(),
@@ -195,7 +245,9 @@ pub async fn retry_failed_import(
             paths,
             settings.embed_model.clone(),
             settings.chat_model.clone(),
-        )?;
+        );
+    } else {
+        release_import(&*state);
     }
     Ok(job_id)
 }
@@ -206,31 +258,33 @@ pub async fn rebuild_index(
     state: tauri::State<'_, SharedState>,
     embed_model: Option<String>,
 ) -> Result<String, String> {
-    if state.import_running.load(Ordering::SeqCst) {
-        return Err("An import is already running.".to_string());
-    }
+    try_lock_import(&*state)?;
+    let (vault, paths) = match library::plan_rebuild(&*state) {
+        Ok(v) => v,
+        Err(e) => {
+            release_import(&*state);
+            return Err(e.to_string());
+        }
+    };
     if let Some(ref model) = embed_model {
-        state
-            .with_sqlite(|c| sqlite::upsert_setting(c, "embed_model", model))
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = state.with_sqlite(|c| sqlite::upsert_setting(c, "embed_model", model)) {
+            release_import(&*state);
+            return Err(e.to_string());
+        }
     }
-    index_rebuild::reset_library(&*state).map_err(|e| e.to_string())?;
-    let settings = state
-        .with_sqlite(|c| sqlite::load_settings(c))
-        .map_err(|e| e.to_string())?;
-    let vault_str = settings
-        .vault_path
-        .clone()
-        .ok_or_else(|| "Configure a vault folder first.".to_string())?;
-    let vault = PathBuf::from(&vault_str);
-    let slots = crate::vault::slots_remaining(0);
-    let paths = crate::vault::collect_import_paths_bounded(&vault, slots)
-        .map_err(|e| e.to_string())?;
-    if paths.is_empty() {
-        return Err("No PDF or Markdown files found.".to_string());
+    if let Err(e) = library::reset(&*state) {
+        release_import(&*state);
+        return Err(e.to_string());
     }
+    let settings = match state.with_sqlite(|c| sqlite::load_settings(c)) {
+        Ok(s) => s,
+        Err(e) => {
+            release_import(&*state);
+            return Err(e.to_string());
+        }
+    };
     let job_id = Uuid::new_v4().to_string();
-    spawn_import_job(
+    spawn_import_thread(
         app,
         &*state,
         job_id.clone(),
@@ -238,6 +292,6 @@ pub async fn rebuild_index(
         paths,
         settings.embed_model.clone(),
         settings.chat_model.clone(),
-    )?;
+    );
     Ok(job_id)
 }

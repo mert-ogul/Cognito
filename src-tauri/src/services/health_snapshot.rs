@@ -5,7 +5,6 @@ use crate::errors::{CognitoError, CognitoResult};
 use crate::models::AppHealth;
 use crate::services::ollama_stream::ollama_base_url;
 use serde_json::Value;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// Configured model names that are not present in Ollama `/api/tags`.
@@ -85,7 +84,6 @@ pub async fn read_app_health(
     let st = state.clone();
     let sync = tauri::async_runtime::spawn_blocking(move || {
         let sqlite_ok = st.with_sqlite(|_| Ok(())).is_ok();
-        let duckdb_ok = st.graph_store_ready.load(Ordering::SeqCst);
         let vault_configured = st.with_sqlite(|c| {
             let o = sqlite::get_setting(c, "vault_path")?;
             Ok(o.is_some())
@@ -97,7 +95,6 @@ pub async fn read_app_health(
         let warm_up_error = st.chat_warm_error();
         Ok::<_, CognitoError>((
             sqlite_ok,
-            duckdb_ok,
             vault_configured,
             settings,
             sidecar_reachable,
@@ -111,7 +108,6 @@ pub async fn read_app_health(
 
     let (
         sqlite_ok,
-        duckdb_ok,
         vault_configured,
         settings,
         sidecar_reachable,
@@ -126,7 +122,6 @@ pub async fn read_app_health(
 
     Ok(AppHealth {
         sqlite_ok,
-        duckdb_ok,
         sidecar_reachable,
         ollama_model_ready,
         vault_configured,

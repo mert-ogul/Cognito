@@ -1,6 +1,5 @@
 export const E2E_HEALTH = {
   sqliteOk: true,
-  duckdbOk: true,
   sidecarReachable: true,
   ollamaModelReady: true,
   vaultConfigured: true,

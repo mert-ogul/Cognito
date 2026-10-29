@@ -111,17 +111,27 @@ fn restart_watcher(
     *active = Some((stop, j));
 }
 
+fn stop_active(active: &mut Option<(Arc<AtomicBool>, JoinHandle<()>)>) {
+    if let Some((stop, j)) = active.take() {
+        stop.store(true, Ordering::SeqCst);
+        let _ = j.join();
+    }
+}
+
 fn coordinator_loop(
     state: SharedState,
     app: AppHandle,
-    reload_rx: Receiver<PathBuf>,
+    reload_rx: Receiver<Option<PathBuf>>,
     file_rx: Receiver<Vec<PathBuf>>,
     file_tx: Sender<Vec<PathBuf>>,
 ) {
     let mut active: Option<(Arc<AtomicBool>, JoinHandle<()>)> = None;
     loop {
-        while let Ok(p) = reload_rx.try_recv() {
-            restart_watcher(&mut active, p, file_tx.clone());
+        while let Ok(reload) = reload_rx.try_recv() {
+            match reload {
+                Some(p) => restart_watcher(&mut active, p, file_tx.clone()),
+                None => stop_active(&mut active),
+            }
         }
         match file_rx.recv_timeout(Duration::from_millis(400)) {
             Ok(paths) => handle_watch_paths(&state, Some(&app), &paths),
@@ -129,13 +139,10 @@ fn coordinator_loop(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    if let Some((stop, j)) = active.take() {
-        stop.store(true, Ordering::SeqCst);
-        let _ = j.join();
-    }
+    stop_active(&mut active);
 }
 
-pub fn spawn_background(state: SharedState, app: AppHandle, reload_rx: Receiver<PathBuf>) {
+pub fn spawn_background(state: SharedState, app: AppHandle, reload_rx: Receiver<Option<PathBuf>>) {
     let (file_tx, file_rx) = mpsc::channel::<Vec<PathBuf>>();
     let tx_loop = file_tx.clone();
     let st = state.clone();

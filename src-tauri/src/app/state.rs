@@ -19,13 +19,11 @@ pub struct AppState {
     duckdb_path: PathBuf,
     pub sidecar: SidecarPool,
     sql: Mutex<Option<SqlConn>>,
-    pub watcher_tx: Mutex<Option<Sender<PathBuf>>>,
+    pub watcher_tx: Mutex<Option<Sender<Option<PathBuf>>>>,
     pub graph_tx: Mutex<Option<Sender<()>>>,
     /// `None` = warm-up not finished yet.
     pub chat_warm: Mutex<Option<ChatWarmResult>>,
     pub import_running: AtomicBool,
-    /// Set after background `init_graph_store` sidecar call.
-    pub graph_store_ready: AtomicBool,
 }
 
 impl AppState {
@@ -42,7 +40,6 @@ impl AppState {
             graph_tx: Mutex::new(None),
             chat_warm: Mutex::new(None),
             import_running: AtomicBool::new(false),
-            graph_store_ready: AtomicBool::new(false),
         }
     }
 
@@ -86,7 +83,15 @@ impl AppState {
     pub fn notify_watcher(&self, path: PathBuf) {
         if let Ok(g) = self.watcher_tx.lock() {
             if let Some(tx) = g.as_ref() {
-                let _ = tx.send(path);
+                let _ = tx.send(Some(path));
+            }
+        }
+    }
+
+    pub fn stop_watcher(&self) {
+        if let Ok(g) = self.watcher_tx.lock() {
+            if let Some(tx) = g.as_ref() {
+                let _ = tx.send(None);
             }
         }
     }

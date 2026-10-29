@@ -639,7 +639,7 @@ mod tests {
             .expect("index_embed_model set after import");
         assert_eq!(index_model, "nomic-embed-text");
 
-        crate::services::index_rebuild::reset_library(&state).expect("reset_library");
+        crate::services::library::reset(&state).expect("reset");
         state
             .with_sqlite(|conn| {
                 let n: i64 = conn
@@ -844,6 +844,111 @@ mod tests {
         assert!(
             nodes_after.is_empty(),
             "expected empty graph after document purge"
+        );
+
+        let vault_b = tempfile::tempdir().expect("vault B");
+        let b_note = vault_b.path().join("only-b.md");
+        std::fs::write(
+            &b_note,
+            "Folder B note about Meridian Labs.\n\nSecond paragraph.\n\nThird paragraph.\n",
+        )
+        .expect("write only-b.md");
+        let b_paths = crate::services::library::switch_vault(
+            &state,
+            &vault_b.path().to_string_lossy(),
+        )
+        .expect("switch_vault");
+        state
+            .with_sqlite(|conn| {
+                let n: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(n, 0, "switch_vault must clear documents");
+                let vp = sqlite::get_setting(conn, "vault_path")?
+                    .expect("vault_path after switch");
+                assert_eq!(PathBuf::from(&vp), vault_b.path());
+                Ok(())
+            })
+            .expect("assert switch_vault");
+        assert_eq!(b_paths.len(), 1);
+        assert_eq!(
+            b_paths[0].file_name().and_then(|n| n.to_str()),
+            Some("only-b.md")
+        );
+        let b_abs = b_note
+            .canonicalize()
+            .unwrap_or_else(|_| b_note.clone());
+
+        let (tx_b, rx_b) = mpsc::channel();
+        let st_b = state.clone();
+        let paths_b = b_paths.clone();
+        let vault_b_root = vault_b.path().to_path_buf();
+        std::thread::spawn(move || {
+            let res = run_import_job(
+                st_b,
+                None,
+                "test-job-b".into(),
+                vault_b_root,
+                paths_b,
+                "nomic-embed-text".into(),
+                "phi4-mini".into(),
+            );
+            let _ = tx_b.send(res);
+        });
+        rx_b.recv_timeout(Duration::from_secs(180))
+            .expect("B import timed out")
+            .expect("B import");
+        state
+            .with_sqlite(|conn| {
+                let n: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(n, 1);
+                let path: String = conn
+                    .query_row("SELECT path FROM documents", [], |r| r.get(0))
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(path, sp(&b_abs));
+                Ok(())
+            })
+            .expect("only B indexed");
+
+        state
+            .with_sqlite(|c| {
+                sqlite::upsert_setting(c, "vault_path", "/nonexistent/cognito-vault")?;
+                Ok(())
+            })
+            .expect("bad vault_path");
+        let rebuild_err = crate::services::library::plan_rebuild(&state);
+        assert!(rebuild_err.is_err(), "rebuild with missing vault must error");
+        state
+            .with_sqlite(|conn| {
+                let n: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(n, 1, "failed rebuild must leave documents");
+                Ok(())
+            })
+            .expect("docs after failed rebuild");
+
+        crate::services::library::forget(&state).expect("forget");
+        state
+            .with_sqlite(|conn| {
+                let n: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(n, 0);
+                assert!(sqlite::get_setting(conn, "vault_path")?.is_none());
+                Ok(())
+            })
+            .expect("empty after forget");
+        let snap_forget =
+            graph_index_service::get_graph_snapshot(&state, 400).expect("snap forget");
+        assert!(
+            snap_forget["nodes"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(false),
+            "expected empty graph after forget"
         );
     }
 }

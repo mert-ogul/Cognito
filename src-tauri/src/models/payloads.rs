@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct AppHealth {
     pub sqlite_ok: bool,
-    pub duckdb_ok: bool,
     pub sidecar_reachable: bool,
     pub ollama_model_ready: bool,
     pub vault_configured: bool,

@@ -29,7 +29,6 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
 
 const health = {
   sqliteOk: true,
-  duckdbOk: true,
   sidecarReachable: true,
   ollamaModelReady: true,
   vaultConfigured: true,

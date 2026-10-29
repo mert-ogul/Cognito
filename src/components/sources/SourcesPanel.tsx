@@ -10,6 +10,7 @@ import {
   listDocuments,
   retryFailedImport,
   selectVaultFolder,
+  setVault,
   type DocumentRow,
   type GraphExtractionProgress,
   type ImportProgress,
@@ -45,13 +46,18 @@ export function SourcesPanel() {
     queryFn: getSettings,
   });
 
-  const pickVault = useMutation({
-    mutationFn: selectVaultFolder,
+  const chooseFolder = useMutation({
+    mutationFn: async () => {
+      const path = await selectVaultFolder();
+      if (!path) return null;
+      return setVault(path);
+    },
     onMutate: () => {
       setActionError(null);
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["health"] });
+      void qc.invalidateQueries({ queryKey: ["settings"] });
       void qc.invalidateQueries({ queryKey: ["documents"] });
     },
     onError: (error) => {
@@ -142,6 +148,7 @@ export function SourcesPanel() {
 
   const rows: DocumentRow[] = docs.data ?? [];
   const showEmpty = rows.length === 0 && !docs.isLoading;
+  const vaultSet = !!settings.data?.vaultPath;
   const importPct = useMemo(() => {
     if (!progress?.totalFiles) return 0;
     return Math.round((100 * progress.completedFiles) / progress.totalFiles);
@@ -221,40 +228,44 @@ export function SourcesPanel() {
               <li>Everything stays on this device — no accounts, no cloud sync.</li>
               <li>PDF and Markdown only.</li>
               <li>First library capped at {FIRST_IMPORT_DOC_CAP} documents.</li>
-              <li>Drop a folder here or choose a vault, then import.</li>
+              <li>Drop a folder here or choose a folder.</li>
             </ul>
+            {!vaultSet ? (
+              <Button
+                type="button"
+                className="mt-3"
+                disabled={chooseFolder.isPending}
+                onClick={() => chooseFolder.mutate()}
+              >
+                {chooseFolder.isPending ? "Opening…" : "Choose a folder"}
+              </Button>
+            ) : null}
           </div>
         )}
         <p className="text-xs text-[var(--muted)]">
           Files are indexed in place, metadata lives under the app data directory.
         </p>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            disabled={pickVault.isPending}
-            onClick={() => pickVault.mutate()}
-          >
-            {pickVault.isPending ? "Opening…" : "Choose vault folder"}
-          </Button>
-          <Button
-            type="button"
-            variant="default"
-            disabled={runImport.isPending}
-            onClick={() => runImport.mutate(null)}
-          >
-            {runImport.isPending ? "Importing…" : "Import vault"}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={retry.isPending}
-            onClick={() => retry.mutate()}
-          >
-            Retry failed
-          </Button>
-        </div>
+        {vaultSet ? (
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="default"
+              disabled={runImport.isPending}
+              onClick={() => runImport.mutate(null)}
+            >
+              {runImport.isPending ? "Importing…" : "Import"}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={retry.isPending}
+              onClick={() => retry.mutate()}
+            >
+              Retry failed
+            </Button>
+          </div>
+        ) : null}
         {actionError ? (
           <p className="text-xs text-red-500" role="alert">
             {actionError}
