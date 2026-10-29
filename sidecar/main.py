@@ -4,13 +4,26 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+# Protocol replies stay on the real stdout; stray prints go to stderr (sidecar.log).
+_PROTOCOL_OUT = sys.stdout
+sys.stdout = sys.stderr
+
+logging.basicConfig(
+    stream=sys.stderr,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger("cognito.sidecar")
 
 from common.ollama import warm_model
 from ingestion.rpc_graph import rpc_extract_graph_document, rpc_purge_graph_document
@@ -29,19 +42,19 @@ from query.hybrid import health as hybrid_health
 from query.hybrid import query_hybrid
 
 
-def _reply(req_id: Any, result: dict) -> None:
+def _reply(req_id: Any, result: Any) -> None:
     msg = {"jsonrpc": "2.0", "id": req_id, "result": result}
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+    _PROTOCOL_OUT.write(json.dumps(msg) + "\n")
+    _PROTOCOL_OUT.flush()
 
 
 def _err(req_id: Any, code: int, message: str) -> None:
     msg = {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+    _PROTOCOL_OUT.write(json.dumps(msg) + "\n")
+    _PROTOCOL_OUT.flush()
 
 
-def dispatch(method: str, params: dict) -> dict:
+def dispatch(method: str, params: dict) -> Any:
     if method == "ping":
         return {"pong": True}
     if method == "health":
@@ -120,10 +133,15 @@ def main() -> None:
         if not isinstance(method, str):
             _err(req_id, -32600, "invalid method")
             continue
+        started = time.perf_counter()
         try:
             result = dispatch(method, params if isinstance(params, dict) else {})
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            log.info("rpc %s completed in %.1f ms", method, elapsed_ms)
             _reply(req_id, result)
         except Exception as exc:  # noqa: BLE001 — surface to host
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            log.exception("rpc %s failed after %.1f ms", method, elapsed_ms)
             _err(req_id, -32000, str(exc))
 
 

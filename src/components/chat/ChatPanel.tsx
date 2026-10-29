@@ -5,12 +5,14 @@ import { useRetrievalMode } from "@/context/RetrievalModeContext";
 import {
   getDocumentPreview,
   sendChatQuery,
+  warmChatModel,
   type AppHealth,
   type CitationItem,
 } from "@/lib/tauri";
 import { listen } from "@/lib/tauri-events";
 import { useGraphSessionStore } from "@/stores/graphSessionStore";
 import { cn } from "@/lib/utils";
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type ChatMessage = {
@@ -27,6 +29,7 @@ type Props = {
 };
 
 export function ChatPanel({ health }: Props) {
+  const queryClient = useQueryClient();
   const { setLastRetrievalMode } = useRetrievalMode();
   const setHighlightNodeIds = useGraphSessionStore((s) => s.setHighlightNodeIds);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -34,6 +37,7 @@ export function ChatPanel({ health }: Props) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [retryUserText, setRetryUserText] = useState<string | null>(null);
   const lastSentRef = useRef<string | null>(null);
+  const warmRetryErrorRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [preview, setPreview] = useState<{
     documentId: string;
@@ -53,6 +57,22 @@ export function ChatPanel({ health }: Props) {
       el.scrollIntoView({ behavior: "smooth" });
     }
   }, [messages, busyId]);
+
+  const retryWarmUp = useCallback(async () => {
+    await warmChatModel();
+    await queryClient.invalidateQueries({ queryKey: ["health"] });
+  }, [queryClient]);
+
+  useEffect(() => {
+    if (!health?.ollamaModelReady || !health.warmUpError) {
+      return;
+    }
+    if (warmRetryErrorRef.current === health.warmUpError) {
+      return;
+    }
+    warmRetryErrorRef.current = health.warmUpError;
+    void retryWarmUp();
+  }, [health?.ollamaModelReady, health?.warmUpError, retryWarmUp]);
 
   useEffect(() => {
     const un: Array<() => void> = [];
@@ -154,7 +174,12 @@ export function ChatPanel({ health }: Props) {
           <CardTitle>Chat</CardTitle>
         </div>
         {health?.warmUpError ? (
-          <p className="text-xs text-amber-600 dark:text-amber-400">{health.warmUpError}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-xs text-amber-600 dark:text-amber-400">{health.warmUpError}</p>
+            <Button type="button" variant="outline" size="sm" onClick={() => void retryWarmUp()}>
+              Retry
+            </Button>
+          </div>
         ) : null}
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col gap-2">

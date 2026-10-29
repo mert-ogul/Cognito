@@ -15,6 +15,8 @@ export type AppHealth = {
   chatModelWarmed: boolean;
   warmUpPending: boolean;
   warmUpError: string | null;
+  ollamaReachable: boolean;
+  missingModels: string[];
 };
 
 export type DocumentRow = {
@@ -80,6 +82,13 @@ export async function getAppHealth(): Promise<AppHealth> {
     return { ...(E2E_HEALTH as unknown as AppHealth) };
   }
   return invoke("get_app_health");
+}
+
+export async function warmChatModel(): Promise<void> {
+  if (e2e) {
+    return;
+  }
+  return invoke("warm_chat_model");
 }
 
 export async function pingSidecar(): Promise<Record<string, unknown>> {

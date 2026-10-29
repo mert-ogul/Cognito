@@ -1,7 +1,9 @@
 use crate::app::state::SharedState;
 use crate::db::sqlite;
 use crate::models::SettingsPayload;
+use crate::services::model_warm;
 use std::path::PathBuf;
+use tauri::AppHandle;
 
 use super::run_blocking;
 
@@ -14,9 +16,16 @@ pub async fn get_settings(
 
 #[tauri::command]
 pub async fn update_settings(
+    app: AppHandle,
     state: tauri::State<'_, SharedState>,
     payload: SettingsPayload,
 ) -> Result<(), String> {
+    let st = (*state).clone();
+    let old_chat = st
+        .with_sqlite(|c| sqlite::load_settings(c))
+        .map(|s| s.chat_model)
+        .unwrap_or_default();
+    let chat_changed = payload.chat_model != old_chat;
     run_blocking(state, move |st| {
         st.with_sqlite(|c| {
             if let Some(ref v) = payload.vault_path {
@@ -43,5 +52,10 @@ pub async fn update_settings(
         }
         Ok(())
     })
-    .await
+    .await?;
+    if chat_changed {
+        st.clear_chat_warm();
+        model_warm::spawn_warm_chat_model(st, app);
+    }
+    Ok(())
 }

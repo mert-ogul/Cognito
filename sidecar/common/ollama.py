@@ -8,7 +8,13 @@ from typing import Any, Iterator
 
 import httpx
 
-DEFAULT_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+def _normalize_host(host: str) -> str:
+    if host.startswith("http://") or host.startswith("https://"):
+        return host
+    return f"http://{host}"
+
+
+DEFAULT_HOST = _normalize_host(os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
 
 
 def _client() -> httpx.Client:

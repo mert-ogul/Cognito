@@ -528,7 +528,9 @@ mod tests {
 
         let sidecar_cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sidecar");
         let main_py = sidecar_cwd.join("main.py");
-        let pool = SidecarPool::new(main_py, sidecar_cwd);
+        let log_path = data.path().join("logs").join("sidecar.log");
+        std::fs::create_dir_all(log_path.parent().unwrap()).expect("logs dir");
+        let pool = SidecarPool::new(main_py, sidecar_cwd, log_path);
         let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
         state.sidecar.ensure().expect("sidecar ensure");
 

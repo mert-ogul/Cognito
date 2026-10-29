@@ -50,6 +50,12 @@ impl AppState {
         }
     }
 
+    pub fn clear_chat_warm(&self) {
+        if let Ok(mut g) = self.chat_warm.lock() {
+            *g = None;
+        }
+    }
+
     pub fn chat_warm_ready(&self) -> Option<bool> {
         let g = self.chat_warm.lock().ok()?;
         match g.as_ref() {
