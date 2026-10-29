@@ -4,15 +4,15 @@
 
 ## Product summary
 
-Cognito is a **local-first desktop** workspace for **PDF and Markdown** vaults: semantic chunking, **sqlite-vec** embeddings, **LightRAG-style** graph extraction into **DuckDB**, and **deterministic hybrid retrieval** (vector-first, optional graph augmentation) with **Ollama** for chat and embeddings. The UI includes **read-only graph visualization** and **citation-aware** answers.
+Cognito is a **local-first desktop** workspace for **PDF and Markdown** vaults: semantic chunking (with **page ranges** where the source provides them), **sqlite-vec** embeddings, and **deterministic hybrid retrieval** (vector-first, optional graph augmentation) with **Ollama** for chat and embeddings. Import indexes documents first; **LightRAG-style** graph extraction into **DuckDB** continues in the **background** so chat stays usable. Answers use **numbered inline citations** (`[n]`) tied to retrieved chunks (including page info when available), with chunk preview and open-file. Settings include **Rebuild index** (and rebuild-on-embedding-model change). Sidecar diagnostics go to the app data **`logs/sidecar.log`** (macOS: `~/Library/Application Support/com.mertogul.cognito/logs/sidecar.log`). The UI includes **read-only graph visualization**.
 
 ## Revised MVP scope
 
 - **Formats:** PDF + Markdown only, **single vault** path.
 - **Limits:** Up to **100** active documents on first import (sidecar batch size **20**).
 - **Retrieval:** Fixed pipeline — no adaptive “router” model in MVP ([ADR 008](docs/adr/0008-deterministic-hybrid-not-classifier.md)).
-- **Fallback:** If graph extraction or DuckDB reads fail, retrieval stays **vector-only** with explicit behavior, query embedding failure is surfaced when chunks exist but search cannot run ([sidecar `prepare_chat_retrieval`](sidecar/query/chat_pipeline.py)).
-- **Defaults:** Chat `phi4-mini`, embeddings `nomic-embed-text` (configurable in settings).
+- **Graph:** Extraction runs after indexing via a background worker; if graph work or DuckDB reads fail, retrieval stays **vector-only** with explicit behavior. Query embedding failure is surfaced when chunks exist but search cannot run ([sidecar `prepare_chat_retrieval`](sidecar/query/chat_pipeline.py)).
+- **Defaults:** Chat `phi4-mini`, embeddings `nomic-embed-text` (configurable in settings; changing the embed model requires **Rebuild index**).
 
 ## Intentionally out of scope (MVP)
 
@@ -53,7 +53,7 @@ npm run tauri dev
 
 The app may **block chat** until the sidecar reports readiness and the chat model is warmed, keep Ollama running during development.
 
-**Sidecar:** Recreate the Python env with `cd sidecar && uv sync`. Override: `COGNITO_PYTHON=/path/to/python`. Packaged builds bundle `sidecar/.venv` next to `main.py` (see `src-tauri/src/sidecar_paths.rs`).
+**Sidecar:** Recreate the Python env with `cd sidecar && uv sync`. Override: `COGNITO_PYTHON=/path/to/python`. Packaged builds ship a **standalone CPython** under `resources/sidecar/python` plus runtime sources (see `npm run package:sidecar` and `src-tauri/src/sidecar_paths.rs`). Dev still uses `sidecar/.venv`.
 
 **VitePress docs (skeleton):**
 
