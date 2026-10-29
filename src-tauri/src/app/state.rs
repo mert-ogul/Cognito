@@ -1,10 +1,8 @@
 //! Shared application state for Tauri commands.
 
-use crate::db::duckdb as graph_db;
 use crate::db::sqlite;
 use crate::errors::{CognitoError, CognitoResult};
 use crate::sidecar::SidecarPool;
-use duckdb::Connection as DuckConn;
 use rusqlite::Connection as SqlConn;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -21,11 +19,12 @@ pub struct AppState {
     duckdb_path: PathBuf,
     pub sidecar: SidecarPool,
     sql: Mutex<Option<SqlConn>>,
-    duck: Mutex<Option<DuckConn>>,
     pub watcher_tx: Mutex<Option<Sender<PathBuf>>>,
     /// `None` = warm-up not finished yet.
     pub chat_warm: Mutex<Option<ChatWarmResult>>,
     pub import_running: AtomicBool,
+    /// Set after background `init_graph_store` sidecar call.
+    pub graph_store_ready: AtomicBool,
 }
 
 impl AppState {
@@ -38,10 +37,10 @@ impl AppState {
             duckdb_path,
             sidecar,
             sql: Mutex::new(None),
-            duck: Mutex::new(None),
             watcher_tx: Mutex::new(None),
             chat_warm: Mutex::new(None),
             import_running: AtomicBool::new(false),
+            graph_store_ready: AtomicBool::new(false),
         }
     }
 
@@ -94,19 +93,6 @@ impl AppState {
             *g = Some(c);
         }
         let conn = g.as_ref().ok_or_else(|| CognitoError::Database("sqlite".into()))?;
-        f(conn)
-    }
-
-    pub fn with_duckdb<T, F>(&self, f: F) -> CognitoResult<T>
-    where
-        F: FnOnce(&DuckConn) -> CognitoResult<T>,
-    {
-        let mut g = self.duck.lock().map_err(|e| CognitoError::Database(e.to_string()))?;
-        if g.is_none() {
-            let c = graph_db::open_graph_store(&self.duckdb_path)?;
-            *g = Some(c);
-        }
-        let conn = g.as_ref().ok_or_else(|| CognitoError::Database("duckdb".into()))?;
         f(conn)
     }
 }

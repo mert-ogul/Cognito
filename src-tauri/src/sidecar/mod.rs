@@ -83,8 +83,7 @@ impl SidecarSession {
         if let Some(err) = resp.error {
             return Err(CognitoError::Sidecar(format!("{}: {}", err.code, err.message)));
         }
-        resp.result
-            .ok_or_else(|| CognitoError::Sidecar("missing result".into()))
+        Ok(resp.result.unwrap_or(Value::Null))
     }
 }
 

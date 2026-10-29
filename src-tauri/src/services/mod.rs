@@ -7,6 +7,6 @@ pub mod graph_index_service;
 pub mod ollama_stream;
 pub mod import_job;
 pub mod ingest;
-mod ingest_graph;
+pub(crate) mod ingest_graph;
 pub mod model_warm;
 pub mod watcher_action;

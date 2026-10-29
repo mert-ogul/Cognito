@@ -4,10 +4,11 @@ use crate::db::sqlite;
 use crate::errors::CognitoResult;
 use crate::models::AppHealth;
 use serde_json::json;
+use std::sync::atomic::Ordering;
 
 pub fn read_app_health(state: &crate::app::state::SharedState) -> CognitoResult<AppHealth> {
     let sqlite_ok = state.with_sqlite(|_| Ok(())).is_ok();
-    let duckdb_ok = state.with_duckdb(|_| Ok(())).is_ok();
+    let duckdb_ok = state.graph_store_ready.load(Ordering::SeqCst);
     let vault_configured = state.with_sqlite(|c| {
         let o = sqlite::get_setting(c, "vault_path")?;
         Ok(o.is_some())

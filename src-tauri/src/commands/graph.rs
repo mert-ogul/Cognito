@@ -30,50 +30,6 @@ pub async fn get_graph_snapshot(
 }
 
 #[tauri::command]
-pub async fn get_graph_node_by_normalized_name(
-    state: tauri::State<'_, SharedState>,
-    normalized: String,
-) -> Result<Option<Value>, String> {
-    run_blocking(state, move |st| {
-        graph_index_service::get_node_by_normalized_name(&st, &normalized)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn get_graph_neighbors_two_hop(
-    state: tauri::State<'_, SharedState>,
-    node_id: String,
-) -> Result<Value, String> {
-    run_blocking(state, move |st| {
-        graph_index_service::get_neighbors_two_hop(&st, &node_id)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn get_graph_edges_for_document(
-    state: tauri::State<'_, SharedState>,
-    document_id: String,
-) -> Result<Vec<Value>, String> {
-    run_blocking(state, move |st| {
-        graph_index_service::get_edges_for_document(&st, &document_id)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn get_graph_edges_for_chunk(
-    state: tauri::State<'_, SharedState>,
-    chunk_id: String,
-) -> Result<Vec<Value>, String> {
-    run_blocking(state, move |st| {
-        graph_index_service::get_edges_for_chunk(&st, &chunk_id)
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn get_graph_node_detail(
     state: tauri::State<'_, SharedState>,
     node_id: String,

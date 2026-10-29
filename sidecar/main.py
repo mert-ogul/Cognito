@@ -20,6 +20,8 @@ from ingestion.rpc_ingest import (
     rpc_parse_documents,
     rpc_purge_chunk_embeddings,
 )
+from common.duckdb_util import ensure_schema
+from query.graph_read import node_detail as graph_node_detail
 from query.graph_read import search_nodes as graph_search_nodes
 from query.graph_read import snapshot as graph_snapshot
 from query.chat_pipeline import prepare_chat_retrieval, rpc_search_chunks
@@ -91,6 +93,14 @@ def dispatch(method: str, params: dict) -> dict:
             params["query"],
             int(params.get("limit", 50)),
         )
+    if method == "get_graph_node_detail":
+        return graph_node_detail(
+            params["duckdb_path"],
+            str(params["node_id"]),
+        )
+    if method == "init_graph_store":
+        ensure_schema(str(params["duckdb_path"]))
+        return {"ok": True}
     raise ValueError(f"unknown method: {method}")
 
 
