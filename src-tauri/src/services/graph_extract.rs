@@ -8,20 +8,24 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 const EXTRACT_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_ENTITIES: usize = 10;
-const MAX_RELATIONS: usize = 12;
+const MAX_ENTITIES: usize = 8;
+const MAX_RELATIONS: usize = 10;
+const NUM_PREDICT: u32 = 800;
 
 const ALLOWED_KINDS: &[&str] = &[
+    "concept",
+    "method",
+    "model",
+    "dataset",
     "person",
     "organization",
+    "work",
     "place",
-    "program",
-    "concept",
-    "event",
-    "document",
 ];
 
-const SYSTEM_PROMPT: &str = "List the people, organizations, places, programs, concepts, events and documents named in the passage, using names as written. Leave out numbers, IDs, dates, email addresses, phone numbers, street addresses and URLs. Add a relation only between two listed entities, as a short lowercase verb phrase of one to four words. If there is nothing worth listing, return empty arrays.";
+const SYSTEM_PROMPT: &str = "You map what a passage is about. List at most 8 of the main ideas, methods, models, datasets, people, organizations and works the passage discusses. Give each a short name of one to five words as written in the text, and prefer the full name to an abbreviation. Skip author affiliations, funding and grant details, journal and conference names, figure, table and equation labels, section titles, citations, IDs, numbers and dates. Add relations the passage states between two listed items, as a short lowercase verb phrase such as \"extends\", \"is evaluated on\" or \"was proposed by\". If the passage is only references, acknowledgements or front matter, return empty lists.";
+
+const RETRY_EXTRA: &str = " List at most 4 items.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphEntity {
@@ -87,6 +91,107 @@ pub fn normalize_name(name: &str) -> String {
         .to_lowercase()
 }
 
+fn word_count(name: &str) -> usize {
+    name.split_whitespace().count()
+}
+
+fn has_letter(name: &str) -> bool {
+    name.chars().any(|c| c.is_alphabetic())
+}
+
+fn looks_like_label_prefix(name: &str) -> bool {
+    let first = name
+        .split(|c: char| c.is_whitespace() || c == '.' || c == ':' || c == '(')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        first.as_str(),
+        "fig" | "figure" | "table" | "eq" | "equation" | "section" | "appendix"
+    )
+}
+
+fn looks_like_arxiv_id(name: &str) -> bool {
+    // e.g. 1609.02907 or 1609.02907v4
+    let chars: Vec<char> = name.chars().collect();
+    let mut i = 0;
+    while i + 9 <= chars.len() {
+        if chars[i].is_ascii_digit()
+            && chars[i + 1].is_ascii_digit()
+            && chars[i + 2].is_ascii_digit()
+            && chars[i + 3].is_ascii_digit()
+            && chars[i + 4] == '.'
+            && chars[i + 5].is_ascii_digit()
+            && chars[i + 6].is_ascii_digit()
+            && chars[i + 7].is_ascii_digit()
+            && chars[i + 8].is_ascii_digit()
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn looks_like_doi(name: &str) -> bool {
+    let low = name.to_lowercase();
+    if let Some(rest) = low.strip_prefix("10.") {
+        let mut digits = 0usize;
+        for c in rest.chars() {
+            if c.is_ascii_digit() {
+                digits += 1;
+            } else if c == '/' && digits >= 4 {
+                return true;
+            } else {
+                break;
+            }
+        }
+    }
+    low.contains("doi:")
+}
+
+fn looks_like_id_or_url(name: &str) -> bool {
+    let low = name.to_lowercase();
+    if low.contains("arxiv")
+        || low.contains("http://")
+        || low.contains("https://")
+        || looks_like_doi(name)
+        || looks_like_arxiv_id(name)
+    {
+        return true;
+    }
+    if low.contains('@') && low.contains('.') {
+        return true;
+    }
+    // Grant/code tokens: letters and digits only, no spaces, mixed both.
+    let compact: String = name.chars().filter(|c| !c.is_whitespace()).collect();
+    if name.split_whitespace().count() == 1
+        && compact.len() >= 5
+        && compact.chars().all(|c| c.is_ascii_alphanumeric())
+        && compact.chars().any(|c| c.is_ascii_alphabetic())
+        && compact.chars().any(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    false
+}
+
+fn should_drop_entity_name(name: &str) -> bool {
+    if name.chars().count() > 60 || word_count(name) > 6 {
+        return true;
+    }
+    if !has_letter(name) {
+        return true;
+    }
+    if looks_like_label_prefix(name) {
+        return true;
+    }
+    if looks_like_id_or_url(name) {
+        return true;
+    }
+    false
+}
+
 /// Validate and clean a model reply into a ChunkGraph.
 pub fn validate_chunk_graph(raw: &Value) -> CognitoResult<ChunkGraph> {
     let entities_val = raw
@@ -107,14 +212,17 @@ pub fn validate_chunk_graph(raw: &Value) -> CognitoResult<ChunkGraph> {
     let mut name_by_norm: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
 
-    for item in entities_arr.iter().take(MAX_ENTITIES) {
+    for item in entities_arr.iter() {
+        if entities.len() >= MAX_ENTITIES {
+            break;
+        }
         let name = item
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
             .to_string();
-        if name.is_empty() {
+        if name.is_empty() || should_drop_entity_name(&name) {
             continue;
         }
         let norm = normalize_name(&name);
@@ -162,6 +270,9 @@ pub fn validate_chunk_graph(raw: &Value) -> CognitoResult<ChunkGraph> {
         }
         let sn = normalize_name(&source);
         let tn = normalize_name(&target);
+        if sn == tn {
+            continue;
+        }
         let Some(src_name) = name_by_norm.get(&sn) else {
             continue;
         };
@@ -201,18 +312,22 @@ fn mock_chunk_graph() -> ChunkGraph {
     }
 }
 
-pub async fn extract_chunk(chat_model: &str, text: &str) -> CognitoResult<ChunkGraph> {
-    if std::env::var("COGNITO_MOCK_EXTRACT").ok().as_deref() == Some("1") {
-        return Ok(mock_chunk_graph());
-    }
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Ok(ChunkGraph {
-            entities: vec![],
-            relations: vec![],
-        });
-    }
+pub fn ollama_unreachable(err: &CognitoError) -> bool {
+    let s = err.to_string().to_lowercase();
+    s.contains("error sending request")
+        || s.contains("connection refused")
+        || s.contains("connect error")
+        || s.contains("tcp connect")
+        || s.contains("dns error")
+        || s.contains("failed to connect")
+        || (s.contains("timed out") && s.contains("ollama"))
+}
 
+async fn call_ollama(
+    chat_model: &str,
+    text: &str,
+    system: &str,
+) -> CognitoResult<(Value, Option<String>)> {
     let client = reqwest::Client::builder()
         .timeout(EXTRACT_TIMEOUT)
         .build()
@@ -225,12 +340,12 @@ pub async fn extract_chunk(chat_model: &str, text: &str) -> CognitoResult<ChunkG
         "format": response_schema(),
         "options": {
             "num_ctx": CHAT_CONTEXT_TOKENS,
-            "num_predict": 400,
+            "num_predict": NUM_PREDICT,
             "temperature": 0
         },
         "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
-            { "role": "user", "content": trimmed }
+            { "role": "system", "content": system },
+            { "role": "user", "content": text }
         ]
     });
     let res = client
@@ -253,6 +368,14 @@ pub async fn extract_chunk(chat_model: &str, text: &str) -> CognitoResult<ChunkG
     }
     let v: Value = serde_json::from_str(&text_body)
         .map_err(|e| CognitoError::Sidecar(format!("graph extract parse: {e}")))?;
+    let done_reason = v
+        .get("done_reason")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    Ok((v, done_reason))
+}
+
+fn graph_from_response(v: &Value) -> CognitoResult<ChunkGraph> {
     let content = v
         .get("message")
         .and_then(|m| m.get("content"))
@@ -261,6 +384,36 @@ pub async fn extract_chunk(chat_model: &str, text: &str) -> CognitoResult<ChunkG
     let parsed: Value = serde_json::from_str(content)
         .map_err(|e| CognitoError::Sidecar(format!("graph extract JSON: {e}")))?;
     validate_chunk_graph(&parsed)
+}
+
+pub async fn extract_chunk(chat_model: &str, text: &str) -> CognitoResult<ChunkGraph> {
+    if std::env::var("COGNITO_MOCK_EXTRACT").ok().as_deref() == Some("1") {
+        return Ok(mock_chunk_graph());
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(ChunkGraph {
+            entities: vec![],
+            relations: vec![],
+        });
+    }
+
+    let (v, done_reason) = call_ollama(chat_model, trimmed, SYSTEM_PROMPT).await?;
+    let truncated = done_reason.as_deref() == Some("length");
+    match graph_from_response(&v) {
+        Ok(g) if !truncated => Ok(g),
+        first => {
+            let retry_system = format!("{SYSTEM_PROMPT}{RETRY_EXTRA}");
+            let (v2, _) = call_ollama(chat_model, trimmed, &retry_system).await?;
+            match graph_from_response(&v2) {
+                Ok(g) => Ok(g),
+                Err(e) => match first {
+                    Ok(g) => Ok(g),
+                    Err(_) => Err(e),
+                },
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +459,39 @@ mod tests {
     }
 
     #[test]
+    fn drops_junk_entity_names() {
+        let raw = json!({
+            "entities": [
+                { "name": "Graph convolutional network", "kind": "method" },
+                { "name": "Fig. 1(c)", "kind": "concept" },
+                { "name": "LX045446", "kind": "organization" },
+                { "name": "arXiv:1609.02907", "kind": "work" },
+                { "name": "https://example.com/x", "kind": "work" },
+                { "name": "a@b.com", "kind": "person" },
+                { "name": "12345", "kind": "concept" },
+                { "name": "This is a whole abstract sentence about graphs and learning", "kind": "concept" },
+                { "name": "Table 2", "kind": "concept" },
+                { "name": "GAT", "kind": "model" },
+            ],
+            "relations": [
+                { "source": "GAT", "target": "GAT", "relation": "is" },
+                { "source": "GAT", "target": "Graph convolutional network", "relation": "extends" },
+            ]
+        });
+        let g = validate_chunk_graph(&raw).expect("ok");
+        let names: Vec<_> = g.entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"Graph convolutional network"));
+        assert!(names.contains(&"GAT"));
+        assert!(!names.iter().any(|n| n.contains("Fig")));
+        assert!(!names.iter().any(|n| *n == "LX045446"));
+        assert!(!names.iter().any(|n| n.contains("arXiv")));
+        assert!(!names.iter().any(|n| n.contains("http")));
+        assert!(!names.iter().any(|n| n.contains('@')));
+        assert_eq!(g.relations.len(), 1);
+        assert_eq!(g.relations[0].relation, "extends");
+    }
+
+    #[test]
     fn malformed_json_is_error_not_panic() {
         let raw = json!({ "entities": "nope", "relations": [] });
         let err = validate_chunk_graph(&raw).expect_err("must fail");
@@ -323,5 +509,18 @@ mod tests {
         assert_eq!(g.entities.len(), 2);
         assert_eq!(g.relations.len(), 1);
         std::env::remove_var("COGNITO_MOCK_EXTRACT");
+    }
+
+    #[test]
+    fn ollama_unreachable_detects_connection_errors() {
+        assert!(ollama_unreachable(&CognitoError::Sidecar(
+            "Ollama graph extract failed: error sending request for url".into()
+        )));
+        assert!(ollama_unreachable(&CognitoError::Sidecar(
+            "connection refused".into()
+        )));
+        assert!(!ollama_unreachable(&CognitoError::Sidecar(
+            "graph extract JSON: expected value".into()
+        )));
     }
 }

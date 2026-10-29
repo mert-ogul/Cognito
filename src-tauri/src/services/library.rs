@@ -24,6 +24,7 @@ pub fn reset(state: &SharedState) -> CognitoResult<()> {
         )?;
         Ok(())
     })?;
+    state.invalidate_sqlite()?;
     state.with_sqlite(|c| {
         sqlite::delete_all_documents(c)?;
         sqlite::clear_setting(c, "index_embed_model")?;

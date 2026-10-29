@@ -19,6 +19,16 @@ DEFAULT_HOST = _normalize_host(os.environ.get("OLLAMA_HOST", "http://127.0.0.1:1
 CHAT_CONTEXT_TOKENS = 8192
 
 
+def embed_prefixes(model: str) -> tuple[str, str]:
+    """Return (query_prefix, document_prefix) for the embedding model."""
+    name = (model or "").split(":", 1)[0].strip().lower()
+    if name == "nomic-embed-text":
+        return ("search_query: ", "search_document: ")
+    if name == "mxbai-embed-large":
+        return ("Represent this sentence for searching relevant passages: ", "")
+    return ("", "")
+
+
 def _client() -> httpx.Client:
     return httpx.Client(base_url=DEFAULT_HOST, timeout=120.0)
 

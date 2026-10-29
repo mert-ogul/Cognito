@@ -11,6 +11,13 @@ OVERLAP = 50
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+_REF_SECTION_KEYS = frozenset(
+    {"references", "bibliography", "acknowledgments", "acknowledgements"}
+)
+_CITATION_LINE_RE = re.compile(
+    r"^\s*(?:\[\d+\]|\d+\.)\s+.*\b(?:19|20)\d{2}\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -18,6 +25,8 @@ class ChunkDraft:
     text: str
     page_start: int | None
     page_end: int | None
+    heading_trail: list[str] = field(default_factory=list)
+    role: str = "body"
 
 
 @dataclass
@@ -214,6 +223,55 @@ def _trail_line(trail: list[str]) -> str:
     return " > ".join(t for t in trail if t)
 
 
+def _heading_key(line: str) -> str:
+    raw = line.strip()
+    if raw.startswith("#"):
+        m = _HEADING_RE.match(raw)
+        raw = m.group(2) if m else raw.lstrip("#").strip()
+    return re.sub(r"[^a-z0-9]", "", raw.lower())
+
+
+def is_references_heading(line: str) -> bool:
+    return _heading_key(line) in _REF_SECTION_KEYS
+
+
+def citation_line_ratio(text: str) -> float:
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return 0.0
+    hits = sum(1 for ln in lines if _CITATION_LINE_RE.search(ln))
+    return hits / len(lines)
+
+
+def assign_chunk_role(
+    text: str,
+    heading_trail: list[str],
+    *,
+    after_references_heading: bool,
+) -> str:
+    if after_references_heading:
+        return "references"
+    for h in heading_trail:
+        if is_references_heading(h):
+            return "references"
+    for ln in (text or "").splitlines()[:8]:
+        if is_references_heading(ln):
+            return "references"
+    if citation_line_ratio(text) >= 0.4:
+        return "references"
+    return "body"
+
+
+def _pack_contains_references_heading(pack: list[_Block], trail: list[str]) -> bool:
+    if any(is_references_heading(h) for h in trail):
+        return True
+    for b in pack:
+        for ln in b.text.splitlines():
+            if is_references_heading(ln):
+                return True
+    return False
+
+
 def _pack_blocks(blocks: list[_Block], file_type: str) -> list[ChunkDraft]:
     blocks = _expand_blocks(blocks)
     if not blocks:
@@ -221,6 +279,7 @@ def _pack_blocks(blocks: list[_Block], file_type: str) -> list[ChunkDraft]:
     chunks: list[ChunkDraft] = []
     i = 0
     prev_body = ""
+    after_refs = False
     while i < len(blocks):
         pack: list[_Block] = []
         tokens = 0
@@ -244,6 +303,8 @@ def _pack_blocks(blocks: list[_Block], file_type: str) -> list[ChunkDraft]:
             i += 1
         body = "\n\n".join(b.text for b in pack).strip()
         trail = pack[0].heading_trail if file_type == "markdown" else []
+        if _pack_contains_references_heading(pack, trail):
+            after_refs = True
         header = _trail_line(trail)
         parts: list[str] = []
         if header:
@@ -261,7 +322,16 @@ def _pack_blocks(blocks: list[_Block], file_type: str) -> list[ChunkDraft]:
         pages = [b.page for b in pack if b.page is not None]
         page_start = min(pages) if pages else None
         page_end = max(pages) if pages else None
-        chunks.append(ChunkDraft(text=text, page_start=page_start, page_end=page_end))
+        role = assign_chunk_role(text, trail, after_references_heading=after_refs)
+        chunks.append(
+            ChunkDraft(
+                text=text,
+                page_start=page_start,
+                page_end=page_end,
+                heading_trail=list(trail),
+                role=role,
+            )
+        )
         prev_body = body
     return chunks
 

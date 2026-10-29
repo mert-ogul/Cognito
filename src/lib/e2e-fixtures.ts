@@ -10,6 +10,7 @@ export const E2E_HEALTH = {
   warmUpError: null,
   ollamaReachable: true,
   missingModels: [] as string[],
+  indexFormatUpdating: false,
 } as const;
 
 export const E2E_DOCUMENTS = [

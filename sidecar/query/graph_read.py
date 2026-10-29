@@ -117,10 +117,13 @@ def node_detail(duck_path: str, node_id: str) -> dict | None:
         }
         erows = con.execute(
             """
-            SELECT edge_id, source_node_id, target_node_id, relation, document_id, chunk_id,
-                   confidence, cast(created_at AS VARCHAR)
-            FROM graph_edges
-            WHERE source_node_id = ? OR target_node_id = ?
+            SELECT e.edge_id, e.source_node_id, e.target_node_id, e.relation, e.document_id,
+                   e.chunk_id, e.confidence, cast(e.created_at AS VARCHAR),
+                   s.name, t.name
+            FROM graph_edges e
+            JOIN graph_nodes s ON s.node_id = e.source_node_id
+            JOIN graph_nodes t ON t.node_id = e.target_node_id
+            WHERE e.source_node_id = ? OR e.target_node_id = ?
             """,
             [node_id, node_id],
         ).fetchall()
@@ -134,6 +137,8 @@ def node_detail(duck_path: str, node_id: str) -> dict | None:
                 "chunkId": r[5],
                 "confidence": float(r[6]),
                 "createdAt": r[7],
+                "sourceName": r[8],
+                "targetName": r[9],
             }
             for r in erows
         ]

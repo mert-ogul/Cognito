@@ -23,6 +23,8 @@ pub struct AppState {
     /// `None` = warm-up not finished yet.
     pub chat_warm: Mutex<Option<ChatWarmResult>>,
     pub import_running: AtomicBool,
+    /// True while a startup rebuild is rewriting embeddings for a new index format.
+    pub index_format_updating: AtomicBool,
     /// Active `send_chat_query` tasks; graph worker pauses while this is above zero.
     pub chat_in_flight: AtomicUsize,
 }
@@ -41,6 +43,7 @@ impl AppState {
             graph_tx: Mutex::new(None),
             chat_warm: Mutex::new(None),
             import_running: AtomicBool::new(false),
+            index_format_updating: AtomicBool::new(false),
             chat_in_flight: AtomicUsize::new(0),
         }
     }
@@ -117,6 +120,14 @@ impl AppState {
         }
         let conn = g.as_ref().ok_or_else(|| CognitoError::Database("sqlite".into()))?;
         f(conn)
+    }
+
+    /// Drop the cached connection so the next `with_sqlite` reopens after another process
+    /// changed the schema (for example the sidecar dropping `chunk_embeddings`).
+    pub fn invalidate_sqlite(&self) -> CognitoResult<()> {
+        let mut g = self.sql.lock().map_err(|e| CognitoError::Database(e.to_string()))?;
+        *g = None;
+        Ok(())
     }
 }
 

@@ -5,6 +5,7 @@ use crate::errors::{CognitoError, CognitoResult};
 use crate::models::AppHealth;
 use crate::services::ollama_stream::ollama_base_url;
 use serde_json::Value;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// Configured model names that are not present in Ollama `/api/tags`.
@@ -93,6 +94,7 @@ pub async fn read_app_health(
         let warm_pending = st.chat_warm_ready().is_none();
         let chat_model_warmed = st.chat_warm_ready() == Some(true);
         let warm_up_error = st.chat_warm_error();
+        let index_format_updating = st.index_format_updating.load(Ordering::SeqCst);
         Ok::<_, CognitoError>((
             sqlite_ok,
             vault_configured,
@@ -101,6 +103,7 @@ pub async fn read_app_health(
             warm_pending,
             chat_model_warmed,
             warm_up_error,
+            index_format_updating,
         ))
     })
     .await
@@ -114,6 +117,7 @@ pub async fn read_app_health(
         warm_pending,
         chat_model_warmed,
         warm_up_error,
+        index_format_updating,
     ) = sync;
 
     let (ollama_reachable, missing_models) =
@@ -132,6 +136,7 @@ pub async fn read_app_health(
         warm_up_error,
         ollama_reachable,
         missing_models,
+        index_format_updating,
     })
 }
 

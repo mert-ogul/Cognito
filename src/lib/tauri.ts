@@ -16,6 +16,7 @@ export type AppHealth = {
   warmUpError: string | null;
   ollamaReachable: boolean;
   missingModels: string[];
+  indexFormatUpdating: boolean;
 };
 
 export type DocumentRow = {

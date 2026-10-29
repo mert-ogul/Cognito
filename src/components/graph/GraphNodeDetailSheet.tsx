@@ -1,7 +1,8 @@
 import { Button } from "@/components/ui/button";
-import { getGraphNodeDetail, listDocuments, type DocumentRow } from "@/lib/tauri";
+import { getDocumentPreview, getGraphNodeDetail, listDocuments, type DocumentRow } from "@/lib/tauri";
+import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 
 type NodeJson = {
   nodeId: string;
@@ -18,6 +19,8 @@ type EdgeJson = {
   documentId: string;
   chunkId: string;
   confidence: number;
+  sourceName?: string;
+  targetName?: string;
 };
 
 type DetailPayload = { node: NodeJson; edges: EdgeJson[] };
@@ -28,7 +31,13 @@ type Props = {
   onClose: () => void;
 };
 
+function fileName(path: string): string {
+  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
 export function GraphNodeDetailSheet({ nodeId, open, onClose }: Props) {
+  const openPassage = useSidePaneStore((s) => s.openPassage);
   const detailQ = useQuery({
     queryKey: ["graph-node-detail", nodeId],
     queryFn: () => getGraphNodeDetail(nodeId!) as Promise<DetailPayload | null>,
@@ -45,6 +54,32 @@ export function GraphNodeDetailSheet({ nodeId, open, onClose }: Props) {
     const map = new Map(rows.map((d) => [d.id, d]));
     return ids.map((id) => map.get(id)).filter(Boolean) as DocumentRow[];
   }, [detailQ.data?.edges, docsQ.data]);
+
+  const openEdgePassage = useCallback(
+    async (e: EdgeJson) => {
+      const prev = await getDocumentPreview(e.documentId, e.chunkId);
+      const doc = (docsQ.data ?? []).find((d) => d.id === e.documentId);
+      const title =
+        (doc?.title || "").trim() ||
+        (doc?.path ? fileName(doc.path) : e.documentId);
+      const start = prev.pageStart;
+      const end = prev.pageEnd;
+      let pageLabel: string | null = null;
+      if (start != null && end != null && end !== start) {
+        pageLabel = `pp. ${start}-${end}`;
+      } else if (start != null) {
+        pageLabel = `p. ${start}`;
+      }
+      openPassage({
+        documentId: prev.documentId,
+        title,
+        pageLabel,
+        text: prev.text,
+        highlight: prev.highlightSnippet ?? null,
+      });
+    },
+    [docsQ.data, openPassage],
+  );
 
   if (!open || !nodeId) {
     return null;
@@ -72,7 +107,7 @@ export function GraphNodeDetailSheet({ nodeId, open, onClose }: Props) {
         {detailQ.isLoading ? <p className="text-muted">Loading…</p> : null}
         {detailQ.isError ? (
           <p className="text-danger" role="alert">
-            Could not load node detail.
+            Could not load this node.
           </p>
         ) : null}
         {node ? (
@@ -93,14 +128,21 @@ export function GraphNodeDetailSheet({ nodeId, open, onClose }: Props) {
               <p className="text-muted">Relations ({edges.length})</p>
               <ul className="mt-1 space-y-1">
                 {edges.slice(0, 40).map((e) => {
-                  const other =
-                    e.sourceNodeId === node.nodeId ? e.targetNodeId : e.sourceNodeId;
+                  const src = e.sourceName || e.sourceNodeId;
+                  const tgt = e.targetName || e.targetNodeId;
+                  const line = `${src}, ${e.relation}, ${tgt}`;
                   return (
-                    <li key={e.edgeId} className="border border-line px-2 py-1">
-                      <span className="text-muted">{e.relation}</span> ·{" "}
-                      <span className="font-mono text-[12px]" title={other}>
-                        {shortId(other)}
-                      </span>
+                    <li key={e.edgeId} className="text-text">
+                      <span>{line}</span>{" "}
+                      {e.chunkId ? (
+                        <button
+                          type="button"
+                          className="text-accent underline"
+                          onClick={() => void openEdgePassage(e)}
+                        >
+                          Source
+                        </button>
+                      ) : null}
                     </li>
                   );
                 })}
@@ -110,7 +152,7 @@ export function GraphNodeDetailSheet({ nodeId, open, onClose }: Props) {
             <div>
               <p className="text-muted">Supporting documents</p>
               {supporting.length === 0 ? (
-                <p className="text-muted">No matching library titles (ids only in graph).</p>
+                <p className="text-muted">No matching library titles yet.</p>
               ) : (
                 <ul className="mt-1 space-y-1">
                   {supporting.map((d) => (
@@ -126,8 +168,4 @@ export function GraphNodeDetailSheet({ nodeId, open, onClose }: Props) {
       </div>
     </div>
   );
-}
-
-function shortId(id: string): string {
-  return id.length > 12 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id;
 }

@@ -274,13 +274,31 @@ fn process_one_parsed(
             let tok = ch.get("tokenCount").and_then(|x| x.as_i64()).unwrap_or(1);
             let ps = ch.get("pageStart").and_then(|x| x.as_i64());
             let pe = ch.get("pageEnd").and_then(|x| x.as_i64());
+            let role = ch
+                .get("role")
+                .and_then(|x| x.as_str())
+                .unwrap_or("body");
             let cid = Uuid::new_v4().to_string();
-            sqlite::insert_chunk_row(conn, &cid, &doc_id, ord, ps, pe, &text, tok, c_hash)?;
-            embed_payload.push(json!({
+            sqlite::insert_chunk_row(
+                conn, &cid, &doc_id, ord, ps, pe, &text, tok, c_hash, role,
+            )?;
+            let heading_trail = ch
+                .get("headingTrail")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty());
+            let mut item = json!({
                 "chunkId": cid,
                 "text": text,
                 "ordinal": ord,
-            }));
+                "title": title,
+            });
+            if let Some(ht) = heading_trail {
+                item
+                    .as_object_mut()
+                    .expect("embed item object")
+                    .insert("headingTrail".into(), json!(ht));
+            }
+            embed_payload.push(item);
         }
         tx.commit()
             .map_err(|e| CognitoError::Database(e.to_string()))?;
@@ -413,7 +431,18 @@ pub fn run_import_job(
             state.with_sqlite(|c| import_job::tick(c, &job_id, done as i64, failed as i64))?;
         }
     }
-    state.with_sqlite(|c| import_job::complete_ok(c, &job_id))?;
+    state.with_sqlite(|c| {
+        import_job::complete_ok(c, &job_id)?;
+        sqlite::upsert_setting(
+            c,
+            "index_format_version",
+            &sqlite::INDEX_FORMAT_VERSION.to_string(),
+        )?;
+        Ok(())
+    })?;
+    state
+        .index_format_updating
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     emit_job(
         app.as_ref(),
         &job_id,

@@ -118,7 +118,66 @@ pub(crate) fn spawn_import_thread(
             );
             let _ = app_c.emit(LIBRARY_CHANGED, &());
         }
+        st.index_format_updating.store(false, Ordering::SeqCst);
         st.import_running.store(false, Ordering::SeqCst);
+    });
+}
+
+/// If documents exist and `index_format_version` is behind, rebuild like Settings → Rebuild index.
+pub(crate) fn maybe_rebuild_stale_index_format(app: AppHandle, state: SharedState) {
+    std::thread::spawn(move || {
+        let _ = state.sidecar.ensure();
+        let need = match state.with_sqlite(|c| {
+            let n = sqlite::count_active_documents(c)?;
+            if n == 0 {
+                return Ok(false);
+            }
+            let stored = sqlite::get_setting(c, "index_format_version")?
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
+            Ok(stored < sqlite::INDEX_FORMAT_VERSION)
+        }) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if !need {
+            return;
+        }
+        if try_lock_import(&state).is_err() {
+            return;
+        }
+        state.index_format_updating.store(true, Ordering::SeqCst);
+        let (vault, paths) = match library::plan_rebuild(&state) {
+            Ok(v) => v,
+            Err(_) => {
+                state.index_format_updating.store(false, Ordering::SeqCst);
+                release_import(&state);
+                return;
+            }
+        };
+        if library::reset(&state).is_err() {
+            state.index_format_updating.store(false, Ordering::SeqCst);
+            release_import(&state);
+            return;
+        }
+        let settings = match state.with_sqlite(|c| sqlite::load_settings(c)) {
+            Ok(s) => s,
+            Err(_) => {
+                state.index_format_updating.store(false, Ordering::SeqCst);
+                release_import(&state);
+                return;
+            }
+        };
+        let job_id = Uuid::new_v4().to_string();
+        spawn_import_thread(
+            app,
+            &state,
+            job_id,
+            vault,
+            paths,
+            settings.embed_model.clone(),
+            settings.chat_model.clone(),
+        );
     });
 }
 

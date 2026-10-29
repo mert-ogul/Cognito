@@ -7,7 +7,12 @@ import {
   citationSourceLabel,
   citationsUsedInOrder,
   linkifyCitationMarkers,
+  normalizeAnswerMath,
 } from "./ChatPanel";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import { SidePane } from "@/components/layout/SidePane";
 import { e2eEmit } from "@/lib/tauri-events";
 import { getDocumentPreview, openDocument, sendChatQuery } from "@/lib/tauri";
@@ -47,6 +52,7 @@ const health = {
   warmUpError: null,
   ollamaReachable: true,
   missingModels: [] as string[],
+  indexFormatUpdating: false,
 };
 
 const cite = (index: number, title = `Doc ${index}`, path = `/p${index}/${title}.pdf`): CitationItem => ({
@@ -96,7 +102,40 @@ describe("ChatPanel helpers", () => {
         pageStart: 12,
         pageEnd: 12,
       }),
-    ).toBe("report.pdf, p. 12");
+    ).toBe("Report, p. 12");
+  });
+
+  it("normalizes paren math delimiters outside code", () => {
+    expect(normalizeAnswerMath(String.raw`inline \(x^2\) and`)).toBe("inline $x^2$ and");
+    expect(normalizeAnswerMath(String.raw`$$\frac{1}{2}$$`)).toBe(String.raw`$$\frac{1}{2}$$`);
+    expect(normalizeAnswerMath(String.raw`\[a\]`)).toBe("$$a$$");
+    expect(normalizeAnswerMath("keep `\\(x\\)`")).toBe("keep `\\(x\\)`");
+  });
+});
+
+function renderAnswerMath(md: string) {
+  return render(
+    <div className="answer">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
+      >
+        {normalizeAnswerMath(md)}
+      </ReactMarkdown>
+    </div>,
+  );
+}
+
+describe("answer math", () => {
+  it("renders $ and \\( \\) as katex", () => {
+    const { container: a } = renderAnswerMath("$x^2$");
+    expect(a.querySelector(".katex")).not.toBeNull();
+    const { container: b } = renderAnswerMath(String.raw`\(x^2\)`);
+    expect(b.querySelector(".katex")).not.toBeNull();
+  });
+
+  it("does not throw on unfinished display math", () => {
+    expect(() => renderAnswerMath(String.raw`$$\frac{1`)).not.toThrow();
   });
 });
 
@@ -213,8 +252,8 @@ describe("ChatPanel", () => {
     await sendPrompt("ask");
     expect(await screen.findByLabelText("Source 2")).toBeInTheDocument();
     expect(screen.getByText("Sources")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "two.pdf, p. 3" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /one\.pdf/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Two, p. 3" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^One$/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Source 2"));
     await waitFor(() => {
       expect(getDocumentPreview).toHaveBeenCalledWith("d2", "c2");
@@ -222,7 +261,7 @@ describe("ChatPanel", () => {
     expect(useSidePaneStore.getState().open).toBe(true);
     expect(useSidePaneStore.getState().mode).toBe("passage");
     expect(screen.getByRole("button", { name: "Passage", pressed: true })).toBeInTheDocument();
-    expect(screen.getAllByText("two.pdf, p. 3").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("Two, p. 3").length).toBeGreaterThanOrEqual(2);
     const mark = await screen.findByText("cited body");
     expect(mark.className).toMatch(/bg-mark/);
   });
@@ -241,8 +280,8 @@ describe("ChatPanel", () => {
     renderChat();
     await sendPrompt("ask");
     expect(await screen.findByText("Retrieved passages")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "one.pdf" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "two.pdf" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "One" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Two" })).toBeInTheDocument();
   });
 
   it("renders Markdown lists as ul and li", async () => {

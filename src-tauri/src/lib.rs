@@ -69,6 +69,7 @@ pub fn run() {
                 }
             }
             graph_worker::spawn(state.clone(), app.handle().clone());
+            commands::maybe_rebuild_stale_index_format(app.handle().clone(), state.clone());
             app.manage(state.clone());
             model_warm::spawn_warm_chat_model(state);
             Ok(())

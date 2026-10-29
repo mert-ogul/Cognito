@@ -34,6 +34,7 @@ from ingestion.rpc_ingest import (
     rpc_purge_chunk_embeddings,
     rpc_reset_index,
 )
+from ingestion.rpc_link_document import rpc_link_document
 from query.graph_read import node_detail as graph_node_detail
 from query.graph_read import search_nodes as graph_search_nodes
 from query.graph_read import snapshot as graph_snapshot
@@ -73,6 +74,8 @@ def dispatch(method: str, params: dict) -> Any:
         return rpc_store_graph_chunk(params)
     if method == "purge_graph_document":
         return rpc_purge_graph_document(params)
+    if method == "link_document":
+        return rpc_link_document(params)
     if method == "prepare_chat_retrieval":
         hist = params.get("history", [])
         if not isinstance(hist, list):

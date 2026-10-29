@@ -9,6 +9,12 @@ const MIGRATION_001: &str = include_str!("../../../migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("../../../migrations/002_sqlite_vec_prep.sql");
 const MIGRATION_003: &str = include_str!("../../../migrations/003_graph_stage.sql");
 const MIGRATION_004: &str = include_str!("../../../migrations/004_requeue_graph.sql");
+const MIGRATION_005: &str = include_str!("../../../migrations/005_chunk_search.sql");
+const MIGRATION_006: &str = include_str!("../../../migrations/006_chunk_role.sql");
+const MIGRATION_007: &str = include_str!("../../../migrations/007_requeue_graph_v2.sql");
+
+/// Bump when embedding text format or retrieval index layout changes.
+pub const INDEX_FORMAT_VERSION: i32 = 2;
 
 pub fn open_sqlite(path: &Path) -> CognitoResult<Connection> {
     let conn = Connection::open(path).map_err(|e| CognitoError::Database(e.to_string()))?;
@@ -62,6 +68,39 @@ fn migrate(conn: &Connection) -> CognitoResult<()> {
             .map_err(|e| CognitoError::Database(e.to_string()))?;
         let _ = conn.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (4, datetime('now'))",
+            [],
+        );
+        v = 4;
+    }
+    if v < 5 {
+        conn.execute_batch(MIGRATION_005)
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        conn.execute("PRAGMA user_version = 5", [])
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        let _ = conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (5, datetime('now'))",
+            [],
+        );
+        v = 5;
+    }
+    if v < 6 {
+        conn.execute_batch(MIGRATION_006)
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        conn.execute("PRAGMA user_version = 6", [])
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        let _ = conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (6, datetime('now'))",
+            [],
+        );
+        v = 6;
+    }
+    if v < 7 {
+        conn.execute_batch(MIGRATION_007)
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        conn.execute("PRAGMA user_version = 7", [])
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        let _ = conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (7, datetime('now'))",
             [],
         );
     }
@@ -408,11 +447,40 @@ pub fn list_chunk_ids_for_document(conn: &Connection, doc_id: &str) -> CognitoRe
     Ok(out)
 }
 
-pub fn chunk_text_by_id(conn: &Connection, chunk_id: &str) -> CognitoResult<Option<String>> {
+#[derive(Debug, Clone)]
+pub struct ChunkForGraph {
+    pub id: String,
+    pub text: String,
+    pub role: String,
+}
+
+pub fn list_chunks_for_graph(conn: &Connection, doc_id: &str) -> CognitoResult<Vec<ChunkForGraph>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, text, role FROM chunks WHERE document_id = ?1 ORDER BY ordinal ASC",
+        )
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    let rows = stmt
+        .query_map(params![doc_id], |r| {
+            Ok(ChunkForGraph {
+                id: r.get(0)?,
+                text: r.get(1)?,
+                role: r.get(2)?,
+            })
+        })
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| CognitoError::Database(e.to_string()))?);
+    }
+    Ok(out)
+}
+
+pub fn document_title_by_id(conn: &Connection, id: &str) -> CognitoResult<Option<String>> {
     let row = conn
         .query_row(
-            "SELECT text FROM chunks WHERE id = ?1",
-            [chunk_id],
+            "SELECT title FROM documents WHERE id = ?1",
+            [id],
             |r| r.get::<_, String>(0),
         )
         .optional()
@@ -525,11 +593,17 @@ pub fn insert_chunk_row(
     text: &str,
     token_count: i64,
     content_hash: &str,
+    role: &str,
 ) -> CognitoResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
+    let role = if role == "references" {
+        "references"
+    } else {
+        "body"
+    };
     conn.execute(
-        "INSERT INTO chunks (id, document_id, ordinal, page_start, page_end, text, token_count, content_hash, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO chunks (id, document_id, ordinal, page_start, page_end, text, token_count, content_hash, created_at, role)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             id,
             document_id,
@@ -539,7 +613,8 @@ pub fn insert_chunk_row(
             text,
             token_count,
             content_hash,
-            now
+            now,
+            role
         ],
     )
     .map_err(|e| CognitoError::Database(e.to_string()))?;
@@ -557,11 +632,15 @@ pub fn mark_document_indexed(conn: &Connection, id: &str) -> CognitoResult<()> {
     Ok(())
 }
 
-pub fn mark_document_graph_ok(conn: &Connection, id: &str) -> CognitoResult<()> {
+pub fn mark_document_graph_ok(
+    conn: &Connection,
+    id: &str,
+    note: Option<&str>,
+) -> CognitoResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "UPDATE documents SET graph_status = 'ok', graph_error = NULL, modified_at = ?1 WHERE id = ?2",
-        params![now, id],
+        "UPDATE documents SET graph_status = 'ok', graph_error = ?1, modified_at = ?2 WHERE id = ?3",
+        params![note, now, id],
     )
     .map_err(|e| CognitoError::Database(e.to_string()))?;
     Ok(())
@@ -601,7 +680,7 @@ mod tests {
             let v: i32 = c
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .expect("uv");
-            assert_eq!(v, 4);
+            assert_eq!(v, 7);
             let n: i32 = c
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_embeddings'",
@@ -739,6 +818,56 @@ mod tests {
     }
 
     #[test]
+    fn chunks_fts_stays_in_sync_on_insert_and_delete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("v.sqlite");
+        let c = open_sqlite(&p).expect("open");
+        insert_document_row(
+            &c,
+            "d1",
+            "/a.md",
+            "a",
+            "markdown",
+            "h",
+            None,
+            "indexed",
+            None,
+        )
+        .expect("doc");
+        insert_chunk_row(
+            &c,
+            "c1",
+            "d1",
+            0,
+            None,
+            None,
+            "renormalization trick GCN",
+            4,
+            "h1",
+            "body",
+        )
+            .expect("c1");
+        let n: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'GCN'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("fts match");
+        assert_eq!(n, 1);
+        c.execute("DELETE FROM chunks WHERE id = ?1", ["c1"])
+            .expect("delete");
+        let n2: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'GCN'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("fts after delete");
+        assert_eq!(n2, 0);
+    }
+
+    #[test]
     fn chunk_window_first_middle_last() {
         let dir = tempfile::tempdir().expect("tempdir");
         let p = dir.path().join("v.sqlite");
@@ -755,9 +884,12 @@ mod tests {
             None,
         )
         .expect("doc");
-        insert_chunk_row(&c, "c0", "d1", 0, Some(1), Some(1), "first", 1, "h0").expect("c0");
-        insert_chunk_row(&c, "c1", "d1", 1, Some(2), Some(2), "middle", 1, "h1").expect("c1");
-        insert_chunk_row(&c, "c2", "d1", 2, Some(3), Some(3), "last", 1, "h2").expect("c2");
+        insert_chunk_row(&c, "c0", "d1", 0, Some(1), Some(1), "first", 1, "h0", "body")
+            .expect("c0");
+        insert_chunk_row(&c, "c1", "d1", 1, Some(2), Some(2), "middle", 1, "h1", "body")
+            .expect("c1");
+        insert_chunk_row(&c, "c2", "d1", 2, Some(3), Some(3), "last", 1, "h2", "body")
+            .expect("c2");
 
         let first = chunk_window(&c, "d1", "c0").expect("q").expect("first");
         assert_eq!(first.highlight, "first");

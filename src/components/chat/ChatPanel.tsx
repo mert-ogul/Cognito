@@ -14,6 +14,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 
 
 type ChatMessage = {
@@ -60,7 +62,7 @@ export function linkifyCitationMarkers(text: string, indexes: Set<number>): stri
 }
 
 export function citationSourceLabel(c: CitationItem): string {
-  const name = fileName(c.path) || c.title;
+  const name = (c.title || "").trim() || fileName(c.path);
   if (c.pageStart != null && c.pageEnd != null && c.pageEnd !== c.pageStart) {
     return `${name}, pp. ${c.pageStart}-${c.pageEnd}`;
   }
@@ -68,6 +70,19 @@ export function citationSourceLabel(c: CitationItem): string {
     return `${name}, p. ${c.pageStart}`;
   }
   return name;
+}
+
+/** Turn \\( \\) / \\[ \\] into $ / $$ outside code spans and blocks. */
+export function normalizeAnswerMath(text: string): string {
+  const parts = text.split(/(```[\s\S]*?```|`[^`\n]+`)/g);
+  return parts
+    .map((part) => {
+      if (part.startsWith("`")) return part;
+      return part
+        .replace(/\\\(([\s\S]+?)\\\)/g, (_m, body: string) => `$${body}$`)
+        .replace(/\\\[([\s\S]+?)\\\]/g, (_m, body: string) => `$$${body}$$`);
+    })
+    .join("");
 }
 
 function fileName(path: string): string {
@@ -179,7 +194,7 @@ export function ChatPanel({ health }: Props) {
       const end = prev.pageEnd ?? c.pageEnd;
       openPassage({
         documentId: prev.documentId,
-        title: fileName(c.path) || c.title,
+        title: (c.title || "").trim() || fileName(c.path),
         pageLabel: pageLabel(start, end),
         text: prev.text,
         highlight: prev.highlightSnippet ?? c.snippet,
@@ -408,7 +423,7 @@ function AssistantMarkdown({
 }) {
   const indexes = new Set(citations.map((c) => c.index));
   const byIndex = new Map(citations.map((c) => [c.index, c]));
-  const md = linkifyCitationMarkers(text, indexes);
+  const md = linkifyCitationMarkers(normalizeAnswerMath(text), indexes);
   const components: Components = {
     a: ({ href, children }) => {
       if (href?.startsWith("#cite-")) {
@@ -434,7 +449,11 @@ function AssistantMarkdown({
   };
   return (
     <div className="answer font-read text-[15px] leading-[1.6] text-text">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
+        components={components}
+      >
         {md}
       </ReactMarkdown>
     </div>

@@ -8,7 +8,7 @@ from typing import Any
 import duckdb
 
 from common.duckdb_util import ensure_schema
-from common.ollama import embed_text
+from common.ollama import embed_prefixes, embed_text
 from common.sqlite_vec_util import (
     MOCK_EMBED_DIM,
     connect_with_vec,
@@ -48,6 +48,8 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
         drafts = chunk_semantic(str(it.get("text", "")), ftype, pages=pages)
         chunks = []
         for ord_i, ch in enumerate(drafts):
+            trail = " > ".join(t for t in ch.heading_trail if t)
+            role = ch.role if ch.role in ("body", "references") else "body"
             chunks.append(
                 {
                     "ordinal": ord_i,
@@ -56,6 +58,8 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
                     "contentHash": hash_chunk_text(ch.text),
                     "pageStart": ch.page_start,
                     "pageEnd": ch.page_end,
+                    "headingTrail": trail or None,
+                    "role": role,
                 }
             )
         out.append(
@@ -66,6 +70,18 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
             }
         )
     return {"items": out}
+
+
+def _embed_document_text(
+    model: str, title: str, heading_trail: str | None, text: str
+) -> str:
+    _, doc_prefix = embed_prefixes(model)
+    parts = [doc_prefix + (title or "").strip()]
+    trail = (heading_trail or "").strip()
+    if trail:
+        parts.append(trail)
+    parts.append(text)
+    return "\n".join(parts)
 
 
 def _embed_one(model: str, text: str) -> list[float]:
@@ -84,8 +100,12 @@ def rpc_embed_chunks(params: dict[str, Any]) -> dict[str, Any]:
         for item in items:
             cid = str(item["chunkId"])
             text = str(item["text"])
+            title = str(item.get("title") or "")
+            trail = item.get("headingTrail")
+            trail_s = str(trail) if trail else None
             try:
-                vec = _embed_one(model, text)
+                embed_input = _embed_document_text(model, title, trail_s, text)
+                vec = _embed_one(model, embed_input)
                 if table_dimension(con) is None:
                     ensure_chunk_embedding_table(con, len(vec))
                 insert_chunk_embedding(con, cid, vec)

@@ -1,13 +1,17 @@
 import type { GraphSnapshot } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import cytoscape, { type Core } from "cytoscape";
+import fcose from "cytoscape-fcose";
 import { useEffect, useMemo, useRef } from "react";
+
+cytoscape.use(fcose);
 
 type Props = {
   snapshot: GraphSnapshot | null;
   highlightNodeIds: string[];
   selectedNodeId: string | null;
   onNodeTap: (nodeId: string) => void;
+  onBackgroundTap?: () => void;
   fitKey?: number;
   centerOnNodeId?: string | null;
   className?: string;
@@ -57,24 +61,33 @@ export function visibleSnapshot(
   };
 }
 
-function buildElements(snapshot: GraphSnapshot) {
-  const maxSources = Math.max(1, ...snapshot.nodes.map((n) => n.sourceCount || 1));
-  const ranked = [...snapshot.nodes].sort(
-    (a, b) => (b.sourceCount || 0) - (a.sourceCount || 0),
-  );
-  const labeled = new Set(ranked.slice(0, 30).map((n) => n.nodeId));
+function degreeByNode(snapshot: GraphSnapshot): Map<string, number> {
+  const deg = new Map<string, number>();
+  for (const n of snapshot.nodes) deg.set(n.nodeId, 0);
+  for (const e of snapshot.edges) {
+    deg.set(e.sourceNodeId, (deg.get(e.sourceNodeId) ?? 0) + 1);
+    deg.set(e.targetNodeId, (deg.get(e.targetNodeId) ?? 0) + 1);
+  }
+  return deg;
+}
 
+function buildElements(snapshot: GraphSnapshot) {
+  const deg = degreeByNode(snapshot);
+  const maxDeg = Math.max(1, ...deg.values());
   const nodes = snapshot.nodes.map((n) => {
-    const count = n.sourceCount || 1;
-    const size = 8 + (12 * count) / maxSources;
+    const isWork = n.kind === "work";
+    const d = deg.get(n.nodeId) ?? 0;
+    const size = isWork ? 24 : 8 + (8 * d) / maxDeg;
+    const showLabel = isWork || d >= 3 ? 1 : 0;
     return {
       data: {
         id: n.nodeId,
         label: n.name,
         kind: n.kind,
-        sourceCount: count,
+        degree: d,
         size,
-        showLabel: labeled.has(n.nodeId) ? 1 : 0,
+        showLabel,
+        isWork: isWork ? 1 : 0,
       },
     };
   });
@@ -106,9 +119,16 @@ function applyThemeStyles(cy: Core, theme: Theme) {
       width: "data(size)",
       height: "data(size)",
       "min-zoomed-font-size": 13,
+      opacity: 1,
     })
     .selector("node[showLabel = 1]")
     .style({
+      "min-zoomed-font-size": 0,
+    })
+    .selector("node[isWork = 1]")
+    .style({
+      "border-color": theme.accent,
+      "border-width": 2.5,
       "min-zoomed-font-size": 0,
     })
     .selector("edge")
@@ -118,23 +138,93 @@ function applyThemeStyles(cy: Core, theme: Theme) {
       "curve-style": "bezier",
       "target-arrow-shape": "none",
       "source-arrow-shape": "none",
+      opacity: 1,
     })
     .update();
 }
 
-function applyHighlight(cy: Core, highlightNodeIds: string[], selectedNodeId: string | null, theme: Theme) {
+/** Opacity for a node under focus: selected + neighbours stay at 1, others fade. */
+export function nodeFocusOpacity(
+  focused: Set<string> | null,
+  nodeId: string,
+): number {
+  if (!focused) return 1;
+  return focused.has(nodeId) ? 1 : 0.15;
+}
+
+export function buildFocusSet(
+  selectedNodeId: string | null,
+  neighborIds: string[],
+): Set<string> | null {
+  if (!selectedNodeId) return null;
+  return new Set([selectedNodeId, ...neighborIds]);
+}
+
+function applyHighlight(
+  cy: Core,
+  highlightNodeIds: string[],
+  selectedNodeId: string | null,
+  theme: Theme,
+) {
   const hl = new Set(highlightNodeIds);
+  let focused: Set<string> | null = null;
+  if (selectedNodeId) {
+    const n = cy.getElementById(selectedNodeId);
+    const neighbors: string[] = [];
+    if (n.nonempty()) {
+      n.neighborhood("node").forEach((nb) => {
+        neighbors.push(nb.id());
+      });
+    }
+    focused = buildFocusSet(selectedNodeId, neighbors);
+  }
+  const zoom = cy.zoom();
   cy.batch(() => {
-    cy.nodes().forEach((n) => {
-      const id = n.id();
+    cy.nodes().forEach((node) => {
+      const id = node.id();
       const isHl = hl.has(id);
       const isSel = selectedNodeId === id;
-      n.style("background-color", isHl ? theme.accent : theme.pane);
-      n.style("border-color", isSel ? theme.accent : theme.line);
-      n.style("border-width", isSel ? 3 : 1.5);
-      n.style("color", theme.text);
+      const isWork = node.data("isWork") === 1;
+      const deg = Number(node.data("degree") || 0);
+      node.style("background-color", isHl ? theme.accent : theme.pane);
+      node.style(
+        "border-color",
+        isSel || isWork ? theme.accent : theme.line,
+      );
+      node.style("border-width", isSel ? 3 : isWork ? 2.5 : 1.5);
+      node.style("color", theme.text);
+      node.style("opacity", nodeFocusOpacity(focused, id));
+      const show =
+        isWork || deg >= 3 || zoom > 1.2 || node.data("showLabel") === 1;
+      node.style("min-zoomed-font-size", show ? 0 : 13);
+    });
+    cy.edges().forEach((edge) => {
+      if (!focused) {
+        edge.style("opacity", 1);
+        return;
+      }
+      const s = edge.source().id();
+      const t = edge.target().id();
+      edge.style(
+        "opacity",
+        focused.has(s) && focused.has(t) ? 1 : 0.15,
+      );
     });
   });
+}
+
+function fitFocused(cy: Core, selectedNodeId: string | null) {
+  if (!selectedNodeId) {
+    cy.fit(cy.elements(), 24);
+    return;
+  }
+  const n = cy.getElementById(selectedNodeId);
+  if (!n.nonempty()) {
+    cy.fit(cy.elements(), 24);
+    return;
+  }
+  const set = n.union(n.neighborhood());
+  cy.fit(set, 40);
 }
 
 export function GraphCyCanvas({
@@ -142,6 +232,7 @@ export function GraphCyCanvas({
   highlightNodeIds,
   selectedNodeId,
   onNodeTap,
+  onBackgroundTap,
   fitKey = 0,
   centerOnNodeId,
   className,
@@ -150,6 +241,8 @@ export function GraphCyCanvas({
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
+  const onBgRef = useRef(onBackgroundTap);
+  onBgRef.current = onBackgroundTap;
   const display = useMemo(
     () => (snapshot ? visibleSnapshot(snapshot, showUnconnected) : null),
     [snapshot, showUnconnected],
@@ -166,9 +259,12 @@ export function GraphCyCanvas({
       elements: buildElements(display),
       style: [],
       layout: {
-        name: "cose",
+        name: "fcose",
         animate: false,
         padding: 24,
+        packComponents: true,
+        nodeRepulsion: 8000,
+        idealEdgeLength: 90,
       } as cytoscape.LayoutOptions,
       wheelSensitivity: 0.35,
     });
@@ -178,6 +274,14 @@ export function GraphCyCanvas({
     cy.boxSelectionEnabled(false);
     cy.on("tap", "node", (evt) => {
       onNodeTap(evt.target.id());
+    });
+    cy.on("tap", (evt) => {
+      if (evt.target === cy) {
+        onBgRef.current?.();
+      }
+    });
+    cy.on("zoom", () => {
+      applyHighlight(cy, highlightNodeIds, selectedNodeId, readTheme());
     });
     cyRef.current = cy;
     applyHighlight(cy, highlightNodeIds, selectedNodeId, theme);
@@ -207,20 +311,27 @@ export function GraphCyCanvas({
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy || fitKey === 0) return;
-    cy.fit(cy.elements(), 24);
-  }, [fitKey]);
+    fitFocused(cy, selectedNodeId);
+  }, [fitKey, selectedNodeId]);
 
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy || !centerOnNodeId) return;
     const n = cy.getElementById(centerOnNodeId);
     if (n.nonempty()) {
-      cy.center(n);
-      if (cy.zoom() < 1) {
-        cy.zoom(1);
-      }
+      fitFocused(cy, centerOnNodeId);
     }
   }, [centerOnNodeId]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onBgRef.current?.();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   if (!display || display.nodes.length === 0) {
     return (

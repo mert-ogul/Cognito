@@ -14,6 +14,7 @@ const baseHealth: AppHealth = {
   warmUpError: null,
   ollamaReachable: true,
   missingModels: [],
+  indexFormatUpdating: false,
 };
 
 const indexing: ImportProgress = {
@@ -83,6 +84,15 @@ describe("describeStatus", () => {
       5,
     );
     expect(line).toEqual({ text: "Could not load weights", tone: "danger" });
+  });
+
+  it("prioritises index format update over indexing progress", () => {
+    const line = describeStatus(
+      { ...baseHealth, indexFormatUpdating: true, warmUpPending: true },
+      indexing,
+      5,
+    );
+    expect(line).toEqual({ text: "Updating the search index", tone: "muted" });
   });
 
   it("prioritises indexing over model loading and graph queue", () => {

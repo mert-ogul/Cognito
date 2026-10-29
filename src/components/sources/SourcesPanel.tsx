@@ -30,16 +30,20 @@ function folderName(path: string | null | undefined): string {
   return i >= 0 ? trimmed.slice(i + 1) : trimmed;
 }
 
-function typeLine(d: DocumentRow): string {
-  const ft = d.fileType.toLowerCase();
-  if (ft === "pdf") {
-    return d.pageCount != null ? `PDF, ${d.pageCount} pages` : "PDF";
+function displayTitle(d: DocumentRow): string {
+  return d.title.trim() || fileName(d.path);
+}
+
+function secondaryLine(d: DocumentRow): string {
+  const name = fileName(d.path);
+  if (d.pageCount != null) {
+    return `${name}, ${d.pageCount} pages`;
   }
-  return "Markdown";
+  return name;
 }
 
 function sortByName(a: DocumentRow, b: DocumentRow): number {
-  return fileName(a.path).localeCompare(fileName(b.path), undefined, { sensitivity: "base" });
+  return displayTitle(a).localeCompare(displayTitle(b), undefined, { sensitivity: "base" });
 }
 
 export function SourcesPanel() {
@@ -241,9 +245,9 @@ export function SourcesPanel() {
               return (
                 <li key={d.id} className="border-b border-line px-3 py-2">
                   <p className="truncate text-text" title={d.path}>
-                    {fileName(d.path)}
+                    {displayTitle(d)}
                   </p>
-                  <p className="text-muted">{typeLine(d)}</p>
+                  <p className="text-muted">{secondaryLine(d)}</p>
                   {indexing ? <p className="text-muted">Indexing</p> : null}
                   {failed ? (
                     <div className="mt-0.5 flex flex-wrap items-center gap-2">
@@ -265,6 +269,9 @@ export function SourcesPanel() {
                     <p className="text-danger" title={d.graphError ?? undefined}>
                       Graph failed
                     </p>
+                  ) : null}
+                  {d.graphStatus === "ok" && d.graphError ? (
+                    <p className="text-muted">{d.graphError}</p>
                   ) : null}
                 </li>
               );

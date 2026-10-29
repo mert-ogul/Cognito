@@ -63,6 +63,12 @@ export function GraphPanel() {
     setCenterOn(id);
   }, []);
 
+  const clearFocus = useCallback(() => {
+    setSelectedNodeId(null);
+    setSheetOpen(false);
+    setCenterOn(null);
+  }, []);
+
   const onNodeTap = useCallback(
     (id: string) => {
       openNode(id);
@@ -144,6 +150,7 @@ export function GraphPanel() {
           highlightNodeIds={highlightNodeIds}
           selectedNodeId={selectedNodeId}
           onNodeTap={onNodeTap}
+          onBackgroundTap={clearFocus}
           fitKey={fitKey}
           centerOnNodeId={centerOn}
           emptyMessage={emptyMessage}
@@ -152,10 +159,7 @@ export function GraphPanel() {
         <GraphNodeDetailSheet
           nodeId={sheetOpen ? selectedNodeId : null}
           open={sheetOpen}
-          onClose={() => {
-            setSheetOpen(false);
-            setSelectedNodeId(null);
-          }}
+          onClose={clearFocus}
         />
       </div>
     </div>

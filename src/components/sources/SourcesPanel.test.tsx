@@ -18,7 +18,7 @@ describe("SourcesPanel", () => {
           {
             id: "1",
             path: "/vault/a.pdf",
-            title: "a",
+            title: "Semi-Supervised Classification with Graph Convolutional Networks",
             fileType: "pdf",
             contentHash: "abc",
             pageCount: 3,
@@ -33,7 +33,7 @@ describe("SourcesPanel", () => {
           {
             id: "2",
             path: "/vault/b.md",
-            title: "b",
+            title: "Notes on GAT",
             fileType: "markdown",
             contentHash: "def",
             pageCount: null,
@@ -59,17 +59,19 @@ describe("SourcesPanel", () => {
     });
   });
 
-  it("renders document list with type lines and failed state", async () => {
+  it("renders document list with titles and failed state", async () => {
     const client = new QueryClient();
     render(
       <QueryClientProvider client={client}>
         <SourcesPanel />
       </QueryClientProvider>,
     );
-    expect(await screen.findByText("a.pdf")).toBeInTheDocument();
-    expect(screen.getByText("PDF, 3 pages")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Semi-Supervised Classification with Graph Convolutional Networks"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("a.pdf, 3 pages")).toBeInTheDocument();
+    expect(screen.getByText("Notes on GAT")).toBeInTheDocument();
     expect(screen.getByText("b.md")).toBeInTheDocument();
-    expect(screen.getByText("Markdown")).toBeInTheDocument();
     expect(screen.getByText("Couldn't read this file")).toBeInTheDocument();
   });
 
@@ -80,7 +82,7 @@ describe("SourcesPanel", () => {
         <SourcesPanel />
       </QueryClientProvider>,
     );
-    await screen.findByText("a.pdf");
+    await screen.findByText("a.pdf, 3 pages");
     act(() => {
       e2eEmit("import-progress", {
         jobId: "j1",

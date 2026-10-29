@@ -172,3 +172,11 @@ body {
   text-decoration: underline;
 }
 
+.answer .katex-display {
+  display: block;
+  margin: 1em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+}
+

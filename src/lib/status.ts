@@ -31,6 +31,9 @@ export function describeStatus(
   if (health.warmUpError) {
     return { text: health.warmUpError, tone: "danger" };
   }
+  if (health.indexFormatUpdating) {
+    return { text: "Updating the search index", tone: "muted" };
+  }
   if (
     importProgress &&
     importProgress.totalFiles > 0 &&

@@ -16,6 +16,9 @@ pub struct AppHealth {
     pub warm_up_error: Option<String>,
     pub ollama_reachable: bool,
     pub missing_models: Vec<String>,
+    /// Startup rebuild rewriting embeddings after an index-format bump.
+    #[serde(default)]
+    pub index_format_updating: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

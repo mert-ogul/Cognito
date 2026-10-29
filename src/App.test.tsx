@@ -18,6 +18,7 @@ vi.mock("@tauri-apps/api/core", () => ({
         warmUpError: null,
         ollamaReachable: true,
         missingModels: [],
+        indexFormatUpdating: false,
       };
     }
     if (cmd === "list_documents") {

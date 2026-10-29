@@ -15,6 +15,7 @@ const base: AppHealth = {
   warmUpError: null,
   ollamaReachable: false,
   missingModels: ["phi4-mini", "nomic-embed-text"],
+  indexFormatUpdating: false,
 };
 
 describe("OllamaSetupBanner", () => {
