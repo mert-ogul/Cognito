@@ -159,9 +159,8 @@ export async function getDocumentPreview(
   });
 }
 
-export async function sendChatQuery(query: string): Promise<string> {
+export async function sendChatQuery(query: string, messageId: string): Promise<string> {
   if (e2e) {
-    const messageId = crypto.randomUUID();
     window.setTimeout(() => {
       e2eEmit("chat-stream", { messageId, token: "Hello " });
       e2eEmit("chat-stream", { messageId, token: "world." });
@@ -185,7 +184,7 @@ export async function sendChatQuery(query: string): Promise<string> {
     }, 30);
     return messageId;
   }
-  return invoke<string>("send_chat_query", { query });
+  return invoke<string>("send_chat_query", { query, messageId });
 }
 
 export async function getGraphSnapshot(limitNodes?: number | null): Promise<GraphSnapshot> {
@@ -237,8 +236,6 @@ export async function getSettings(): Promise<{
   vaultPath: string | null;
   chatModel: string;
   embedModel: string;
-  telemetryOptIn: boolean;
-  crashReportingOptIn: boolean;
   graphExtractionEnabled: boolean;
 }> {
   if (e2e) {
@@ -246,8 +243,6 @@ export async function getSettings(): Promise<{
       vaultPath: "/fixture",
       chatModel: "phi4-mini",
       embedModel: "nomic-embed-text",
-      telemetryOptIn: false,
-      crashReportingOptIn: false,
       graphExtractionEnabled: true,
     };
   }
@@ -258,8 +253,6 @@ export async function updateSettings(payload: {
   vaultPath?: string | null;
   chatModel: string;
   embedModel: string;
-  telemetryOptIn: boolean;
-  crashReportingOptIn: boolean;
   graphExtractionEnabled: boolean;
 }): Promise<void> {
   if (e2e) {
