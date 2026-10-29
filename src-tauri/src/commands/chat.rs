@@ -3,15 +3,17 @@ use crate::events::CHAT_FINAL;
 use crate::models::{ChatFinalResult, CitationItem};
 use crate::services::chat_query;
 use tauri::{AppHandle, Emitter};
-use uuid::Uuid;
 
 #[tauri::command]
 pub async fn send_chat_query(
     app: AppHandle,
     state: tauri::State<'_, SharedState>,
     query: String,
+    message_id: String,
 ) -> Result<String, String> {
-    let message_id = Uuid::new_v4().to_string();
+    if message_id.trim().is_empty() {
+        return Err("message_id must not be empty".into());
+    }
     let st = state.inner().clone();
     let app_c = app.clone();
     let mid = message_id.clone();

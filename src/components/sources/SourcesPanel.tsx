@@ -33,6 +33,7 @@ export function SourcesPanel() {
   const [progress, setProgress] = useState<ImportProgress | null>(null);
   const [graphProgress, setGraphProgress] = useState<GraphExtractionProgress | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const docs = useQuery({
     queryKey: ["documents"],
@@ -46,23 +47,41 @@ export function SourcesPanel() {
 
   const pickVault = useMutation({
     mutationFn: selectVaultFolder,
+    onMutate: () => {
+      setActionError(null);
+    },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["health"] });
       void qc.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: (error) => {
+      setActionError(String(error));
     },
   });
 
   const runImport = useMutation({
     mutationFn: (folder: string | null) => importDocuments(folder),
+    onMutate: () => {
+      setActionError(null);
+    },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: (error) => {
+      setActionError(String(error));
     },
   });
 
   const retry = useMutation({
     mutationFn: retryFailedImport,
+    onMutate: () => {
+      setActionError(null);
+    },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: (error) => {
+      setActionError(String(error));
     },
   });
 
@@ -129,7 +148,6 @@ export function SourcesPanel() {
   }, [progress]);
 
   const underCap = rows.length < FIRST_IMPORT_DOC_CAP;
-  const showImportMore = rows.length > 0 && underCap;
   const graphWaiting = useMemo(
     () =>
       rows.filter(
@@ -227,16 +245,6 @@ export function SourcesPanel() {
           >
             {runImport.isPending ? "Importing…" : "Import vault"}
           </Button>
-          {showImportMore ? (
-            <Button
-              type="button"
-              variant="outline"
-              disabled={runImport.isPending}
-              onClick={() => runImport.mutate(null)}
-            >
-              Import more
-            </Button>
-          ) : null}
           <Button
             type="button"
             variant="ghost"
@@ -247,6 +255,11 @@ export function SourcesPanel() {
             Retry failed
           </Button>
         </div>
+        {actionError ? (
+          <p className="text-xs text-red-500" role="alert">
+            {actionError}
+          </p>
+        ) : null}
         {!underCap ? (
           <p className="text-[10px] text-amber-600 dark:text-amber-400">
             Document cap reached ({FIRST_IMPORT_DOC_CAP}). Remove files to add different ones.

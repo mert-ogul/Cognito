@@ -18,8 +18,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
   const { data } = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: open });
   const [chat, setChat] = useState("phi4-mini");
   const [embed, setEmbed] = useState("nomic-embed-text");
-  const [tel, setTel] = useState(false);
-  const [crash, setCrash] = useState(false);
   const [graphOn, setGraphOn] = useState(true);
   const [ver, setVer] = useState<string | null>(null);
 
@@ -38,8 +36,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     if (!data) return;
     setChat(data.chatModel);
     setEmbed(data.embedModel);
-    setTel(data.telemetryOptIn);
-    setCrash(data.crashReportingOptIn);
     setGraphOn(data.graphExtractionEnabled);
   }, [data]);
 
@@ -49,8 +45,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
         vaultPath: data?.vaultPath ?? null,
         chatModel: chat,
         embedModel: embed,
-        telemetryOptIn: tel,
-        crashReportingOptIn: crash,
         graphExtractionEnabled: graphOn,
       }),
     onSuccess: () => {
@@ -66,8 +60,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
           <DialogTitle>Settings</DialogTitle>
         </DialogHeader>
         <p className="text-xs text-[var(--muted)]">
-          Cognito works offline for your library. No account is required. Telemetry and crash reports are opt-in and off
-          by default.
+          Cognito works offline for your library. No account is required.
         </p>
         <div className="space-y-2">
           <Label htmlFor="vault-path">Vault folder</Label>
@@ -84,20 +77,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
             <Label htmlFor="embed-model">Embedding model</Label>
             <Input id="embed-model" value={embed} onChange={(e) => setEmbed(e.target.value)} autoComplete="off" />
           </div>
-        </div>
-        <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--border)] px-3 py-2">
-          <div>
-            <p className="text-sm font-medium">Telemetry</p>
-            <p className="text-[10px] text-[var(--muted)]">Product analytics (off by default)</p>
-          </div>
-          <Switch checked={tel} onCheckedChange={setTel} aria-label="Telemetry opt-in" />
-        </div>
-        <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--border)] px-3 py-2">
-          <div>
-            <p className="text-sm font-medium">Crash reporting</p>
-            <p className="text-[10px] text-[var(--muted)]">Send crash dumps when enabled (off by default)</p>
-          </div>
-          <Switch checked={crash} onCheckedChange={setCrash} aria-label="Crash reporting opt-in" />
         </div>
         <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--border)] px-3 py-2">
           <div>

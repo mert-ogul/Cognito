@@ -80,8 +80,6 @@ pub struct SettingsPayload {
     pub vault_path: Option<String>,
     pub chat_model: String,
     pub embed_model: String,
-    pub telemetry_opt_in: bool,
-    pub crash_reporting_opt_in: bool,
     #[serde(default = "default_true")]
     pub graph_extraction_enabled: bool,
 }

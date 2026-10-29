@@ -1,5 +1,5 @@
 import { listen } from "@/lib/tauri-events";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SourcesPanel } from "./SourcesPanel";
@@ -57,8 +57,6 @@ describe("SourcesPanel", () => {
           vaultPath: "/vault",
           chatModel: "phi4-mini",
           embedModel: "nomic-embed-text",
-          telemetryOptIn: false,
-          crashReportingOptIn: false,
           graphExtractionEnabled: true,
         };
       }
@@ -117,8 +115,6 @@ describe("SourcesPanel", () => {
           vaultPath: null,
           chatModel: "phi4-mini",
           embedModel: "nomic-embed-text",
-          telemetryOptIn: false,
-          crashReportingOptIn: false,
           graphExtractionEnabled: true,
         };
       }
@@ -175,8 +171,6 @@ describe("SourcesPanel", () => {
           vaultPath: "/vault",
           chatModel: "phi4-mini",
           embedModel: "nomic-embed-text",
-          telemetryOptIn: false,
-          crashReportingOptIn: false,
           graphExtractionEnabled: true,
         };
       }
@@ -189,5 +183,35 @@ describe("SourcesPanel", () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByText("Graph: 2 documents waiting")).toBeInTheDocument();
+  });
+
+  it("shows rejected import error with role alert", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_documents") return [];
+      if (cmd === "get_settings") {
+        return {
+          vaultPath: "/vault",
+          chatModel: "phi4-mini",
+          embedModel: "nomic-embed-text",
+          graphExtractionEnabled: true,
+        };
+      }
+      if (cmd === "import_documents") {
+        throw "No PDF or Markdown files found.";
+      }
+      return {};
+    });
+    const client = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <SourcesPanel />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Import vault" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "No PDF or Markdown files found.",
+    );
   });
 });

@@ -34,18 +34,6 @@ pub async fn update_settings(
             }
             sqlite::upsert_setting(c, "chat_model", &payload.chat_model)?;
             sqlite::upsert_setting(c, "embed_model", &payload.embed_model)?;
-            let tel = if payload.telemetry_opt_in {
-                "true"
-            } else {
-                "false"
-            };
-            sqlite::upsert_setting(c, "telemetry_opt_in", tel)?;
-            let crash = if payload.crash_reporting_opt_in {
-                "true"
-            } else {
-                "false"
-            };
-            sqlite::upsert_setting(c, "crash_reporting_opt_in", crash)?;
             let graph = if payload.graph_extraction_enabled {
                 "true"
             } else {

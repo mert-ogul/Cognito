@@ -83,15 +83,11 @@ pub fn load_settings(conn: &Connection) -> CognitoResult<SettingsPayload> {
     let vault = get_setting(conn, "vault_path")?;
     let chat = get_setting(conn, "chat_model")?.unwrap_or_else(|| "phi4-mini".to_string());
     let embed = get_setting(conn, "embed_model")?.unwrap_or_else(|| "nomic-embed-text".to_string());
-    let tel = get_setting(conn, "telemetry_opt_in")?.unwrap_or_else(|| "false".to_string());
-    let crash = get_setting(conn, "crash_reporting_opt_in")?.unwrap_or_else(|| "false".to_string());
     let graph = get_setting(conn, "graph_extraction_enabled")?.unwrap_or_else(|| "true".to_string());
     Ok(SettingsPayload {
         vault_path: vault,
         chat_model: chat,
         embed_model: embed,
-        telemetry_opt_in: tel == "true",
-        crash_reporting_opt_in: crash == "true",
         graph_extraction_enabled: graph != "false",
     })
 }
@@ -112,7 +108,7 @@ pub fn list_documents(conn: &Connection) -> CognitoResult<Vec<DocumentRow>> {
         .prepare(
             "SELECT id, path, title, file_type, content_hash, page_count, status, error_message,
                     imported_at, indexed_at, modified_at, graph_status, graph_error
-             FROM documents ORDER BY imported_at DESC",
+             FROM documents WHERE status != 'removed' ORDER BY imported_at DESC",
         )
         .map_err(|e| CognitoError::Database(e.to_string()))?;
     let rows = stmt
@@ -605,5 +601,39 @@ mod tests {
             )
             .expect("count");
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn list_documents_excludes_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("v.sqlite");
+        let c = open_sqlite(&p).expect("open");
+        insert_document_row(
+            &c,
+            "keep",
+            "/keep.md",
+            "keep",
+            "markdown",
+            "h1",
+            None,
+            "indexed",
+            None,
+        )
+        .expect("keep");
+        insert_document_row(
+            &c,
+            "gone",
+            "/gone.md",
+            "gone",
+            "markdown",
+            "h2",
+            None,
+            "removed",
+            None,
+        )
+        .expect("gone");
+        let rows = list_documents(&c).expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "keep");
     }
 }

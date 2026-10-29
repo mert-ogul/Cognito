@@ -47,4 +47,4 @@ Use this for **manual GitHub Releases** and QA before publishing binaries.
 
 ## Privacy
 
-- [ ] Confirm telemetry and crash reporting remain **opt-in** and **off** by default in settings.
+- [ ] Confirm the app makes no network requests except to the configured Ollama host.

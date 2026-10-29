@@ -70,7 +70,7 @@ pub fn run() {
                     .map_err(|e| format!("watcher lock: {}", e))?;
                 *wg = Some(reload_tx.clone());
             }
-            file_watcher::spawn_background(state.clone(), reload_rx);
+            file_watcher::spawn_background(state.clone(), app.handle().clone(), reload_rx);
             if let Ok(s) = state.with_sqlite(|c| sqlite::load_settings(c)) {
                 if let Some(vp) = s.vault_path {
                     let _ = reload_tx.send(PathBuf::from(vp));

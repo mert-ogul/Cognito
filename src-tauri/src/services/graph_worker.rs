@@ -3,7 +3,7 @@
 use crate::app::state::SharedState;
 use crate::db::sqlite;
 use crate::errors::CognitoResult;
-use crate::events::GRAPH_EXTRACTION_PROGRESS;
+use crate::events::{GRAPH_EXTRACTION_PROGRESS, LIBRARY_CHANGED};
 use crate::models::GraphExtractionProgress;
 use serde_json::json;
 use std::path::Path;
@@ -102,6 +102,9 @@ fn process_one_document(
                         .unwrap_or("graph extraction failed");
                     state.with_sqlite(|c| sqlite::mark_document_graph_failed(c, document_id, err))?;
                     emit_graph(app, None, document_id, "failed", Some(err));
+                    if let Some(a) = app {
+                        let _ = a.emit(LIBRARY_CHANGED, &());
+                    }
                     return Ok(());
                 }
             }
@@ -109,12 +112,18 @@ fn process_one_document(
                 let msg = e.to_string();
                 state.with_sqlite(|c| sqlite::mark_document_graph_failed(c, document_id, &msg))?;
                 emit_graph(app, None, document_id, "failed", Some(&msg));
+                if let Some(a) = app {
+                    let _ = a.emit(LIBRARY_CHANGED, &());
+                }
                 return Ok(());
             }
         }
     }
     state.with_sqlite(|c| sqlite::mark_document_graph_ok(c, document_id))?;
     emit_graph(app, None, document_id, "ok", None);
+    if let Some(a) = app {
+        let _ = a.emit(LIBRARY_CHANGED, &());
+    }
     Ok(())
 }
 
