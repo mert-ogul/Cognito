@@ -20,6 +20,7 @@ pub struct AppState {
     pub sidecar: SidecarPool,
     sql: Mutex<Option<SqlConn>>,
     pub watcher_tx: Mutex<Option<Sender<PathBuf>>>,
+    pub graph_tx: Mutex<Option<Sender<()>>>,
     /// `None` = warm-up not finished yet.
     pub chat_warm: Mutex<Option<ChatWarmResult>>,
     pub import_running: AtomicBool,
@@ -38,6 +39,7 @@ impl AppState {
             sidecar,
             sql: Mutex::new(None),
             watcher_tx: Mutex::new(None),
+            graph_tx: Mutex::new(None),
             chat_warm: Mutex::new(None),
             import_running: AtomicBool::new(false),
             graph_store_ready: AtomicBool::new(false),
@@ -85,6 +87,14 @@ impl AppState {
         if let Ok(g) = self.watcher_tx.lock() {
             if let Some(tx) = g.as_ref() {
                 let _ = tx.send(path);
+            }
+        }
+    }
+
+    pub fn notify_graph_worker(&self) {
+        if let Ok(g) = self.graph_tx.lock() {
+            if let Some(tx) = g.as_ref() {
+                let _ = tx.send(());
             }
         }
     }

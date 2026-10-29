@@ -21,11 +21,12 @@ pub async fn update_settings(
     payload: SettingsPayload,
 ) -> Result<(), String> {
     let st = (*state).clone();
-    let old_chat = st
+    let prev = st
         .with_sqlite(|c| sqlite::load_settings(c))
-        .map(|s| s.chat_model)
-        .unwrap_or_default();
-    let chat_changed = payload.chat_model != old_chat;
+        .map_err(|e| e.to_string())?;
+    let chat_changed = payload.chat_model != prev.chat_model;
+    let graph_turned_on =
+        payload.graph_extraction_enabled && !prev.graph_extraction_enabled;
     run_blocking(state, move |st| {
         st.with_sqlite(|c| {
             if let Some(ref v) = payload.vault_path {
@@ -45,6 +46,12 @@ pub async fn update_settings(
                 "false"
             };
             sqlite::upsert_setting(c, "crash_reporting_opt_in", crash)?;
+            let graph = if payload.graph_extraction_enabled {
+                "true"
+            } else {
+                "false"
+            };
+            sqlite::upsert_setting(c, "graph_extraction_enabled", graph)?;
             Ok(())
         })?;
         if let Some(ref v) = payload.vault_path {
@@ -53,6 +60,9 @@ pub async fn update_settings(
         Ok(())
     })
     .await?;
+    if graph_turned_on {
+        st.notify_graph_worker();
+    }
     if chat_changed {
         st.clear_chat_warm();
         model_warm::spawn_warm_chat_model(st, app);

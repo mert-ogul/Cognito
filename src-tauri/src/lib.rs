@@ -15,6 +15,7 @@ pub mod vault;
 use app::state::{AppState, SharedState};
 use db::sqlite;
 use services::file_watcher;
+use services::graph_worker;
 use services::model_warm;
 use sidecar::SidecarPool;
 use sidecar_paths::resolve_sidecar_paths;
@@ -75,6 +76,7 @@ pub fn run() {
                     let _ = reload_tx.send(PathBuf::from(vp));
                 }
             }
+            graph_worker::spawn(state.clone(), app.handle().clone());
             app.manage(state.clone());
             model_warm::spawn_warm_chat_model(state, app.handle().clone());
             Ok(())

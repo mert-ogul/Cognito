@@ -85,12 +85,14 @@ pub fn load_settings(conn: &Connection) -> CognitoResult<SettingsPayload> {
     let embed = get_setting(conn, "embed_model")?.unwrap_or_else(|| "nomic-embed-text".to_string());
     let tel = get_setting(conn, "telemetry_opt_in")?.unwrap_or_else(|| "false".to_string());
     let crash = get_setting(conn, "crash_reporting_opt_in")?.unwrap_or_else(|| "false".to_string());
+    let graph = get_setting(conn, "graph_extraction_enabled")?.unwrap_or_else(|| "true".to_string());
     Ok(SettingsPayload {
         vault_path: vault,
         chat_model: chat,
         embed_model: embed,
         telemetry_opt_in: tel == "true",
         crash_reporting_opt_in: crash == "true",
+        graph_extraction_enabled: graph != "false",
     })
 }
 
@@ -298,7 +300,7 @@ pub fn finish_import_job(
 
 pub fn list_chunk_ids_for_document(conn: &Connection, doc_id: &str) -> CognitoResult<Vec<String>> {
     let mut stmt = conn
-        .prepare("SELECT id FROM chunks WHERE document_id = ?1")
+        .prepare("SELECT id FROM chunks WHERE document_id = ?1 ORDER BY ordinal ASC")
         .map_err(|e| CognitoError::Database(e.to_string()))?;
     let rows = stmt
         .query_map(params![doc_id], |r| r.get(0))
@@ -308,6 +310,74 @@ pub fn list_chunk_ids_for_document(conn: &Connection, doc_id: &str) -> CognitoRe
         out.push(row.map_err(|e| CognitoError::Database(e.to_string()))?);
     }
     Ok(out)
+}
+
+pub fn next_pending_graph_document(conn: &Connection) -> CognitoResult<Option<String>> {
+    let row = conn
+        .query_row(
+            "SELECT id FROM documents
+             WHERE status = 'indexed' AND graph_status = 'pending'
+             ORDER BY imported_at ASC LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(row)
+}
+
+pub fn mark_document_graph_running(conn: &Connection, id: &str) -> CognitoResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE documents SET graph_status = 'running', graph_error = NULL, modified_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )
+    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(())
+}
+
+pub fn reset_running_graph_jobs(conn: &Connection) -> CognitoResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE documents SET graph_status = 'pending', modified_at = ?1 WHERE graph_status = 'running'",
+        params![now],
+    )
+    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(())
+}
+
+pub fn document_graph_still_running(conn: &Connection, id: &str) -> CognitoResult<bool> {
+    let row = conn
+        .query_row(
+            "SELECT 1 FROM documents WHERE id = ?1 AND status = 'indexed' AND graph_status = 'running'",
+            [id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(row.is_some())
+}
+
+pub fn requeue_failed_graphs(conn: &Connection) -> CognitoResult<usize> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let n = conn
+        .execute(
+            "UPDATE documents SET graph_status = 'pending', graph_error = NULL, modified_at = ?1
+             WHERE status = 'indexed' AND graph_status = 'failed'",
+            params![now],
+        )
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(n)
+}
+
+pub fn mark_document_graph_pending(conn: &Connection, id: &str) -> CognitoResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE documents SET graph_status = 'pending', graph_error = NULL, modified_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )
+    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(())
 }
 
 pub fn delete_document_by_id(conn: &Connection, id: &str) -> CognitoResult<()> {

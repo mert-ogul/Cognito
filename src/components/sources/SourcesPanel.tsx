@@ -5,6 +5,7 @@ import { FIRST_IMPORT_DOC_CAP } from "@/components/sources/constants";
 import { DocumentStatusBadge } from "@/components/sources/DocumentStatusBadge";
 import { DocumentTypeIcon } from "@/components/sources/DocumentTypeIcon";
 import {
+  getSettings,
   importDocuments,
   listDocuments,
   retryFailedImport,
@@ -36,6 +37,11 @@ export function SourcesPanel() {
   const docs = useQuery({
     queryKey: ["documents"],
     queryFn: listDocuments,
+  });
+
+  const settings = useQuery({
+    queryKey: ["settings"],
+    queryFn: getSettings,
   });
 
   const pickVault = useMutation({
@@ -124,6 +130,21 @@ export function SourcesPanel() {
 
   const underCap = rows.length < FIRST_IMPORT_DOC_CAP;
   const showImportMore = rows.length > 0 && underCap;
+  const graphWaiting = useMemo(
+    () =>
+      rows.filter(
+        (d) =>
+          d.status === "indexed" &&
+          (d.graphStatus === "pending" || d.graphStatus === "running"),
+      ).length,
+    [rows],
+  );
+  const graphFileName = useMemo(() => {
+    if (!graphProgress?.documentId) return null;
+    const row = rows.find((d) => d.id === graphProgress.documentId);
+    return row ? fileName(row.path) : null;
+  }, [graphProgress, rows]);
+  const graphEnabled = settings.data?.graphExtractionEnabled !== false;
 
   return (
     <Card
@@ -157,11 +178,23 @@ export function SourcesPanel() {
             {progress.path ? ` · ${fileName(progress.path)}` : ""}
           </p>
         ) : null}
-        {graphProgress && (
-          <p className="text-xs text-[var(--muted)]">
-            Graph {graphProgress.phase}
-            {graphProgress.detail ? ` · ${graphProgress.detail}` : ""}
-          </p>
+        {!graphEnabled ? (
+          <p className="text-xs text-[var(--muted)]">Graph extraction is off</p>
+        ) : (
+          <>
+            {graphWaiting > 0 ? (
+              <p className="text-xs text-[var(--muted)]">
+                Graph: {graphWaiting} documents waiting
+              </p>
+            ) : null}
+            {graphProgress ? (
+              <p className="text-xs text-[var(--muted)]">
+                Graph {graphProgress.phase}
+                {graphProgress.detail ? ` · ${graphProgress.detail}` : ""}
+                {graphFileName ? ` · ${graphFileName}` : ""}
+              </p>
+            ) : null}
+          </>
         )}
         {showEmpty && (
           <div className="rounded-md border border-dashed border-[var(--border)] p-3 text-xs text-[var(--muted)]">

@@ -52,6 +52,16 @@ describe("SourcesPanel", () => {
           },
         ];
       }
+      if (cmd === "get_settings") {
+        return {
+          vaultPath: "/vault",
+          chatModel: "phi4-mini",
+          embedModel: "nomic-embed-text",
+          telemetryOptIn: false,
+          crashReportingOptIn: false,
+          graphExtractionEnabled: true,
+        };
+      }
       return {};
     });
   });
@@ -102,6 +112,16 @@ describe("SourcesPanel", () => {
   it("shows empty-state guidance when there are no documents", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "list_documents") return [];
+      if (cmd === "get_settings") {
+        return {
+          vaultPath: null,
+          chatModel: "phi4-mini",
+          embedModel: "nomic-embed-text",
+          telemetryOptIn: false,
+          crashReportingOptIn: false,
+          graphExtractionEnabled: true,
+        };
+      }
       return {};
     });
     const client = new QueryClient();
@@ -112,5 +132,62 @@ describe("SourcesPanel", () => {
     );
     expect(await screen.findByText("Local library")).toBeInTheDocument();
     expect(screen.getByText(/100 documents/)).toBeInTheDocument();
+  });
+
+  it("shows graph waiting count for pending documents", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_documents") {
+        return [
+          {
+            id: "1",
+            path: "/vault/a.pdf",
+            title: "a",
+            fileType: "pdf",
+            contentHash: "abc",
+            pageCount: 3,
+            status: "indexed",
+            errorMessage: null,
+            importedAt: "2026-01-01T00:00:00Z",
+            indexedAt: "2026-01-01T01:00:00Z",
+            modifiedAt: "2026-01-01T01:00:00Z",
+            graphStatus: "pending",
+            graphError: null,
+          },
+          {
+            id: "2",
+            path: "/vault/b.md",
+            title: "b",
+            fileType: "markdown",
+            contentHash: "def",
+            pageCount: null,
+            status: "indexed",
+            errorMessage: null,
+            importedAt: "2026-01-02T00:00:00Z",
+            indexedAt: "2026-01-02T01:00:00Z",
+            modifiedAt: "2026-01-02T01:00:00Z",
+            graphStatus: "running",
+            graphError: null,
+          },
+        ];
+      }
+      if (cmd === "get_settings") {
+        return {
+          vaultPath: "/vault",
+          chatModel: "phi4-mini",
+          embedModel: "nomic-embed-text",
+          telemetryOptIn: false,
+          crashReportingOptIn: false,
+          graphExtractionEnabled: true,
+        };
+      }
+      return {};
+    });
+    const client = new QueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <SourcesPanel />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("Graph: 2 documents waiting")).toBeInTheDocument();
   });
 });

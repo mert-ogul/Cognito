@@ -239,6 +239,7 @@ export async function getSettings(): Promise<{
   embedModel: string;
   telemetryOptIn: boolean;
   crashReportingOptIn: boolean;
+  graphExtractionEnabled: boolean;
 }> {
   if (e2e) {
     return {
@@ -247,6 +248,7 @@ export async function getSettings(): Promise<{
       embedModel: "nomic-embed-text",
       telemetryOptIn: false,
       crashReportingOptIn: false,
+      graphExtractionEnabled: true,
     };
   }
   return invoke("get_settings");
@@ -258,6 +260,7 @@ export async function updateSettings(payload: {
   embedModel: string;
   telemetryOptIn: boolean;
   crashReportingOptIn: boolean;
+  graphExtractionEnabled: boolean;
 }): Promise<void> {
   if (e2e) {
     return;

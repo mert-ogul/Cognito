@@ -71,6 +71,38 @@ async def extract_document_graph_async(
     return {"ok": True, "chunksProcessed": len(chunks)}
 
 
+async def extract_chunk_graph(
+    sqlite_path: str,
+    duck_path: str,
+    document_id: str,
+    chunk_id: str,
+    chat_model: str,
+) -> dict:
+    """Extract and upsert graph evidence for a single chunk. Does not purge."""
+    try:
+        path_hint, chunks = load_document_chunks(sqlite_path, document_id)
+        one = [c for c in chunks if c[0] == chunk_id]
+        if not one:
+            return {"ok": False, "error": f"chunk not found: {chunk_id}"}
+        cfg = ExtractorConfig(chat_model=chat_model)
+        extracted = await extract_chunks_sequential(document_id, path_hint, one, cfg)
+        entities = 0
+        edges = 0
+        con = open_connection(duck_path)
+        try:
+            for cid, maybe_nodes, maybe_edges in extracted:
+                ents, eds = lightrag_maps_to_records(maybe_nodes, maybe_edges)
+                upsert_entities_edges(con, document_id, cid, ents, eds)
+                entities += len(ents)
+                edges += len(eds)
+            con.commit()
+        finally:
+            con.close()
+        return {"ok": True, "entities": entities, "edges": edges}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:2048]}
+
+
 async def extract_document_graph_run(
     sqlite_path: str,
     duck_path: str,
