@@ -80,6 +80,15 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run package:sidecar
+      - name: Bundled Python imports with empty environment
+        run: |
+          env -i src-tauri/resources/sidecar/python/bin/python3 -c "import duckdb, fitz, sqlite_vec, lightrag"
+      - name: Bundled sidecar ping with empty environment
+        working-directory: src-tauri/resources/sidecar
+        run: |
+          reply=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}' | env -i ./python/bin/python3 ./main.py)
+          echo "$reply"
+          echo "$reply" | grep -q pong
       - name: Link release binary (validates Tauri + bundled sidecar layout)
         working-directory: src-tauri
         run: cargo build --release
