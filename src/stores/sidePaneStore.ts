@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type SidePaneMode = "passage" | "graph";
+type SidePaneMode = "passage" | "graph";
 
 export type PassageView = {
   documentId: string;

@@ -553,17 +553,6 @@ pub fn mark_document_graph_failed(conn: &Connection, id: &str, msg: &str) -> Cog
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn mark_document_graph_skipped(conn: &Connection, id: &str) -> CognitoResult<()> {
-    let now = chrono::Utc::now().to_rfc3339();
-    conn.execute(
-        "UPDATE documents SET graph_status = 'skipped', graph_error = NULL, modified_at = ?1 WHERE id = ?2",
-        params![now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
-    Ok(())
-}
-
 pub fn mark_document_failed(conn: &Connection, id: &str, msg: &str) -> CognitoResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(

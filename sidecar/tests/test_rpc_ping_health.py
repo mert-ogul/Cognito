@@ -1,4 +1,4 @@
-"""JSON-RPC ping + health against sidecar stdin/stdout."""
+"""JSON-RPC ping against sidecar stdin/stdout."""
 
 from __future__ import annotations
 
@@ -37,39 +37,3 @@ def test_ping_line_rpc():
     proc.wait(timeout=5)
     data = json.loads(out)
     assert data.get("result", {}).get("pong") is True
-
-
-def test_health_line_rpc_shape():
-    """Health probes Ollama; without a server we still validate JSON-RPC framing."""
-    main = Path(__file__).resolve().parents[1] / "main.py"
-    proc = Popen(
-        [_py(), str(main)],
-        stdin=PIPE,
-        stdout=PIPE,
-        stderr=PIPE,
-        text=True,
-        cwd=str(main.parent),
-    )
-    assert proc.stdin is not None and proc.stdout is not None
-    line = json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "health",
-            "params": {"chat_model": "phi4-mini", "embed_model": "nomic-embed-text"},
-        },
-    )
-    proc.stdin.write(line + "\n")
-    proc.stdin.flush()
-    out = proc.stdout.readline()
-    proc.terminate()
-    proc.wait(timeout=5)
-    data = json.loads(out)
-    assert data.get("jsonrpc") == "2.0"
-    assert data.get("id") == 2
-    if "result" in data:
-        body = data["result"]
-        assert "ollama" in body or "ollama_model_ready" in body
-    else:
-        assert "error" in data
-        assert "message" in data["error"]

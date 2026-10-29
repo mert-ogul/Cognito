@@ -1,6 +1,6 @@
 import type { AppHealth, ImportProgress } from "@/lib/tauri";
 
-export type StatusTone = "danger" | "muted";
+type StatusTone = "danger" | "muted";
 
 export type StatusLine = {
   text: string;

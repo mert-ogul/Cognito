@@ -1,4 +1,4 @@
-"""LightRAG extraction settings — small surface so callers avoid vendor imports."""
+"""LightRAG extraction settings so callers avoid vendor imports."""
 
 from __future__ import annotations
 

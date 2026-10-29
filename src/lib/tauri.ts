@@ -52,7 +52,7 @@ export type GraphExtractionProgress = {
   detail?: string | null;
 };
 
-export type GraphSnapshotNode = {
+type GraphSnapshotNode = {
   nodeId: string;
   name: string;
   kind: string;
@@ -61,7 +61,7 @@ export type GraphSnapshotNode = {
   confidenceAvg: number;
 };
 
-export type GraphSnapshotEdge = {
+type GraphSnapshotEdge = {
   edgeId: string;
   sourceNodeId: string;
   targetNodeId: string;
@@ -95,13 +95,6 @@ export async function openLogsFolder(): Promise<void> {
     return;
   }
   return invoke("open_logs_folder");
-}
-
-export async function pingSidecar(): Promise<Record<string, unknown>> {
-  if (e2e) {
-    return { ok: true };
-  }
-  return invoke("ping_sidecar");
 }
 
 export async function selectVaultFolder(): Promise<string | null> {

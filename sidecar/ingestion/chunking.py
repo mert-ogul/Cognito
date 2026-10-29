@@ -280,21 +280,3 @@ def chunk_semantic(
     else:
         blocks = _markdown_blocks(text if t else "")
     return _pack_blocks(blocks, "markdown" if ft != "pdf" else "pdf")
-
-
-def chunk_text(text: str, max_chars: int = 1800, overlap: int = 200) -> list[ChunkDraft]:
-    """Legacy char-based chunking for tests compatibility."""
-    chunks: list[ChunkDraft] = []
-    if not text.strip():
-        return chunks
-    pos = 0
-    ln = len(text)
-    while pos < ln:
-        end = min(ln, pos + max_chars)
-        piece = text[pos:end].strip()
-        if piece:
-            chunks.append(ChunkDraft(text=piece, page_start=None, page_end=None))
-        if end >= ln:
-            break
-        pos = end - overlap
-    return chunks

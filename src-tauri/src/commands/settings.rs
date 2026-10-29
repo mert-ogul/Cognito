@@ -3,7 +3,6 @@ use crate::db::sqlite;
 use crate::models::SettingsPayload;
 use crate::services::model_warm;
 use std::path::PathBuf;
-use tauri::AppHandle;
 
 use super::run_blocking;
 
@@ -16,7 +15,6 @@ pub async fn get_settings(
 
 #[tauri::command]
 pub async fn update_settings(
-    app: AppHandle,
     state: tauri::State<'_, SharedState>,
     payload: SettingsPayload,
 ) -> Result<(), String> {
@@ -64,7 +62,7 @@ pub async fn update_settings(
     }
     if chat_changed {
         st.clear_chat_warm();
-        model_warm::spawn_warm_chat_model(st, app);
+        model_warm::spawn_warm_chat_model(st);
     }
     Ok(())
 }

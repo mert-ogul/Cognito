@@ -2,14 +2,14 @@
 
 ## Prerequisites
 
-- **Node** 20+ (CI uses 22)
-- **Rust** stable + `cargo`
-- **uv** ([astral.sh/uv](https://github.com/astral-sh/uv))
+- Node 20+ (CI uses 22)
+- Rust stable and cargo
+- [uv](https://github.com/astral-sh/uv)
 - OS-specific Tauri dependencies (see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/))
 
 ## One-shot release-style build
 
-From the repository root (`cognito/`):
+From the repository root:
 
 ```bash
 npm ci
@@ -18,19 +18,16 @@ npm run package:sidecar
 npx tauri build
 ```
 
-- `package:sidecar` runs `uv sync` in `sidecar/` and copies the tree (including `.venv`) to `src-tauri/resources/sidecar/`.
-- `tauri build` runs `beforeBuildCommand` again (repeats `npm run build` + `package:sidecar`); safe but slower.
+`package:sidecar` installs a standalone CPython, installs sidecar dependencies into it, and copies sources into `src-tauri/resources/sidecar/`. `tauri build` runs `beforeBuildCommand` again (repeats `npm run build` and `package:sidecar`); that is safe but slower.
 
 ## Cross-compile
-
-Use explicit targets (Rust targets must be installed):
 
 ```bash
 rustup target add aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msvc
 npx tauri build --target aarch64-apple-darwin
 ```
 
-On Linux hosts, macOS cross-compiles may require additional tooling; prefer **native runners** (CI matrix) for Apple binaries.
+Prefer native runners for Apple binaries when possible.
 
 ## Development vs packaged paths
 
@@ -48,5 +45,3 @@ See `src-tauri/src/sidecar_paths.rs`.
 rm -rf src-tauri/resources/sidecar/*
 touch src-tauri/resources/sidecar/.gitkeep
 ```
-
-(Or let git restore from `.gitignore` rules.)

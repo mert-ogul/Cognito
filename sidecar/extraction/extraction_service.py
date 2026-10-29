@@ -102,11 +102,3 @@ async def extract_chunk_graph(
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)[:2048]}
 
-
-async def extract_document_graph_run(
-    sqlite_path: str,
-    duck_path: str,
-    document_id: str,
-    chat_model: str,
-) -> dict:
-    return await extract_document_graph_async(sqlite_path, duck_path, document_id, chat_model)

@@ -4,7 +4,6 @@ mod app;
 mod commands;
 mod db;
 mod errors;
-#[allow(dead_code)]
 mod events;
 mod models;
 mod services;
@@ -71,7 +70,7 @@ pub fn run() {
             }
             graph_worker::spawn(state.clone(), app.handle().clone());
             app.manage(state.clone());
-            model_warm::spawn_warm_chat_model(state, app.handle().clone());
+            model_warm::spawn_warm_chat_model(state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -79,7 +78,6 @@ pub fn run() {
             commands::set_vault,
             commands::clear_library,
             commands::get_app_health,
-            commands::ping_sidecar,
             commands::warm_chat_model,
             commands::open_logs_folder,
             commands::list_documents,

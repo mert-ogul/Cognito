@@ -37,9 +37,7 @@ from ingestion.rpc_ingest import (
 from query.graph_read import node_detail as graph_node_detail
 from query.graph_read import search_nodes as graph_search_nodes
 from query.graph_read import snapshot as graph_snapshot
-from query.chat_pipeline import prepare_chat_retrieval, rpc_search_chunks
-from query.hybrid import health as hybrid_health
-from query.hybrid import query_hybrid
+from query.chat_pipeline import prepare_chat_retrieval
 
 
 def _reply(req_id: Any, result: Any) -> None:
@@ -57,10 +55,6 @@ def _err(req_id: Any, code: int, message: str) -> None:
 def dispatch(method: str, params: dict) -> Any:
     if method == "ping":
         return {"pong": True}
-    if method == "health":
-        embed = params.get("embed_model", "nomic-embed-text")
-        chat = params.get("chat_model", "phi4-mini")
-        return hybrid_health(embed, chat)
     if method == "warm_model":
         chat = params.get("chat_model", "phi4-mini")
         warm_model(chat)
@@ -90,16 +84,6 @@ def dispatch(method: str, params: dict) -> Any:
             str(params.get("embed_model", "nomic-embed-text")),
             int(params.get("top_k", 12)),
             history=hist,
-        )
-    if method == "search_chunks":
-        return rpc_search_chunks(params)
-    if method == "query_hybrid":
-        return query_hybrid(
-            params["sqlite_path"],
-            params["duckdb_path"],
-            params["query"],
-            params.get("chat_model", "phi4-mini"),
-            params.get("embed_model", "nomic-embed-text"),
         )
     if method == "get_graph_snapshot":
         return graph_snapshot(
@@ -142,7 +126,7 @@ def main() -> None:
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             log.info("rpc %s completed in %.1f ms", method, elapsed_ms)
             _reply(req_id, result)
-        except Exception as exc:  # noqa: BLE001 — surface to host
+        except Exception as exc:  # noqa: BLE001
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             log.exception("rpc %s failed after %.1f ms", method, elapsed_ms)
             _err(req_id, -32000, str(exc))

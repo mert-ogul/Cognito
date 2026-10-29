@@ -425,15 +425,3 @@ def prepare_chat_retrieval(
         "graphNodeIds": graph_node_ids,
         "embedQuery": search_text,
     }
-
-
-def rpc_search_chunks(params: dict[str, Any]) -> dict[str, Any]:
-    sqlite_path = str(params["sqlite_path"])
-    embed_model = str(params.get("embed_model", "nomic-embed-text"))
-    query = str(params["query"])
-    k = int(params.get("k", 12))
-    try:
-        chunks = vector_top_k(sqlite_path, embed_model, query, k)
-    except EmbeddingDimMismatch:
-        chunks = []
-    return {"chunks": chunks}

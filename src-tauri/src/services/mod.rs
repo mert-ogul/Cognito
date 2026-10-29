@@ -1,4 +1,4 @@
-//! Small orchestration units for commands (no vague "manager" types).
+//! Small orchestration units for commands.
 
 pub mod chat_query;
 pub mod file_watcher;

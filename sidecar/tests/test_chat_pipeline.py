@@ -56,20 +56,6 @@ def test_prepare_query_embedding_failed_when_chunks_exist_but_no_hits(
     assert "Ollama" in out["messages"][0]["content"]
 
 
-def test_search_chunks_rpc_shape(mock_embed: None) -> None:
-    from query.chat_pipeline import rpc_search_chunks
-
-    d = tempfile.mkdtemp()
-    sqlite_path = str(Path(d) / "v.sqlite")
-    sq = sqlite3.connect(sqlite_path)
-    sq.executescript("CREATE TABLE documents (id TEXT);")
-    sq.commit()
-    sq.close()
-    r = rpc_search_chunks({"sqlite_path": sqlite_path, "query": "x", "k": 3})
-    assert "chunks" in r
-    assert r["chunks"] == []
-
-
 def _fake_chunks() -> list[dict]:
     return [
         {
