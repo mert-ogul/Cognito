@@ -1,8 +1,6 @@
 import { Button } from "@/components/ui/button";
-import { useRetrievalMode } from "@/context/RetrievalModeContext";
 import {
   getDocumentPreview,
-  openDocument,
   sendChatQuery,
   warmChatModel,
   type AppHealth,
@@ -10,10 +8,10 @@ import {
   type CitationItem,
 } from "@/lib/tauri";
 import { listen } from "@/lib/tauri-events";
-import { useGraphSessionStore } from "@/stores/graphSessionStore";
 import { cn } from "@/lib/utils";
+import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -60,10 +58,36 @@ export function linkifyCitationMarkers(text: string, indexes: Set<number>): stri
     .join("");
 }
 
+export function citationSourceLabel(c: CitationItem): string {
+  const name = fileName(c.path) || c.title;
+  if (c.pageStart != null && c.pageEnd != null && c.pageEnd !== c.pageStart) {
+    return `${name}, pp. ${c.pageStart}-${c.pageEnd}`;
+  }
+  if (c.pageStart != null) {
+    return `${name}, p. ${c.pageStart}`;
+  }
+  return name;
+}
+
+function fileName(path: string): string {
+  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
+function pageLabel(pageStart: number | null | undefined, pageEnd: number | null | undefined): string | null {
+  if (pageStart != null && pageEnd != null && pageEnd !== pageStart) {
+    return `pp. ${pageStart}-${pageEnd}`;
+  }
+  if (pageStart != null) {
+    return `p. ${pageStart}`;
+  }
+  return null;
+}
+
 export function ChatPanel({ health }: Props) {
   const queryClient = useQueryClient();
-  const { setLastRetrievalMode } = useRetrievalMode();
-  const setHighlightNodeIds = useGraphSessionStore((s) => s.setHighlightNodeIds);
+  const openPassage = useSidePaneStore((s) => s.openPassage);
+  const openGraphWithHighlights = useSidePaneStore((s) => s.openGraphWithHighlights);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -71,24 +95,29 @@ export function ChatPanel({ health }: Props) {
   const lastSentRef = useRef<string | null>(null);
   const warmRetryErrorRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const [preview, setPreview] = useState<{
-    documentId: string;
-    text: string | null;
-    highlight: string | null;
-    title: string;
-  } | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const ready =
     !!health?.sidecarReachable &&
     !!health?.chatModelWarmed &&
-    !health?.warmUpPending;
+    !health?.warmUpPending &&
+    !!health?.vaultConfigured;
 
   useEffect(() => {
     const el = bottomRef.current;
     if (el && typeof el.scrollIntoView === "function") {
-      el.scrollIntoView({ behavior: "smooth" });
+      el.scrollIntoView({ block: "end" });
     }
   }, [messages, busyId]);
+
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const line = 20;
+    const max = line * 8 + 16;
+    el.style.height = `${Math.min(el.scrollHeight, max)}px`;
+  }, [input]);
 
   const retryWarmUp = useCallback(async () => {
     await warmChatModel();
@@ -125,7 +154,6 @@ export function ChatPanel({ health }: Props) {
         error?: string | null;
       }>("chat-final", (ev) => {
         const p = ev.payload;
-        setLastRetrievalMode(p.retrievalMode ?? null);
         setBusyId(null);
         if (p.error) {
           setRetryUserText(lastSentRef.current);
@@ -153,28 +181,22 @@ export function ChatPanel({ health }: Props) {
       cancelled = true;
       un.forEach((f) => f());
     };
-  }, [setLastRetrievalMode]);
+  }, []);
 
   const openCitation = useCallback(
     async (c: CitationItem) => {
-      setHighlightNodeIds(c.nodeIds ?? []);
       const prev = await getDocumentPreview(c.documentId, c.chunkId);
-      const pageStart = prev.pageStart ?? c.pageStart;
-      const pageEnd = prev.pageEnd ?? c.pageEnd;
-      let pageLabel = "";
-      if (pageStart != null && pageEnd != null && pageEnd !== pageStart) {
-        pageLabel = ` · pp. ${pageStart}-${pageEnd}`;
-      } else if (pageStart != null) {
-        pageLabel = ` · p. ${pageStart}`;
-      }
-      setPreview({
+      const start = prev.pageStart ?? c.pageStart;
+      const end = prev.pageEnd ?? c.pageEnd;
+      openPassage({
         documentId: prev.documentId,
+        title: fileName(c.path) || c.title,
+        pageLabel: pageLabel(start, end),
         text: prev.text,
         highlight: prev.highlightSnippet ?? c.snippet,
-        title: `${c.title}${pageLabel}`,
       });
     },
-    [setHighlightNodeIds],
+    [openPassage],
   );
 
   const sendWithText = useCallback(
@@ -226,114 +248,149 @@ export function ChatPanel({ health }: Props) {
     setBusyId(null);
     setRetryUserText(null);
     lastSentRef.current = null;
-    setHighlightNodeIds([]);
-    setPreview(null);
-  }, [setHighlightNodeIds]);
+  }, []);
+
+  const turns = useMemo(() => {
+    const out: { user: ChatMessage; assistant: ChatMessage | null }[] = [];
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (m.role !== "user") continue;
+      const next = messages[i + 1];
+      out.push({
+        user: m,
+        assistant: next?.role === "assistant" ? next : null,
+      });
+    }
+    return out;
+  }, [messages]);
 
   const lastAssistantError = messages.filter((m) => m.role === "assistant" && m.error).pop();
 
+  const placeholder = !health?.vaultConfigured
+    ? "Choose a folder first"
+    : health?.warmUpPending
+      ? `Loading ${health.chatModel}`
+      : ready
+        ? "Ask about your library"
+        : "Chat unavailable until the model is ready.";
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3 py-2">
-        <p className="font-medium text-text">Chat</p>
-        <Button type="button" variant="quiet" onClick={newChat}>
-          New chat
-        </Button>
-      </div>
       {health?.warmUpError ? (
         <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
           <p className="text-danger">{health.warmUpError}</p>
-          <Button type="button" variant="secondary" onClick={() => void retryWarmUp()}>
-            Retry
+          <Button type="button" variant="quiet" onClick={() => void retryWarmUp()}>
+            Try again
           </Button>
         </div>
       ) : null}
-      <div className="flex min-h-0 flex-1 flex-col gap-2 p-3">
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto">
-          {messages.map((m) => {
-            const used =
-              m.role === "assistant" && m.citations?.length
-                ? citationsUsedInOrder(m.text, m.citations)
-                : [];
-            const showAllRetrieved =
-              m.role === "assistant" &&
-              !!m.citations?.length &&
-              used.length === 0 &&
-              !busyId;
-            const chipCitations = showAllRetrieved ? m.citations! : used;
-            return (
-              <div
-                key={m.id}
-                className={
-                  m.role === "user"
-                    ? "ml-6 rounded-[6px] bg-pane p-2"
-                    : "mr-4 rounded-[6px] border border-line p-2"
-                }
-              >
-                {m.role === "assistant" ? (
-                  <AssistantMarkdown
-                    text={m.text || (busyId === m.id ? "…" : "")}
-                    citations={m.citations ?? []}
-                    onCite={(c) => void openCitation(c)}
-                  />
-                ) : (
-                  <p className="whitespace-pre-wrap">{m.text}</p>
-                )}
-                {m.role === "assistant" && m.retrievalMode ? (
-                  <p className="mt-1 text-muted">
-                    {m.retrievalMode === "hybrid"
-                      ? "Hybrid retrieval"
-                      : m.retrievalMode === "vector_only"
-                        ? "Vector-only (graph evidence not used)"
-                        : m.retrievalMode}
-                  </p>
-                ) : null}
-                {m.error ? (
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <p className="text-danger">{m.error}</p>
-                    {retryUserText && m.id === lastAssistantError?.id ? (
-                      <Button type="button" variant="secondary" onClick={() => void retryLast()}>
-                        Retry
-                      </Button>
-                    ) : null}
-                  </div>
-                ) : null}
-                {chipCitations.length > 0 ? (
-                  <div className="mt-2 space-y-1">
-                    {showAllRetrieved ? <p className="text-muted">Retrieved</p> : null}
-                    <div className="flex flex-wrap gap-1">
-                      {chipCitations.map((c, i) => (
-                        <button
-                          key={`${c.chunkId}-${i}`}
-                          type="button"
-                          className="rounded-[6px] border border-line bg-bg px-2 py-0.5 text-[12px] hover:bg-hover"
-                          onClick={() => void openCitation(c)}
-                        >
-                          [{c.index}] {c.title.slice(0, 24)}
-                          {c.pageStart != null ? ` · p.${c.pageStart}` : ""}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-          <div ref={bottomRef} />
+      <div className="mx-auto flex min-h-0 w-full max-w-[68ch] flex-1 flex-col px-4 pt-8">
+        <div className="mb-2 flex min-h-7 justify-end">
+          {messages.length > 0 ? (
+            <Button type="button" variant="quiet" onClick={newChat}>
+              New chat
+            </Button>
+          ) : null}
         </div>
-        <div className="flex shrink-0 gap-2">
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="space-y-8 pb-8">
+            {turns.map(({ user, assistant }) => {
+              const waiting =
+                !!assistant &&
+                busyId === assistant.id &&
+                !assistant.text &&
+                !assistant.error;
+              const used =
+                assistant && assistant.citations?.length && !waiting
+                  ? citationsUsedInOrder(assistant.text, assistant.citations)
+                  : [];
+              const showRetrieved =
+                !!assistant &&
+                !!assistant.citations?.length &&
+                used.length === 0 &&
+                !busyId &&
+                !assistant.error;
+              const listCitations = showRetrieved ? assistant!.citations! : used;
+              const listHeading = showRetrieved ? "Retrieved passages" : "Sources";
+              const relatedIds = Array.from(
+                new Set(
+                  (used.length > 0 ? used : assistant?.citations ?? []).flatMap(
+                    (c) => c.nodeIds ?? [],
+                  ),
+                ),
+              );
+              const showRelated =
+                assistant?.retrievalMode === "hybrid" &&
+                relatedIds.length > 0 &&
+                !assistant.error &&
+                !waiting;
+
+              return (
+                <article key={user.id} className="space-y-2">
+                  <p className="font-ui text-[15px] font-semibold text-text">{user.text}</p>
+                  {assistant?.error ? (
+                    <div className="space-y-1">
+                      <p className="text-danger">{assistant.error}</p>
+                      {retryUserText && assistant.id === lastAssistantError?.id ? (
+                        <Button type="button" variant="quiet" onClick={() => void retryLast()}>
+                          Try again
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {waiting ? <p className="text-muted">Searching your library</p> : null}
+                  {assistant && !assistant.error && assistant.text ? (
+                    <div className="space-y-3">
+                      <AssistantMarkdown
+                        text={assistant.text}
+                        citations={assistant.citations ?? []}
+                        onCite={(c) => void openCitation(c)}
+                      />
+                      {listCitations.length > 0 ? (
+                        <div className="space-y-1">
+                          <p className="text-muted">{listHeading}</p>
+                          <ol className="list-decimal space-y-0.5 pl-5 text-muted">
+                            {listCitations.map((c) => (
+                              <li key={`${c.chunkId}-${c.index}`}>
+                                <button
+                                  type="button"
+                                  className="text-left text-muted hover:text-text"
+                                  onClick={() => void openCitation(c)}
+                                >
+                                  {citationSourceLabel(c)}
+                                </button>
+                              </li>
+                            ))}
+                          </ol>
+                        </div>
+                      ) : null}
+                      {showRelated ? (
+                        <Button
+                          type="button"
+                          variant="quiet"
+                          className="px-0"
+                          onClick={() => openGraphWithHighlights(relatedIds)}
+                        >
+                          Show related entities in the graph
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
+            <div ref={bottomRef} />
+          </div>
+        </div>
+        <div className="shrink-0 pb-4 pt-2">
           <textarea
+            ref={textareaRef}
+            rows={1}
             className={cn(
-              "min-h-[72px] flex-1 resize-none rounded-[6px] border border-line bg-bg p-2 text-[13px]",
+              "w-full resize-none overflow-y-auto rounded-[8px] border border-line bg-bg px-3 py-2 font-ui text-[15px] leading-[20px]",
               "placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
             )}
-            placeholder={
-              ready
-                ? "Ask about your library…"
-                : health?.warmUpPending
-                  ? "Loading model…"
-                  : "Chat unavailable until the model is ready."
-            }
+            placeholder={placeholder}
             value={input}
             disabled={!ready || !!busyId}
             onChange={(e) => setInput(e.target.value)}
@@ -345,37 +402,8 @@ export function ChatPanel({ health }: Props) {
             }}
             aria-label="Chat message"
           />
-          <Button type="button" variant="primary" disabled={!ready || !!busyId} onClick={() => void send()}>
-            Send
-          </Button>
         </div>
       </div>
-      {preview ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
-          role="dialog"
-          aria-modal
-        >
-          <div className="max-h-[80vh] w-full max-w-lg overflow-auto rounded-[10px] border border-line bg-bg p-4 shadow-[0_8px_30px_rgba(0,0,0,0.12)]">
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <h3 className="font-medium text-text">{preview.title}</h3>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => void openDocument(preview.documentId)}
-                >
-                  Open file
-                </Button>
-                <Button type="button" variant="quiet" onClick={() => setPreview(null)}>
-                  Close
-                </Button>
-              </div>
-            </div>
-            <PreviewBody text={preview.text} highlight={preview.highlight} />
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -398,54 +426,28 @@ function AssistantMarkdown({
         const n = Number(href.slice(6));
         const c = byIndex.get(n);
         return (
-          <button
-            type="button"
-            className="mx-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded-[6px] border border-line bg-pane px-1 align-super text-[10px] font-medium hover:bg-hover"
-            onClick={() => {
-              if (c) onCite(c);
-            }}
-            aria-label={`Open citation ${n}`}
-          >
-            {children}
-          </button>
+          <sup>
+            <button
+              type="button"
+              className="font-ui text-accent"
+              onClick={() => {
+                if (c) onCite(c);
+              }}
+              aria-label={`Source ${n}`}
+            >
+              {n}
+            </button>
+          </sup>
         );
       }
       return <span>{children}</span>;
     },
   };
   return (
-    <div className="prose prose-sm max-w-none font-read text-[13px] text-text [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1">
+    <div className="answer font-read text-[15px] leading-[1.6] text-text">
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {md}
       </ReactMarkdown>
     </div>
-  );
-}
-
-export function PreviewBody({ text, highlight }: { text: string | null; highlight: string | null }) {
-  if (!text) {
-    return <p className="text-muted">No preview text.</p>;
-  }
-  if (!highlight) {
-    return <p className="whitespace-pre-wrap font-read">{text}</p>;
-  }
-  let i = text.indexOf(highlight);
-  if (i < 0) {
-    const prefixLen = Math.min(40, highlight.length);
-    const prefix = highlight.slice(0, prefixLen);
-    i = text.indexOf(prefix);
-    if (i < 0) {
-      return <p className="whitespace-pre-wrap font-read">{text}</p>;
-    }
-  }
-  const before = text.slice(0, i);
-  const mid = text.slice(i, i + highlight.length);
-  const after = text.slice(i + highlight.length);
-  return (
-    <p className="whitespace-pre-wrap font-read">
-      {before}
-      <mark className="bg-mark text-text">{mid}</mark>
-      {after}
-    </p>
   );
 }

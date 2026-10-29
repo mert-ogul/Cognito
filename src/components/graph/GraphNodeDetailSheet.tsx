@@ -1,6 +1,5 @@
 import { Button } from "@/components/ui/button";
 import { getGraphNodeDetail, listDocuments, type DocumentRow } from "@/lib/tauri";
-import { cn } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
@@ -59,9 +58,7 @@ export function GraphNodeDetailSheet({ nodeId, open, onClose }: Props) {
       role="dialog"
       aria-modal
       aria-labelledby="graph-node-detail-title"
-      className={cn(
-        "absolute right-0 top-0 z-20 flex h-full w-[min(100%,320px)] flex-col border-l border-line bg-bg",
-      )}
+      className="absolute right-0 top-0 z-20 flex h-full w-[min(100%,320px)] flex-col border-l border-line bg-pane"
     >
       <div className="flex items-center justify-between border-b border-line px-3 py-2">
         <h2 id="graph-node-detail-title" className="font-medium text-text">

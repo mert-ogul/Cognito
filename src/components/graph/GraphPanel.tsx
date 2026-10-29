@@ -1,8 +1,8 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
-import { getGraphSnapshot, searchGraphNodes, type GraphSnapshot } from "@/lib/tauri";
-import { useGraphSessionStore } from "@/stores/graphSessionStore";
+import { getGraphSnapshot, getSettings, searchGraphNodes, type GraphSnapshot } from "@/lib/tauri";
+import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 import { GraphCyCanvas } from "./GraphCyCanvas";
@@ -21,7 +21,10 @@ export function GraphPanel() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [fitKey, setFitKey] = useState(0);
   const [centerOn, setCenterOn] = useState<string | null>(null);
-  const highlightNodeIds = useGraphSessionStore((s) => s.highlightNodeIds);
+  const highlightNodeIds = useSidePaneStore((s) => s.highlightNodeIds);
+
+  const settingsQ = useQuery({ queryKey: ["settings"], queryFn: getSettings });
+  const graphEnabled = settingsQ.data?.graphExtractionEnabled !== false;
 
   const snapQ = useQuery({
     queryKey: ["graph-snapshot", limit],
@@ -40,15 +43,22 @@ export function GraphPanel() {
     return snapshot.nodes.length >= limit;
   }, [snapshot, limit]);
 
+  const emptyMessage = graphEnabled
+    ? "The graph fills in as documents are indexed."
+    : "Graph building is off. You can turn it on in Settings.";
+
   const openNode = useCallback((id: string) => {
     setSelectedNodeId(id);
     setSheetOpen(true);
     setCenterOn(id);
   }, []);
 
-  const onNodeTap = useCallback((id: string) => {
-    openNode(id);
-  }, [openNode]);
+  const onNodeTap = useCallback(
+    (id: string) => {
+      openNode(id);
+    },
+    [openNode],
+  );
 
   const onPickSearch = useCallback(
     (id: string) => {
@@ -61,7 +71,6 @@ export function GraphPanel() {
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden">
       <div className="shrink-0 space-y-2 border-b border-line px-3 py-2">
-        <p className="font-medium text-text">Graph</p>
         <div className="flex flex-wrap gap-2">
           <Input
             placeholder="Search nodes…"
@@ -70,7 +79,7 @@ export function GraphPanel() {
             aria-label="Search graph nodes by name"
             className="min-w-[140px] flex-1"
           />
-          <Button type="button" variant="secondary" onClick={() => setFitKey((k) => k + 1)}>
+          <Button type="button" variant="quiet" onClick={() => setFitKey((k) => k + 1)}>
             Fit
           </Button>
           {truncated && limitIdx < SNAPSHOT_STEPS.length - 1 ? (
@@ -100,12 +109,12 @@ export function GraphPanel() {
           </ul>
         ) : null}
       </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-2 p-3">
-        {snapQ.isLoading ? <p className="text-muted">Loading graph…</p> : null}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        {snapQ.isLoading ? <p className="p-3 text-muted">Loading graph…</p> : null}
         {snapQ.isError ? (
-          <div className="flex flex-wrap items-center gap-2" role="alert">
+          <div className="flex flex-wrap items-center gap-2 p-3" role="alert">
             <p className="text-danger">Couldn&apos;t load the graph</p>
-            <Button type="button" variant="secondary" onClick={() => void snapQ.refetch()}>
+            <Button type="button" variant="quiet" onClick={() => void snapQ.refetch()}>
               Retry
             </Button>
           </div>
@@ -117,19 +126,17 @@ export function GraphPanel() {
           onNodeTap={onNodeTap}
           fitKey={fitKey}
           centerOnNodeId={centerOn}
+          emptyMessage={emptyMessage}
         />
-        {truncated ? (
-          <p className="text-muted">Showing up to {limit} nodes</p>
-        ) : null}
+        <GraphNodeDetailSheet
+          nodeId={sheetOpen ? selectedNodeId : null}
+          open={sheetOpen}
+          onClose={() => {
+            setSheetOpen(false);
+            setSelectedNodeId(null);
+          }}
+        />
       </div>
-      <GraphNodeDetailSheet
-        nodeId={sheetOpen ? selectedNodeId : null}
-        open={sheetOpen}
-        onClose={() => {
-          setSheetOpen(false);
-          setSelectedNodeId(null);
-        }}
-      />
     </div>
   );
 }

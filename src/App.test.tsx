@@ -58,7 +58,7 @@ describe("App shell", () => {
     );
     expect(screen.getByText("Cognito")).toBeInTheDocument();
     expect(screen.getByText("Library")).toBeInTheDocument();
-    expect(screen.getByText("Chat")).toBeInTheDocument();
+    expect(screen.getByLabelText("Chat message")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Graph" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open settings" })).toBeInTheDocument();
   });

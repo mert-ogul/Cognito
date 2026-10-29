@@ -4,7 +4,7 @@ test("shell renders toolbar and panes", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByText("Cognito", { exact: true })).toBeVisible();
   await expect(page.getByText("Library", { exact: true })).toBeVisible();
-  await expect(page.getByText("Chat", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Chat message")).toBeVisible();
   await expect(page.getByRole("button", { name: "Graph" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open settings" })).toBeVisible();
 });
@@ -13,16 +13,19 @@ test.describe("E2E mock build", () => {
   test("fixture library, chat stream, citations, graph node detail", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByText("sample.md")).toBeVisible();
-    const graphToggle = page.getByRole("button", { name: "Graph" });
-    if ((await graphToggle.getAttribute("aria-pressed")) !== "true") {
-      await graphToggle.click();
+    const toolbarGraph = page.getByRole("button", { name: "Graph" }).first();
+    if ((await toolbarGraph.getAttribute("aria-pressed")) !== "true") {
+      await toolbarGraph.click();
     }
-    await expect(page.getByText("Graph", { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "Passage" })).toBeVisible();
     const input = page.getByRole("textbox", { name: "Chat message" });
     await input.fill("What is in the library?");
-    await page.getByRole("button", { name: "Send" }).click();
+    await input.press("Enter");
     await expect(page.getByText(/Hello world/)).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole("button", { name: /Fixture sample/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: "sample.md" })).toBeVisible();
+    await page.getByLabel("Source 1").click();
+    await expect(page.getByRole("button", { name: "Passage", pressed: true })).toBeVisible();
+    await page.getByRole("button", { name: "Graph", pressed: false }).click();
     const search = page.getByRole("textbox", { name: "Search graph nodes by name" });
     await search.fill("Sample");
     await page.getByRole("button", { name: /Sample Entity/ }).click();

@@ -1,16 +1,17 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ChatPanel,
-  PreviewBody,
+  citationSourceLabel,
   citationsUsedInOrder,
   linkifyCitationMarkers,
 } from "./ChatPanel";
-import { RetrievalModeProvider } from "@/context/RetrievalModeContext";
+import { SidePane } from "@/components/layout/SidePane";
 import { listen } from "@/lib/tauri-events";
 import { getDocumentPreview, openDocument, sendChatQuery } from "@/lib/tauri";
 import type { CitationItem } from "@/lib/tauri";
+import { useSidePaneStore } from "@/stores/sidePaneStore";
 
 vi.mock("@/lib/tauri-events", () => ({
   listen: vi.fn(async () => () => {}),
@@ -24,6 +25,16 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
     warmChatModel: vi.fn(async () => {}),
     getDocumentPreview: vi.fn(),
     openDocument: vi.fn(async () => {}),
+    getGraphSnapshot: vi.fn(async () => ({ nodes: [], edges: [] })),
+    searchGraphNodes: vi.fn(async () => []),
+    getGraphNodeDetail: vi.fn(async () => null),
+    getSettings: vi.fn(async () => ({
+      vaultPath: "/vault",
+      chatModel: "phi4-mini",
+      embedModel: "nomic-embed-text",
+      graphExtractionEnabled: true,
+    })),
+    listDocuments: vi.fn(async () => []),
   };
 });
 
@@ -41,17 +52,30 @@ const health = {
   missingModels: [] as string[],
 };
 
-const cite = (index: number, title = `Doc ${index}`): CitationItem => ({
+const cite = (index: number, title = `Doc ${index}`, path = `/p${index}/${title}.pdf`): CitationItem => ({
   documentId: `d${index}`,
   title,
-  path: `/p${index}`,
+  path,
   pageStart: null,
   pageEnd: null,
   chunkId: `c${index}`,
   snippet: `snip ${index}`,
-  nodeIds: [],
+  nodeIds: index === 2 ? ["n-a", "n-b"] : [],
   index,
 });
+
+function renderChat(ui: React.ReactNode = <ChatPanel health={health} />) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+}
+
+async function sendPrompt(text: string) {
+  const input = screen.getByLabelText("Chat message");
+  fireEvent.change(input, { target: { value: text } });
+  fireEvent.keyDown(input, { key: "Enter", code: "Enter", shiftKey: false });
+}
 
 describe("ChatPanel helpers", () => {
   it("orders cited citations by first use", () => {
@@ -67,6 +91,16 @@ describe("ChatPanel helpers", () => {
     expect(out).toContain("`code [2]`");
     expect(out).toContain("```\n[2]\n```");
   });
+
+  it("formats source labels with pages", () => {
+    expect(
+      citationSourceLabel({
+        ...cite(1, "Report", "/vault/report.pdf"),
+        pageStart: 12,
+        pageEnd: 12,
+      }),
+    ).toBe("report.pdf, p. 12");
+  });
 });
 
 describe("ChatPanel", () => {
@@ -75,40 +109,33 @@ describe("ChatPanel", () => {
     vi.mocked(sendChatQuery).mockReset();
     vi.mocked(getDocumentPreview).mockReset();
     vi.mocked(openDocument).mockReset();
+    useSidePaneStore.setState({
+      open: false,
+      mode: "graph",
+      passage: null,
+      highlightNodeIds: [],
+    });
   });
 
   it("disables send when model not warmed", () => {
-    const client = new QueryClient();
-    render(
-      <QueryClientProvider client={client}>
-        <RetrievalModeProvider>
-          <ChatPanel
-            health={{
-              ...health,
-              chatModelWarmed: false,
-              warmUpPending: true,
-            }}
-          />
-        </RetrievalModeProvider>
-      </QueryClientProvider>,
+    renderChat(
+      <ChatPanel
+        health={{
+          ...health,
+          chatModelWarmed: false,
+          warmUpPending: true,
+        }}
+      />,
     );
-    expect(screen.getByPlaceholderText(/Loading model/)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Loading phi4-mini")).toBeInTheDocument();
   });
 
   it("shows error and re-enables input when sendChatQuery rejects", async () => {
     vi.mocked(sendChatQuery).mockRejectedValue("sidecar down");
-    const client = new QueryClient();
-    render(
-      <QueryClientProvider client={client}>
-        <RetrievalModeProvider>
-          <ChatPanel health={health} />
-        </RetrievalModeProvider>
-      </QueryClientProvider>,
-    );
-    const input = screen.getByLabelText("Chat message");
-    fireEvent.change(input, { target: { value: "hello" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    renderChat();
+    await sendPrompt("hello");
     expect(await screen.findByText("sidecar down")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByLabelText("Chat message")).not.toBeDisabled();
     });
@@ -143,25 +170,16 @@ describe("ChatPanel", () => {
       await new Promise((r) => setTimeout(r, 20));
       return messageId;
     });
-    const client = new QueryClient();
-    render(
-      <QueryClientProvider client={client}>
-        <RetrievalModeProvider>
-          <ChatPanel health={health} />
-        </RetrievalModeProvider>
-      </QueryClientProvider>,
-    );
+    renderChat();
     await waitFor(() => expect(chatFinal).toBeDefined());
-    const input = screen.getByLabelText("Chat message");
-    fireEvent.change(input, { target: { value: "race" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await sendPrompt("race");
     expect(await screen.findByText("fast fail")).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByLabelText("Chat message")).not.toBeDisabled();
     });
   });
 
-  it("citation button and cited chips", async () => {
+  it("superscript citation opens Passage mode with the cited chunk marked", async () => {
     let chatStream:
       | ((ev: { payload: { messageId: string; token: string } }) => void)
       | undefined;
@@ -186,7 +204,10 @@ describe("ChatPanel", () => {
       chatFinal?.({
         payload: {
           messageId,
-          citations: [cite(1, "One"), cite(2, "Two")],
+          citations: [
+            cite(1, "One", "/vault/one.pdf"),
+            { ...cite(2, "Two", "/vault/two.pdf"), pageStart: 3, pageEnd: 3 },
+          ],
           retrievalMode: "hybrid",
           error: null,
         },
@@ -195,33 +216,36 @@ describe("ChatPanel", () => {
     });
     vi.mocked(getDocumentPreview).mockResolvedValue({
       documentId: "d2",
-      text: "snip 2",
-      highlightSnippet: "snip 2",
-      pageStart: null,
-      pageEnd: null,
+      text: "prev\n\ncited body\n\nnext",
+      highlightSnippet: "cited body",
+      pageStart: 3,
+      pageEnd: 3,
     });
-    const client = new QueryClient();
-    render(
-      <QueryClientProvider client={client}>
-        <RetrievalModeProvider>
-          <ChatPanel health={health} />
-        </RetrievalModeProvider>
-      </QueryClientProvider>,
+    renderChat(
+      <>
+        <ChatPanel health={health} />
+        <SidePane />
+      </>,
     );
     await waitFor(() => expect(chatFinal).toBeDefined());
-    fireEvent.change(screen.getByLabelText("Chat message"), { target: { value: "ask" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    expect(await screen.findByLabelText("Open citation 2")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /\[2\] Two/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /\[1\] One/ })).not.toBeInTheDocument();
-    expect(screen.queryByText("Retrieved")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText("Open citation 2"));
+    await sendPrompt("ask");
+    expect(await screen.findByLabelText("Source 2")).toBeInTheDocument();
+    expect(screen.getByText("Sources")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "two.pdf, p. 3" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /one\.pdf/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Source 2"));
     await waitFor(() => {
       expect(getDocumentPreview).toHaveBeenCalledWith("d2", "c2");
     });
+    expect(useSidePaneStore.getState().open).toBe(true);
+    expect(useSidePaneStore.getState().mode).toBe("passage");
+    expect(screen.getByRole("button", { name: "Passage", pressed: true })).toBeInTheDocument();
+    expect(screen.getAllByText("two.pdf, p. 3").length).toBeGreaterThanOrEqual(2);
+    const mark = await screen.findByText("cited body");
+    expect(mark.className).toMatch(/bg-mark/);
   });
 
-  it("shows all citations under Retrieved when none are cited", async () => {
+  it("lists all passages under Retrieved passages when none are cited", async () => {
     let chatStream:
       | ((ev: { payload: { messageId: string; token: string } }) => void)
       | undefined;
@@ -245,99 +269,22 @@ describe("ChatPanel", () => {
       chatFinal?.({
         payload: {
           messageId,
-          citations: [cite(1, "One"), cite(2, "Two")],
+          citations: [cite(1, "One", "/vault/one.pdf"), cite(2, "Two", "/vault/two.pdf")],
           retrievalMode: "vector_only",
           error: null,
         },
       });
       return messageId;
     });
-    const client = new QueryClient();
-    render(
-      <QueryClientProvider client={client}>
-        <RetrievalModeProvider>
-          <ChatPanel health={health} />
-        </RetrievalModeProvider>
-      </QueryClientProvider>,
-    );
+    renderChat();
     await waitFor(() => expect(chatFinal).toBeDefined());
-    fireEvent.change(screen.getByLabelText("Chat message"), { target: { value: "ask" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    expect(await screen.findByText("Retrieved")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /\[1\] One/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /\[2\] Two/ })).toBeInTheDocument();
+    await sendPrompt("ask");
+    expect(await screen.findByText("Retrieved passages")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "one.pdf" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "two.pdf" })).toBeInTheDocument();
   });
 
-  it("sends history that skips error messages", async () => {
-    let chatFinal:
-      | ((ev: {
-          payload: {
-            messageId: string;
-            citations: CitationItem[];
-            retrievalMode: string;
-            error?: string | null;
-          };
-        }) => void)
-      | undefined;
-    vi.mocked(listen).mockImplementation(async (event, handler) => {
-      if (event === "chat-final") chatFinal = handler as typeof chatFinal;
-      return () => {};
-    });
-    vi.mocked(sendChatQuery)
-      .mockRejectedValueOnce("boom")
-      .mockImplementation(async (_q, messageId, history) => {
-        expect(history?.some((t) => t.content === "boom")).toBeFalsy();
-        expect(history?.some((t) => t.content === "first ok")).toBeTruthy();
-        chatFinal?.({
-          payload: {
-            messageId,
-            citations: [],
-            retrievalMode: "vector_only",
-            error: null,
-          },
-        });
-        return messageId;
-      });
-    const client = new QueryClient();
-    render(
-      <QueryClientProvider client={client}>
-        <RetrievalModeProvider>
-          <ChatPanel health={health} />
-        </RetrievalModeProvider>
-      </QueryClientProvider>,
-    );
-    await waitFor(() => expect(chatFinal).toBeDefined());
-    // First successful exchange
-    vi.mocked(sendChatQuery).mockImplementationOnce(async (_q, messageId) => {
-      chatFinal?.({
-        payload: { messageId, citations: [], retrievalMode: "vector_only", error: null },
-      });
-      return messageId;
-    });
-    fireEvent.change(screen.getByLabelText("Chat message"), { target: { value: "first ok" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(sendChatQuery).toHaveBeenCalled());
-    // Force an error on the assistant by mutating via reject
-    vi.mocked(sendChatQuery).mockRejectedValueOnce("boom");
-    fireEvent.change(screen.getByLabelText("Chat message"), { target: { value: "will fail" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    expect(await screen.findByText("boom")).toBeInTheDocument();
-    // Third send should skip error content in history
-    vi.mocked(sendChatQuery).mockImplementation(async (q, messageId, history) => {
-      expect(q).toBe("again");
-      expect(history?.every((t) => t.content !== "boom")).toBe(true);
-      expect(history?.some((t) => t.content === "first ok")).toBe(true);
-      chatFinal?.({
-        payload: { messageId, citations: [], retrievalMode: "vector_only", error: null },
-      });
-      return messageId;
-    });
-    fireEvent.change(screen.getByLabelText("Chat message"), { target: { value: "again" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(sendChatQuery).toHaveBeenLastCalledWith("again", expect.any(String), expect.any(Array)));
-  });
-
-  it("highlights the whole cited chunk and Open file calls openDocument", async () => {
+  it("renders Markdown lists as ul and li", async () => {
     let chatStream:
       | ((ev: { payload: { messageId: string; token: string } }) => void)
       | undefined;
@@ -357,57 +304,114 @@ describe("ChatPanel", () => {
       return () => {};
     });
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
-      chatStream?.({ payload: { messageId, token: "Hello [1]." } });
+      chatStream?.({
+        payload: { messageId, token: "Items:\n\n- alpha\n- beta" },
+      });
       chatFinal?.({
         payload: {
           messageId,
-          citations: [
-            {
-              ...cite(1, "Report"),
-              pageStart: 12,
-              pageEnd: 12,
-            },
-          ],
+          citations: [],
+          retrievalMode: "vector_only",
+          error: null,
+        },
+      });
+      return messageId;
+    });
+    renderChat();
+    await waitFor(() => expect(chatFinal).toBeDefined());
+    await sendPrompt("list");
+    const answer = await screen.findByText("alpha");
+    const list = answer.closest("ul");
+    expect(list).not.toBeNull();
+    expect(within(list!).getByText("beta").tagName.toLowerCase()).toBe("li");
+  });
+
+  it("Show related entities switches the pane to Graph", async () => {
+    let chatStream:
+      | ((ev: { payload: { messageId: string; token: string } }) => void)
+      | undefined;
+    let chatFinal:
+      | ((ev: {
+          payload: {
+            messageId: string;
+            citations: CitationItem[];
+            retrievalMode: string;
+            error?: string | null;
+          };
+        }) => void)
+      | undefined;
+    vi.mocked(listen).mockImplementation(async (event, handler) => {
+      if (event === "chat-stream") chatStream = handler as typeof chatStream;
+      if (event === "chat-final") chatFinal = handler as typeof chatFinal;
+      return () => {};
+    });
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      chatStream?.({ payload: { messageId, token: "Uses graph [2]." } });
+      chatFinal?.({
+        payload: {
+          messageId,
+          citations: [cite(1), cite(2, "Two", "/vault/two.pdf")],
           retrievalMode: "hybrid",
           error: null,
         },
       });
       return messageId;
     });
-    vi.mocked(getDocumentPreview).mockResolvedValue({
-      documentId: "d1",
-      text: "prev\n\ncited body\n\nnext",
-      highlightSnippet: "cited body",
-      pageStart: 12,
-      pageEnd: 12,
-    });
-    const client = new QueryClient();
-    render(
-      <QueryClientProvider client={client}>
-        <RetrievalModeProvider>
-          <ChatPanel health={health} />
-        </RetrievalModeProvider>
-      </QueryClientProvider>,
+    renderChat(
+      <>
+        <ChatPanel health={health} />
+        <SidePane />
+      </>,
     );
     await waitFor(() => expect(chatFinal).toBeDefined());
-    fireEvent.change(screen.getByLabelText("Chat message"), { target: { value: "ask" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    fireEvent.click(await screen.findByRole("button", { name: /\[1\] Report/ }));
-    await waitFor(() => {
-      expect(getDocumentPreview).toHaveBeenCalledWith("d1", "c1");
-    });
-    expect(await screen.findByText("Report · p. 12")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open file" }));
-    await waitFor(() => {
-      expect(openDocument).toHaveBeenCalledWith("d1");
-    });
+    await sendPrompt("ask");
+    fireEvent.click(await screen.findByRole("button", { name: "Show related entities in the graph" }));
+    expect(useSidePaneStore.getState().open).toBe(true);
+    expect(useSidePaneStore.getState().mode).toBe("graph");
+    expect(useSidePaneStore.getState().highlightNodeIds).toEqual(["n-a", "n-b"]);
+    expect(screen.getByRole("button", { name: "Graph", pressed: true })).toBeInTheDocument();
   });
-});
 
-describe("PreviewBody", () => {
-  it("marks the exact highlight substring", () => {
-    render(<PreviewBody text={"aaa\n\nwhole cited chunk\n\nbbb"} highlight="whole cited chunk" />);
-    const mark = screen.getByText("whole cited chunk");
-    expect(mark.tagName.toLowerCase()).toBe("mark");
+  it("sends history that skips error messages", async () => {
+    let chatFinal:
+      | ((ev: {
+          payload: {
+            messageId: string;
+            citations: CitationItem[];
+            retrievalMode: string;
+            error?: string | null;
+          };
+        }) => void)
+      | undefined;
+    vi.mocked(listen).mockImplementation(async (event, handler) => {
+      if (event === "chat-final") chatFinal = handler as typeof chatFinal;
+      return () => {};
+    });
+    renderChat();
+    await waitFor(() => expect(chatFinal).toBeDefined());
+    vi.mocked(sendChatQuery).mockImplementationOnce(async (_q, messageId) => {
+      chatFinal?.({
+        payload: { messageId, citations: [], retrievalMode: "vector_only", error: null },
+      });
+      return messageId;
+    });
+    await sendPrompt("first ok");
+    await waitFor(() => expect(sendChatQuery).toHaveBeenCalled());
+    vi.mocked(sendChatQuery).mockRejectedValueOnce("boom");
+    await sendPrompt("will fail");
+    expect(await screen.findByText("boom")).toBeInTheDocument();
+    vi.mocked(sendChatQuery).mockImplementation(async (q, messageId, history) => {
+      expect(q).toBe("again");
+      expect(history?.every((t) => t.content !== "boom")).toBe(true);
+      expect(history?.some((t) => t.content === "first ok")).toBe(true);
+      chatFinal?.({
+        payload: { messageId, citations: [], retrievalMode: "vector_only", error: null },
+      });
+      return messageId;
+    });
+    await sendPrompt("again");
+    await waitFor(() =>
+      expect(sendChatQuery).toHaveBeenLastCalledWith("again", expect.any(String), expect.any(Array)),
+    );
   });
 });

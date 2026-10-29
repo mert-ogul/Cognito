@@ -8,58 +8,108 @@ type Props = {
   highlightNodeIds: string[];
   selectedNodeId: string | null;
   onNodeTap: (nodeId: string) => void;
-  /** Increment to run `cy.fit()`. */
   fitKey?: number;
-  /** Center viewport on this node id when it changes. */
   centerOnNodeId?: string | null;
   className?: string;
+  emptyMessage: string;
 };
 
-function readTheme() {
+type Theme = {
+  text: string;
+  muted: string;
+  line: string;
+  accent: string;
+  pane: string;
+};
+
+function readTheme(): Theme {
   const s = getComputedStyle(document.documentElement);
-  const pick = (name: string, fallback: string) =>
-    s.getPropertyValue(name).trim() || fallback;
+  const pick = (name: string) => s.getPropertyValue(name).trim();
   return {
-    bg: pick("--bg-pane", "#f4f4f3"),
-    text: pick("--text", "#1d1d1f"),
-    muted: pick("--text-muted", "#6b6b70"),
-    line: pick("--line", "#e2e2e0"),
-    accent: pick("--accent", "#1f6378"),
-    mark: pick("--mark", "#fff1a8"),
-    hover: pick("--bg-hover", "#ebebea"),
+    text: pick("--text"),
+    muted: pick("--text-muted"),
+    line: pick("--line"),
+    accent: pick("--accent"),
+    pane: pick("--bg-pane"),
   };
 }
 
 function buildElements(snapshot: GraphSnapshot) {
-  const nodes = snapshot.nodes.map((n) => ({
-    data: { id: n.nodeId, label: n.name, kind: n.kind },
-  }));
+  const maxSources = Math.max(1, ...snapshot.nodes.map((n) => n.sourceCount || 1));
+  const ranked = [...snapshot.nodes].sort(
+    (a, b) => (b.sourceCount || 0) - (a.sourceCount || 0),
+  );
+  const labeled = new Set(ranked.slice(0, 30).map((n) => n.nodeId));
+
+  const nodes = snapshot.nodes.map((n) => {
+    const count = n.sourceCount || 1;
+    const size = 8 + (12 * count) / maxSources;
+    return {
+      data: {
+        id: n.nodeId,
+        label: n.name,
+        kind: n.kind,
+        sourceCount: count,
+        size,
+        showLabel: labeled.has(n.nodeId) ? 1 : 0,
+      },
+    };
+  });
   const edges = snapshot.edges.map((e) => ({
     data: {
       id: e.edgeId,
       source: e.sourceNodeId,
       target: e.targetNodeId,
-      label: e.relation,
     },
   }));
   return [...nodes, ...edges];
 }
 
-function applyHighlight(
-  cy: Core,
-  highlightNodeIds: string[],
-  selectedNodeId: string | null,
-  theme: ReturnType<typeof readTheme>,
-) {
+function applyThemeStyles(cy: Core, theme: Theme) {
+  cy.style()
+    .selector("node")
+    .style({
+      label: "data(label)",
+      "font-family": "var(--family-ui)",
+      "font-size": "11px",
+      "text-wrap": "wrap",
+      "text-max-width": "90px",
+      "text-valign": "bottom",
+      "text-margin-y": 4,
+      color: theme.text,
+      "background-color": theme.pane,
+      "border-width": 1.5,
+      "border-color": theme.line,
+      width: "data(size)",
+      height: "data(size)",
+      "min-zoomed-font-size": 13,
+    })
+    .selector("node[showLabel = 1]")
+    .style({
+      "min-zoomed-font-size": 0,
+    })
+    .selector("edge")
+    .style({
+      width: 1,
+      "line-color": theme.line,
+      "curve-style": "bezier",
+      "target-arrow-shape": "none",
+      "source-arrow-shape": "none",
+    })
+    .update();
+}
+
+function applyHighlight(cy: Core, highlightNodeIds: string[], selectedNodeId: string | null, theme: Theme) {
   const hl = new Set(highlightNodeIds);
   cy.batch(() => {
     cy.nodes().forEach((n) => {
       const id = n.id();
       const isHl = hl.has(id);
       const isSel = selectedNodeId === id;
-      n.style("border-color", isHl ? theme.mark : isSel ? theme.accent : theme.line);
-      n.style("background-color", isHl ? theme.hover : theme.bg);
-      n.style("border-width", isHl || isSel ? 3 : 1.5);
+      n.style("background-color", isHl ? theme.accent : theme.pane);
+      n.style("border-color", isSel ? theme.accent : theme.line);
+      n.style("border-width", isSel ? 3 : 1.5);
+      n.style("color", theme.text);
     });
   });
 }
@@ -72,6 +122,7 @@ export function GraphCyCanvas({
   fitKey = 0,
   centerOnNodeId,
   className,
+  emptyMessage,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
@@ -85,37 +136,15 @@ export function GraphCyCanvas({
     const cy = cytoscape({
       container: el,
       elements: buildElements(snapshot),
-      style: [
-        {
-          selector: "node",
-          style: {
-            label: "data(label)",
-            "font-size": "10px",
-            "text-wrap": "wrap",
-            "text-max-width": "100px",
-            color: theme.text,
-            "background-color": theme.bg,
-            width: 28,
-            height: 28,
-            "border-width": 1.5,
-            "border-color": theme.line,
-          },
-        },
-        {
-          selector: "edge",
-          style: {
-            width: 1.25,
-            "line-color": theme.muted,
-            "target-arrow-color": theme.muted,
-            "curve-style": "bezier",
-            "target-arrow-shape": "triangle",
-            opacity: 0.85,
-          },
-        },
-      ],
-      layout: { name: "circle", padding: 24 } as cytoscape.LayoutOptions,
+      style: [],
+      layout: {
+        name: "cose",
+        animate: false,
+        padding: 24,
+      } as cytoscape.LayoutOptions,
       wheelSensitivity: 0.35,
     });
+    applyThemeStyles(cy, theme);
     cy.userPanningEnabled(true);
     cy.userZoomingEnabled(true);
     cy.boxSelectionEnabled(false);
@@ -124,7 +153,17 @@ export function GraphCyCanvas({
     });
     cyRef.current = cy;
     applyHighlight(cy, highlightNodeIds, selectedNodeId, theme);
+
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onScheme = () => {
+      const next = readTheme();
+      applyThemeStyles(cy, next);
+      applyHighlight(cy, highlightNodeIds, selectedNodeId, next);
+    };
+    mq.addEventListener("change", onScheme);
+
     return () => {
+      mq.removeEventListener("change", onScheme);
       cy.destroy();
       cyRef.current = null;
     };
@@ -148,19 +187,17 @@ export function GraphCyCanvas({
     if (!cy || !centerOnNodeId) return;
     const n = cy.getElementById(centerOnNodeId);
     if (n.nonempty()) {
-      cy.animate({ center: { eles: n }, zoom: Math.max(cy.zoom(), 1) }, { duration: 200 });
+      cy.center(n);
+      if (cy.zoom() < 1) {
+        cy.zoom(1);
+      }
     }
   }, [centerOnNodeId]);
 
   if (!snapshot || snapshot.nodes.length === 0) {
     return (
-      <div
-        className={cn(
-          "flex min-h-[200px] items-center justify-center border border-dashed border-line text-muted",
-          className,
-        )}
-      >
-        No graph nodes yet. Index documents with graph extraction enabled.
+      <div className={cn("flex min-h-[200px] items-center justify-center p-3 text-muted", className)}>
+        {emptyMessage}
       </div>
     );
   }
@@ -169,7 +206,7 @@ export function GraphCyCanvas({
     <div
       ref={containerRef}
       data-testid="graph-canvas"
-      className={cn("min-h-[280px] w-full flex-1 border border-line bg-pane", className)}
+      className={cn("min-h-[280px] w-full flex-1 bg-pane", className)}
     />
   );
 }
