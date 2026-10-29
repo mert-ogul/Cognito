@@ -8,6 +8,7 @@ import {
   sendChatQuery,
   warmChatModel,
   type AppHealth,
+  type ChatTurn,
   type CitationItem,
 } from "@/lib/tauri";
 import { listen } from "@/lib/tauri-events";
@@ -15,6 +16,8 @@ import { useGraphSessionStore } from "@/stores/graphSessionStore";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type ChatMessage = {
   id: string;
@@ -28,6 +31,36 @@ type ChatMessage = {
 type Props = {
   health: AppHealth | undefined;
 };
+
+export function citationsUsedInOrder(text: string, citations: CitationItem[]): CitationItem[] {
+  const byIndex = new Map(citations.map((c) => [c.index, c]));
+  const seen = new Set<number>();
+  const out: CitationItem[] = [];
+  for (const m of text.matchAll(/\[(\d+)\]/g)) {
+    const n = Number(m[1]);
+    const c = byIndex.get(n);
+    if (c && !seen.has(n)) {
+      seen.add(n);
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+/** Turn [n] into markdown links outside code spans/blocks. */
+export function linkifyCitationMarkers(text: string, indexes: Set<number>): string {
+  const parts = text.split(/(```[\s\S]*?```|`[^`\n]+`)/g);
+  return parts
+    .map((part) => {
+      if (part.startsWith("`")) return part;
+      return part.replace(/\[(\d+)\]/g, (full, nStr: string) => {
+        const n = Number(nStr);
+        if (!indexes.has(n)) return full;
+        return `[${n}](#cite-${n})`;
+      });
+    })
+    .join("");
+}
 
 export function ChatPanel({ health }: Props) {
   const queryClient = useQueryClient();
@@ -124,46 +157,6 @@ export function ChatPanel({ health }: Props) {
     };
   }, [setLastRetrievalMode]);
 
-  const sendWithText = useCallback(
-    async (q: string) => {
-      const query = q.trim();
-      if (!query || !ready || busyId) return;
-      setRetryUserText(null);
-      lastSentRef.current = query;
-      const userId = crypto.randomUUID();
-      const assistantId = crypto.randomUUID();
-      setMessages((prev) => [
-        ...prev,
-        { id: userId, role: "user", text: query },
-        { id: assistantId, role: "assistant", text: "" },
-      ]);
-      setBusyId(assistantId);
-      try {
-        await sendChatQuery(query, assistantId);
-      } catch (e) {
-        const msg = String(e);
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId && m.role === "assistant" ? { ...m, error: msg } : m,
-          ),
-        );
-        setBusyId(null);
-        setRetryUserText(query);
-      }
-    },
-    [ready, busyId],
-  );
-
-  const send = useCallback(async () => {
-    await sendWithText(input);
-    setInput("");
-  }, [input, sendWithText]);
-
-  const retryLast = useCallback(async () => {
-    if (!retryUserText) return;
-    await sendWithText(retryUserText);
-  }, [retryUserText, sendWithText]);
-
   const openCitation = useCallback(
     async (c: CitationItem) => {
       setHighlightNodeIds(c.nodeIds ?? []);
@@ -186,6 +179,59 @@ export function ChatPanel({ health }: Props) {
     [setHighlightNodeIds],
   );
 
+  const sendWithText = useCallback(
+    async (q: string) => {
+      const query = q.trim();
+      if (!query || !ready || busyId) return;
+      setRetryUserText(null);
+      lastSentRef.current = query;
+      const history: ChatTurn[] = messages
+        .filter((m) => !m.error && m.text.trim().length > 0)
+        .slice(-6)
+        .map((m) => ({ role: m.role, content: m.text }));
+      const userId = crypto.randomUUID();
+      const assistantId = crypto.randomUUID();
+      setMessages((prev) => [
+        ...prev,
+        { id: userId, role: "user", text: query },
+        { id: assistantId, role: "assistant", text: "" },
+      ]);
+      setBusyId(assistantId);
+      try {
+        await sendChatQuery(query, assistantId, history);
+      } catch (e) {
+        const msg = String(e);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId && m.role === "assistant" ? { ...m, error: msg } : m,
+          ),
+        );
+        setBusyId(null);
+        setRetryUserText(query);
+      }
+    },
+    [ready, busyId, messages],
+  );
+
+  const send = useCallback(async () => {
+    await sendWithText(input);
+    setInput("");
+  }, [input, sendWithText]);
+
+  const retryLast = useCallback(async () => {
+    if (!retryUserText) return;
+    await sendWithText(retryUserText);
+  }, [retryUserText, sendWithText]);
+
+  const newChat = useCallback(() => {
+    setMessages([]);
+    setBusyId(null);
+    setRetryUserText(null);
+    lastSentRef.current = null;
+    setHighlightNodeIds([]);
+    setPreview(null);
+  }, [setHighlightNodeIds]);
+
   const lastAssistantError = messages.filter((m) => m.role === "assistant" && m.error).pop();
 
   return (
@@ -193,6 +239,9 @@ export function ChatPanel({ health }: Props) {
       <CardHeader className="shrink-0 pb-2">
         <div className="flex items-start justify-between gap-2">
           <CardTitle>Chat</CardTitle>
+          <Button type="button" variant="outline" size="sm" onClick={newChat}>
+            New chat
+          </Button>
         </div>
         {health?.warmUpError ? (
           <div className="flex flex-wrap items-center gap-2">
@@ -206,57 +255,82 @@ export function ChatPanel({ health }: Props) {
       <CardContent className="flex min-h-0 flex-1 flex-col gap-2">
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto text-sm">
           {messages.length === 0 ? <ChatWelcome modelReady={ready} /> : null}
-          {messages.map((m) => (
-            <div
-              key={m.id}
-              className={
-                m.role === "user"
-                  ? "ml-6 rounded-md bg-[var(--surface)] p-2"
-                  : "mr-4 rounded-md border border-[var(--border)] p-2"
-              }
-            >
-              <p className="whitespace-pre-wrap">{m.text || (busyId === m.id ? "…" : "")}</p>
-              {m.role === "assistant" && m.retrievalMode ? (
-                <p
-                  className={cn(
-                    "mt-1 text-[10px] uppercase",
-                    m.retrievalMode === "hybrid" ? "text-sky-300/90" : "text-[var(--muted)]",
-                  )}
-                >
-                  {m.retrievalMode === "hybrid"
-                    ? "Hybrid retrieval"
-                    : m.retrievalMode === "vector_only"
-                      ? "Vector-only (graph evidence not used)"
-                      : m.retrievalMode}
-                </p>
-              ) : null}
-              {m.error ? (
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <p className="text-xs text-red-500">{m.error}</p>
-                  {retryUserText && m.id === lastAssistantError?.id ? (
-                    <Button type="button" variant="outline" size="sm" onClick={() => void retryLast()}>
-                      Retry
-                    </Button>
-                  ) : null}
-                </div>
-              ) : null}
-              {m.citations && m.citations.length > 0 ? (
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {m.citations.map((c, i) => (
-                    <button
-                      key={`${c.chunkId}-${i}`}
-                      type="button"
-                      className="rounded-full border border-[var(--border)] bg-[var(--background)] px-2 py-0.5 text-[10px] hover:bg-[var(--surface)]"
-                      onClick={() => void openCitation(c)}
-                    >
-                      {c.title.slice(0, 24)}
-                      {c.pageStart != null ? ` · p.${c.pageStart}` : ""}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ))}
+          {messages.map((m) => {
+            const used =
+              m.role === "assistant" && m.citations?.length
+                ? citationsUsedInOrder(m.text, m.citations)
+                : [];
+            const showAllRetrieved =
+              m.role === "assistant" &&
+              !!m.citations?.length &&
+              used.length === 0 &&
+              !busyId;
+            const chipCitations = showAllRetrieved ? m.citations! : used;
+            return (
+              <div
+                key={m.id}
+                className={
+                  m.role === "user"
+                    ? "ml-6 rounded-md bg-[var(--surface)] p-2"
+                    : "mr-4 rounded-md border border-[var(--border)] p-2"
+                }
+              >
+                {m.role === "assistant" ? (
+                  <AssistantMarkdown
+                    text={m.text || (busyId === m.id ? "…" : "")}
+                    citations={m.citations ?? []}
+                    onCite={(c) => void openCitation(c)}
+                  />
+                ) : (
+                  <p className="whitespace-pre-wrap">{m.text}</p>
+                )}
+                {m.role === "assistant" && m.retrievalMode ? (
+                  <p
+                    className={cn(
+                      "mt-1 text-[10px] uppercase",
+                      m.retrievalMode === "hybrid" ? "text-sky-300/90" : "text-[var(--muted)]",
+                    )}
+                  >
+                    {m.retrievalMode === "hybrid"
+                      ? "Hybrid retrieval"
+                      : m.retrievalMode === "vector_only"
+                        ? "Vector-only (graph evidence not used)"
+                        : m.retrievalMode}
+                  </p>
+                ) : null}
+                {m.error ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <p className="text-xs text-red-500">{m.error}</p>
+                    {retryUserText && m.id === lastAssistantError?.id ? (
+                      <Button type="button" variant="outline" size="sm" onClick={() => void retryLast()}>
+                        Retry
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null}
+                {chipCitations.length > 0 ? (
+                  <div className="mt-2 space-y-1">
+                    {showAllRetrieved ? (
+                      <p className="text-[10px] uppercase text-[var(--muted)]">Retrieved</p>
+                    ) : null}
+                    <div className="flex flex-wrap gap-1">
+                      {chipCitations.map((c, i) => (
+                        <button
+                          key={`${c.chunkId}-${i}`}
+                          type="button"
+                          className="rounded-full border border-[var(--border)] bg-[var(--background)] px-2 py-0.5 text-[10px] hover:bg-[var(--surface)]"
+                          onClick={() => void openCitation(c)}
+                        >
+                          [{c.index}] {c.title.slice(0, 24)}
+                          {c.pageStart != null ? ` · p.${c.pageStart}` : ""}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
           <div ref={bottomRef} />
         </div>
         <div className="flex shrink-0 gap-2">
@@ -320,6 +394,48 @@ export function ChatPanel({ health }: Props) {
   );
 }
 
+function AssistantMarkdown({
+  text,
+  citations,
+  onCite,
+}: {
+  text: string;
+  citations: CitationItem[];
+  onCite: (c: CitationItem) => void;
+}) {
+  const indexes = new Set(citations.map((c) => c.index));
+  const byIndex = new Map(citations.map((c) => [c.index, c]));
+  const md = linkifyCitationMarkers(text, indexes);
+  const components: Components = {
+    a: ({ href, children }) => {
+      if (href?.startsWith("#cite-")) {
+        const n = Number(href.slice(6));
+        const c = byIndex.get(n);
+        return (
+          <button
+            type="button"
+            className="mx-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded border border-[var(--border)] bg-[var(--surface)] px-1 align-super text-[10px] font-medium hover:bg-[var(--background)]"
+            onClick={() => {
+              if (c) onCite(c);
+            }}
+            aria-label={`Open citation ${n}`}
+          >
+            {children}
+          </button>
+        );
+      }
+      return <span>{children}</span>;
+    },
+  };
+  return (
+    <div className="prose prose-sm dark:prose-invert max-w-none text-sm [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+        {md}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 export function PreviewBody({ text, highlight }: { text: string | null; highlight: string | null }) {
   if (!text) {
     return <p className="text-xs text-[var(--muted)]">No preview text.</p>;
@@ -335,16 +451,6 @@ export function PreviewBody({ text, highlight }: { text: string | null; highligh
     if (i < 0) {
       return <p className="whitespace-pre-wrap text-xs">{text}</p>;
     }
-    const before = text.slice(0, i);
-    const mid = text.slice(i, i + highlight.length);
-    const after = text.slice(i + highlight.length);
-    return (
-      <p className="whitespace-pre-wrap text-xs">
-        {before}
-        <mark className="bg-yellow-200/40 dark:bg-yellow-500/30">{mid}</mark>
-        {after}
-      </p>
-    );
   }
   const before = text.slice(0, i);
   const mid = text.slice(i, i + highlight.length);

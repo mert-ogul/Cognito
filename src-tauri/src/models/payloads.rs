@@ -90,6 +90,13 @@ pub struct SettingsPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ChatTurn {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CitationItem {
     pub document_id: String,
     pub title: String,
@@ -102,6 +109,8 @@ pub struct CitationItem {
     pub snippet: String,
     #[serde(default)]
     pub node_ids: Vec<String>,
+    #[serde(default)]
+    pub index: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +146,7 @@ mod chat_payload_tests {
             chunk_id: "c1".into(),
             snippet: "snip".into(),
             node_ids: vec!["n1".into()],
+            index: 1,
         };
         let f = ChatFinalResult {
             message_id: "m1".into(),

@@ -1,6 +1,6 @@
 use crate::app::state::SharedState;
 use crate::events::CHAT_FINAL;
-use crate::models::{ChatFinalResult, CitationItem};
+use crate::models::{ChatFinalResult, ChatTurn, CitationItem};
 use crate::services::chat_query;
 use tauri::{AppHandle, Emitter};
 
@@ -10,6 +10,7 @@ pub async fn send_chat_query(
     state: tauri::State<'_, SharedState>,
     query: String,
     message_id: String,
+    history: Option<Vec<ChatTurn>>,
 ) -> Result<String, String> {
     if message_id.trim().is_empty() {
         return Err("message_id must not be empty".into());
@@ -17,8 +18,11 @@ pub async fn send_chat_query(
     let st = state.inner().clone();
     let app_c = app.clone();
     let mid = message_id.clone();
+    let hist = history.unwrap_or_default();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = chat_query::run_chat_query(st, app_c.clone(), query, mid.clone()).await {
+        if let Err(e) =
+            chat_query::run_chat_query(st, app_c.clone(), query, mid.clone(), hist).await
+        {
             let _ = app_c.emit(
                 CHAT_FINAL,
                 &ChatFinalResult {

@@ -81,12 +81,16 @@ def dispatch(method: str, params: dict) -> Any:
     if method == "purge_graph_document":
         return rpc_purge_graph_document(params)
     if method == "prepare_chat_retrieval":
+        hist = params.get("history", [])
+        if not isinstance(hist, list):
+            hist = []
         return prepare_chat_retrieval(
             str(params["sqlite_path"]),
             str(params.get("duckdb_path") or "") or None,
             str(params["query"]),
             str(params.get("embed_model", "nomic-embed-text")),
             int(params.get("top_k", 12)),
+            history=hist,
         )
     if method == "search_chunks":
         return rpc_search_chunks(params)
