@@ -41,12 +41,22 @@ pub fn run() {
             let logs_dir = data_dir.join("logs");
             std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
             let log_path = logs_dir.join("sidecar.log");
-            let pool = SidecarPool::new(main_py, cwd, log_path);
+            let pool = SidecarPool::new(main_py, cwd, log_path.clone());
             let state: SharedState = Arc::new(AppState::new(data_dir, pool));
             state
                 .with_sqlite(|_| Ok(()))
                 .map_err(|e| e.to_string())?;
-            state.sidecar.ensure().map_err(|e| e.to_string())?;
+            if let Err(e) = state.sidecar.ensure() {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                {
+                    let _ = writeln!(f, "sidecar startup failed: {e}");
+                    let _ = f.flush();
+                }
+            }
             {
                 let st = state.clone();
                 std::thread::spawn(move || {

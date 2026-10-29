@@ -1,6 +1,6 @@
 # MVP scope (summary)
 
-Aligned with [CONSTITUTION.md](https://github.com/OWNER/REPO/blob/main/CONSTITUTION.md):
+Aligned with [CONSTITUTION.md](../../CONSTITUTION.md):
 
 - **Formats**: PDF and Markdown only; single vault.
 - **Limits**: First import capped at **100** documents (batch size 20 in the sidecar).
