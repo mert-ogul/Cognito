@@ -3,6 +3,7 @@ use crate::db::sqlite;
 use crate::events::{IMPORT_PROGRESS, LIBRARY_CHANGED};
 use crate::models::{DocumentPreview, DocumentRow, ImportProgress};
 use crate::services::import_job;
+use crate::services::index_rebuild;
 use crate::services::ingest;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -35,7 +36,7 @@ pub async fn get_document_preview(
     .await
 }
 
-fn spawn_import_job(
+pub(crate) fn spawn_import_job(
     app: AppHandle,
     state: &SharedState,
     job_id: String,
@@ -165,5 +166,47 @@ pub async fn retry_failed_import(
             settings.chat_model.clone(),
         )?;
     }
+    Ok(job_id)
+}
+
+#[tauri::command]
+pub async fn rebuild_index(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    embed_model: Option<String>,
+) -> Result<String, String> {
+    if state.import_running.load(Ordering::SeqCst) {
+        return Err("An import is already running.".to_string());
+    }
+    if let Some(ref model) = embed_model {
+        state
+            .with_sqlite(|c| sqlite::upsert_setting(c, "embed_model", model))
+            .map_err(|e| e.to_string())?;
+    }
+    index_rebuild::reset_library(&*state).map_err(|e| e.to_string())?;
+    let settings = state
+        .with_sqlite(|c| sqlite::load_settings(c))
+        .map_err(|e| e.to_string())?;
+    let vault_str = settings
+        .vault_path
+        .clone()
+        .ok_or_else(|| "Configure a vault folder first.".to_string())?;
+    let vault = PathBuf::from(&vault_str);
+    let slots = crate::vault::slots_remaining(0);
+    let paths = crate::vault::collect_import_paths_bounded(&vault, slots)
+        .map_err(|e| e.to_string())?;
+    if paths.is_empty() {
+        return Err("No PDF or Markdown files found.".to_string());
+    }
+    let job_id = Uuid::new_v4().to_string();
+    spawn_import_job(
+        app,
+        &*state,
+        job_id.clone(),
+        vault,
+        paths,
+        settings.embed_model.clone(),
+        settings.chat_model.clone(),
+    )?;
     Ok(job_id)
 }

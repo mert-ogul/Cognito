@@ -11,9 +11,18 @@ import duckdb
 from common.duckdb_util import ensure_schema
 import sqlite_vec
 
-from common.sqlite_vec_util import VEC_DIM, connect_with_vec, ensure_chunk_embedding_table, mock_embed_enabled
+from common.sqlite_vec_util import (
+    MOCK_EMBED_DIM,
+    connect_with_vec,
+    mock_embed_enabled,
+    table_dimension,
+)
 from common.ollama import embed_text
 from extraction.node_normalizer import normalize_name
+
+
+class EmbeddingDimMismatch(Exception):
+    """Query embedding length does not match the stored index."""
 
 
 def _words(text: str) -> set[str]:
@@ -33,18 +42,38 @@ def _indexed_chunk_count(sqlite_path: str) -> int:
         return 0
 
 
+def _query_embedding_failed(query: str, system: str) -> dict[str, Any]:
+    return {
+        "retrievalMode": "vector_only",
+        "citations": [],
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": query},
+        ],
+        "graphAugmented": False,
+        "graphNodeIds": [],
+        "queryEmbeddingFailed": True,
+    }
+
+
 def vector_top_k(sqlite_path: str, embed_model: str, query: str, k: int) -> list[dict[str, Any]]:
     con = connect_with_vec(sqlite_path)
-    ensure_chunk_embedding_table(con)
+    dim = table_dimension(con)
+    if dim is None:
+        con.close()
+        return []
 
     try:
-        qv = list(embed_text(embed_model, query) if not mock_embed_enabled() else [0.0] * VEC_DIM)
+        qv = list(
+            embed_text(embed_model, query) if not mock_embed_enabled() else [0.0] * MOCK_EMBED_DIM
+        )
     except Exception:
         con.close()
         return []
-    while len(qv) < VEC_DIM:
-        qv.append(0.0)
-    qblob = sqlite_vec.serialize_float32(qv[:VEC_DIM])
+    if len(qv) != dim:
+        con.close()
+        raise EmbeddingDimMismatch(f"query embedding has {len(qv)} values; index uses {dim}")
+    qblob = sqlite_vec.serialize_float32(list(qv))
     rows = con.execute(
         """
         SELECT chunk_id, distance
@@ -169,27 +198,23 @@ def prepare_chat_retrieval(
     3) graph seeds + up to 2-hop subgraph when DuckDB available
     4) grounded prompt messages for the chat model
     """
-    chunks = vector_top_k(sqlite_path, embed_model, query, top_k)
+    try:
+        chunks = vector_top_k(sqlite_path, embed_model, query, top_k)
+    except EmbeddingDimMismatch:
+        return _query_embedding_failed(
+            query,
+            "The embedding model does not match the index. Open Settings and rebuild the index.",
+        )
     if not chunks:
         if _indexed_chunk_count(sqlite_path) > 0:
-            return {
-                "retrievalMode": "vector_only",
-                "citations": [],
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Indexed content exists, but query embedding failed. Ensure Ollama is running on "
-                            "127.0.0.1 and the embedding model in settings is installed (`ollama pull <model>`). "
-                            "Vector retrieval cannot run until embeddings work. Do not invent sources."
-                        ),
-                    },
-                    {"role": "user", "content": query},
-                ],
-                "graphAugmented": False,
-                "graphNodeIds": [],
-                "queryEmbeddingFailed": True,
-            }
+            return _query_embedding_failed(
+                query,
+                (
+                    "Indexed content exists, but query embedding failed. Ensure Ollama is running on "
+                    "127.0.0.1 and the embedding model in settings is installed (`ollama pull <model>`). "
+                    "Vector retrieval cannot run until embeddings work. Do not invent sources."
+                ),
+            )
         return {
             "retrievalMode": "vector_only",
             "citations": [],
@@ -305,5 +330,8 @@ def rpc_search_chunks(params: dict[str, Any]) -> dict[str, Any]:
     embed_model = str(params.get("embed_model", "nomic-embed-text"))
     query = str(params["query"])
     k = int(params.get("k", 12))
-    chunks = vector_top_k(sqlite_path, embed_model, query, k)
+    try:
+        chunks = vector_top_k(sqlite_path, embed_model, query, k)
+    except EmbeddingDimMismatch:
+        chunks = []
     return {"chunks": chunks}

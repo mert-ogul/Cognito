@@ -260,3 +260,12 @@ export async function updateSettings(payload: {
   }
   return invoke("update_settings", { payload });
 }
+
+export async function rebuildIndex(embedModel?: string): Promise<string> {
+  if (e2e) {
+    return "e2e-rebuild-job";
+  }
+  return invoke<string>("rebuild_index", {
+    embedModel: embedModel ?? null,
+  });
+}

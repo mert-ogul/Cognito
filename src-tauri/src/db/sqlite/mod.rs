@@ -79,6 +79,25 @@ pub fn get_setting(conn: &Connection, key: &str) -> CognitoResult<Option<String>
     Ok(row)
 }
 
+pub fn clear_setting(conn: &Connection, key: &str) -> CognitoResult<()> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", [key])
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(())
+}
+
+pub fn delete_all_documents(conn: &Connection) -> CognitoResult<()> {
+    conn.execute("DELETE FROM documents", [])
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(())
+}
+
+pub fn maybe_set_index_embed_model(conn: &Connection, embed_model: &str) -> CognitoResult<()> {
+    if get_setting(conn, "index_embed_model")?.is_none() {
+        upsert_setting(conn, "index_embed_model", embed_model)?;
+    }
+    Ok(())
+}
+
 pub fn load_settings(conn: &Connection) -> CognitoResult<SettingsPayload> {
     let vault = get_setting(conn, "vault_path")?;
     let chat = get_setting(conn, "chat_model")?.unwrap_or_else(|| "phi4-mini".to_string());

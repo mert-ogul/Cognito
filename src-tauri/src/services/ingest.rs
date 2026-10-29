@@ -310,7 +310,11 @@ fn process_one_parsed(
         })?;
         return Ok(false);
     }
-    state.with_sqlite(|conn| sqlite::mark_document_indexed(conn, &doc_id))?;
+    state.with_sqlite(|conn| {
+        sqlite::mark_document_indexed(conn, &doc_id)?;
+        sqlite::maybe_set_index_embed_model(conn, embed)?;
+        Ok(())
+    })?;
     Ok(true)
 }
 
@@ -628,6 +632,73 @@ mod tests {
         let edges = snap["edges"].as_array().expect("edges");
         assert!(nodes.len() >= 2, "expected at least 2 graph nodes");
         assert!(edges.len() >= 1, "expected at least 1 graph edge");
+
+        let index_model = state
+            .with_sqlite(|c| sqlite::get_setting(c, "index_embed_model"))
+            .expect("index_embed_model")
+            .expect("index_embed_model set after import");
+        assert_eq!(index_model, "nomic-embed-text");
+
+        crate::services::index_rebuild::reset_library(&state).expect("reset_library");
+        state
+            .with_sqlite(|conn| {
+                let n: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(n, 0);
+                let vec_n: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_embeddings'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(vec_n, 0);
+                assert!(sqlite::get_setting(conn, "index_embed_model")?.is_none());
+                Ok(())
+            })
+            .expect("empty after reset");
+        let snap_reset = graph_index_service::get_graph_snapshot(&state, 400).expect("snap reset");
+        assert!(
+            snap_reset["nodes"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(false),
+            "expected empty graph after reset"
+        );
+
+        let (tx_r, rx_r) = mpsc::channel();
+        let st_r = state.clone();
+        let paths_r = paths.clone();
+        let vault_r = vault_root.clone();
+        std::thread::spawn(move || {
+            let res = run_import_job(
+                st_r,
+                None,
+                "test-job-rebuild".into(),
+                vault_r,
+                paths_r,
+                "nomic-embed-text".into(),
+                "phi4-mini".into(),
+            );
+            let _ = tx_r.send(res);
+        });
+        rx_r.recv_timeout(Duration::from_secs(180))
+            .expect("rebuild import timed out")
+            .expect("rebuild import");
+        state
+            .with_sqlite(|conn| {
+                let note_status: String = conn
+                    .query_row(
+                        "SELECT status FROM documents WHERE path = ?1",
+                        [&note_s],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(note_status, "indexed");
+                Ok(())
+            })
+            .expect("re-indexed after reset");
 
         let removed_path = vault.path().join("skip-me.md");
         std::fs::write(&removed_path, "Skip this note.\n\nSecond.\n\nThird.\n").expect("skip md");
