@@ -30,6 +30,7 @@ use tauri::Manager;
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let resolver = app.path();
             let data_dir = resolver
@@ -88,6 +89,7 @@ pub fn run() {
             commands::warm_chat_model,
             commands::list_documents,
             commands::get_document_preview,
+            commands::open_document,
             commands::send_chat_query,
             commands::import_documents,
             commands::retry_failed_import,

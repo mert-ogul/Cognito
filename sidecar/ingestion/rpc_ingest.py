@@ -42,7 +42,10 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
     out: list[dict[str, Any]] = []
     for it in params["items"]:
         ftype = str(it.get("fileType", "markdown"))
-        drafts = chunk_semantic(str(it.get("text", "")), ftype)
+        pages = it.get("pages")
+        if pages is not None and not isinstance(pages, list):
+            pages = None
+        drafts = chunk_semantic(str(it.get("text", "")), ftype, pages=pages)
         chunks = []
         for ord_i, ch in enumerate(drafts):
             chunks.append(

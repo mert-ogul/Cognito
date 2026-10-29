@@ -259,6 +259,75 @@ pub fn document_preview_text(conn: &Connection, doc_id: &str) -> CognitoResult<O
     Ok(Some(truncated))
 }
 
+#[derive(Debug, Clone)]
+pub struct ChunkWindow {
+    pub text: String,
+    pub highlight: String,
+    pub page_start: Option<i64>,
+    pub page_end: Option<i64>,
+}
+
+pub fn chunk_window(
+    conn: &Connection,
+    document_id: &str,
+    chunk_id: &str,
+) -> CognitoResult<Option<ChunkWindow>> {
+    let row: Option<(i64, String, Option<i64>, Option<i64>)> = conn
+        .query_row(
+            "SELECT ordinal, text, page_start, page_end FROM chunks
+             WHERE id = ?1 AND document_id = ?2",
+            params![chunk_id, document_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    let Some((ordinal, cited, page_start, page_end)) = row else {
+        return Ok(None);
+    };
+    let prev: Option<String> = conn
+        .query_row(
+            "SELECT text FROM chunks WHERE document_id = ?1 AND ordinal = ?2",
+            params![document_id, ordinal - 1],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    let next: Option<String> = conn
+        .query_row(
+            "SELECT text FROM chunks WHERE document_id = ?1 AND ordinal = ?2",
+            params![document_id, ordinal + 1],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    let mut parts = Vec::new();
+    if let Some(p) = prev {
+        parts.push(p);
+    }
+    parts.push(cited.clone());
+    if let Some(n) = next {
+        parts.push(n);
+    }
+    Ok(Some(ChunkWindow {
+        text: parts.join("\n\n"),
+        highlight: cited,
+        page_start,
+        page_end,
+    }))
+}
+
+pub fn document_path_by_id(conn: &Connection, id: &str) -> CognitoResult<Option<String>> {
+    let row = conn
+        .query_row(
+            "SELECT path FROM documents WHERE id = ?1",
+            [id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(row)
+}
+
 pub fn failed_document_paths(conn: &Connection, limit: i64) -> CognitoResult<Vec<String>> {
     let mut stmt = conn
         .prepare("SELECT path FROM documents WHERE status = 'failed' ORDER BY imported_at LIMIT ?1")
@@ -654,5 +723,43 @@ mod tests {
         let rows = list_documents(&c).expect("list");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "keep");
+    }
+
+    #[test]
+    fn chunk_window_first_middle_last() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("v.sqlite");
+        let c = open_sqlite(&p).expect("open");
+        insert_document_row(
+            &c,
+            "d1",
+            "/a.md",
+            "a",
+            "markdown",
+            "h",
+            None,
+            "indexed",
+            None,
+        )
+        .expect("doc");
+        insert_chunk_row(&c, "c0", "d1", 0, Some(1), Some(1), "first", 1, "h0").expect("c0");
+        insert_chunk_row(&c, "c1", "d1", 1, Some(2), Some(2), "middle", 1, "h1").expect("c1");
+        insert_chunk_row(&c, "c2", "d1", 2, Some(3), Some(3), "last", 1, "h2").expect("c2");
+
+        let first = chunk_window(&c, "d1", "c0").expect("q").expect("first");
+        assert_eq!(first.highlight, "first");
+        assert_eq!(first.text, "first\n\nmiddle");
+        assert_eq!(first.page_start, Some(1));
+        assert_eq!(first.page_end, Some(1));
+
+        let mid = chunk_window(&c, "d1", "c1").expect("q").expect("mid");
+        assert_eq!(mid.highlight, "middle");
+        assert_eq!(mid.text, "first\n\nmiddle\n\nlast");
+        assert_eq!(mid.page_start, Some(2));
+
+        let last = chunk_window(&c, "d1", "c2").expect("q").expect("last");
+        assert_eq!(last.highlight, "last");
+        assert_eq!(last.text, "middle\n\nlast");
+        assert_eq!(last.page_end, Some(3));
     }
 }

@@ -23,17 +23,48 @@ pub async fn list_documents(
 pub async fn get_document_preview(
     state: tauri::State<'_, SharedState>,
     document_id: String,
-    highlight_snippet: Option<String>,
+    chunk_id: Option<String>,
 ) -> Result<DocumentPreview, String> {
     run_blocking(state, move |st| {
+        if let Some(ref cid) = chunk_id {
+            let win = st.with_sqlite(|c| sqlite::chunk_window(c, &document_id, cid))?;
+            if let Some(w) = win {
+                return Ok(DocumentPreview {
+                    document_id,
+                    text: Some(w.text),
+                    highlight_snippet: Some(w.highlight),
+                    page_start: w.page_start,
+                    page_end: w.page_end,
+                });
+            }
+        }
         let text = st.with_sqlite(|c| sqlite::document_preview_text(c, &document_id))?;
         Ok(DocumentPreview {
             document_id,
             text,
-            highlight_snippet,
+            highlight_snippet: None,
+            page_start: None,
+            page_end: None,
         })
     })
     .await
+}
+
+#[tauri::command]
+pub async fn open_document(
+    app: AppHandle,
+    state: tauri::State<'_, SharedState>,
+    document_id: String,
+) -> Result<(), String> {
+    let path = state
+        .with_sqlite(|c| sqlite::document_path_by_id(c, &document_id))
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Document not found.".to_string())?;
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub(crate) fn spawn_import_job(

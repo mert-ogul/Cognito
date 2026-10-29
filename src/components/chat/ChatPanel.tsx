@@ -4,6 +4,7 @@ import { ChatWelcome } from "@/components/chat/ChatWelcome";
 import { useRetrievalMode } from "@/context/RetrievalModeContext";
 import {
   getDocumentPreview,
+  openDocument,
   sendChatQuery,
   warmChatModel,
   type AppHealth,
@@ -166,12 +167,20 @@ export function ChatPanel({ health }: Props) {
   const openCitation = useCallback(
     async (c: CitationItem) => {
       setHighlightNodeIds(c.nodeIds ?? []);
-      const prev = await getDocumentPreview(c.documentId, c.snippet.slice(0, 400));
+      const prev = await getDocumentPreview(c.documentId, c.chunkId);
+      const pageStart = prev.pageStart ?? c.pageStart;
+      const pageEnd = prev.pageEnd ?? c.pageEnd;
+      let pageLabel = "";
+      if (pageStart != null && pageEnd != null && pageEnd !== pageStart) {
+        pageLabel = ` · pp. ${pageStart}–${pageEnd}`;
+      } else if (pageStart != null) {
+        pageLabel = ` · p. ${pageStart}`;
+      }
       setPreview({
         documentId: prev.documentId,
         text: prev.text,
         highlight: prev.highlightSnippet ?? c.snippet,
-        title: c.title,
+        title: `${c.title}${pageLabel}`,
       });
     },
     [setHighlightNodeIds],
@@ -283,15 +292,25 @@ export function ChatPanel({ health }: Props) {
           aria-modal
         >
           <div className="max-h-[80vh] w-full max-w-lg overflow-auto rounded-lg border border-[var(--border)] bg-[var(--background)] p-4 shadow-lg">
-            <div className="mb-2 flex justify-between gap-2">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-medium">{preview.title}</h3>
-              <button
-                type="button"
-                className="text-xs text-[var(--muted)]"
-                onClick={() => setPreview(null)}
-              >
-                Close
-              </button>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void openDocument(preview.documentId)}
+                >
+                  Open file
+                </Button>
+                <button
+                  type="button"
+                  className="text-xs text-[var(--muted)]"
+                  onClick={() => setPreview(null)}
+                >
+                  Close
+                </button>
+              </div>
             </div>
             <PreviewBody text={preview.text} highlight={preview.highlight} />
           </div>
@@ -301,16 +320,31 @@ export function ChatPanel({ health }: Props) {
   );
 }
 
-function PreviewBody({ text, highlight }: { text: string | null; highlight: string | null }) {
+export function PreviewBody({ text, highlight }: { text: string | null; highlight: string | null }) {
   if (!text) {
     return <p className="text-xs text-[var(--muted)]">No preview text.</p>;
   }
-  if (!highlight || !text.includes(highlight.slice(0, 20))) {
+  if (!highlight) {
     return <p className="whitespace-pre-wrap text-xs">{text}</p>;
   }
-  const i = text.indexOf(highlight.slice(0, Math.min(40, highlight.length)));
+  let i = text.indexOf(highlight);
   if (i < 0) {
-    return <p className="whitespace-pre-wrap text-xs">{text}</p>;
+    const prefixLen = Math.min(40, highlight.length);
+    const prefix = highlight.slice(0, prefixLen);
+    i = text.indexOf(prefix);
+    if (i < 0) {
+      return <p className="whitespace-pre-wrap text-xs">{text}</p>;
+    }
+    const before = text.slice(0, i);
+    const mid = text.slice(i, i + highlight.length);
+    const after = text.slice(i + highlight.length);
+    return (
+      <p className="whitespace-pre-wrap text-xs">
+        {before}
+        <mark className="bg-yellow-200/40 dark:bg-yellow-500/30">{mid}</mark>
+        {after}
+      </p>
+    );
   }
   const before = text.slice(0, i);
   const mid = text.slice(i, i + highlight.length);
