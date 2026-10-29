@@ -29,11 +29,13 @@ fn load_context(state: &SharedState) -> CognitoResult<(PathBuf, String, String)>
 
 fn purge_then_remove(state: &SharedState, path: &Path) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
+    let duck_path = state.duckdb_path();
     let id = state.with_sqlite(|c| sqlite::document_id_by_path(c, &sp(path)))?;
     let Some(doc_id) = id else {
         return Ok(());
     };
     let cids = state.with_sqlite(|c| sqlite::list_chunk_ids_for_document(c, &doc_id))?;
+    crate::services::ingest_graph::sidecar_purge_graph(state, &duck_path, &doc_id)?;
     if !cids.is_empty() {
         state.sidecar.with_session(|s| {
             s.request(

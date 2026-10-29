@@ -497,6 +497,8 @@ pub fn run_single_file(
 mod tests {
     use super::*;
     use crate::app::state::AppState;
+    use crate::services::file_watcher;
+    use crate::services::graph_index_service;
     use crate::sidecar::SidecarPool;
     use std::sync::mpsc;
     use std::sync::Arc;
@@ -506,6 +508,7 @@ mod tests {
     #[ignore = "needs the sidecar venv: cd sidecar && uv sync"]
     fn import_job_indexes_md_and_fails_broken_pdf_without_deadlock() {
         std::env::set_var("COGNITO_MOCK_EMBED", "1");
+        std::env::set_var("COGNITO_MOCK_EXTRACT", "1");
 
         let data = tempfile::tempdir().expect("data tempdir");
         let vault = tempfile::tempdir().expect("vault tempdir");
@@ -537,6 +540,12 @@ mod tests {
             .unwrap_or_else(|_| broken_path.clone());
         let paths = vec![note_abs.clone(), broken_abs.clone()];
         let vault_root = vault.path().to_path_buf();
+        state
+            .with_sqlite(|c| {
+                sqlite::upsert_setting(c, "vault_path", &sp(&vault_root))?;
+                Ok(())
+            })
+            .expect("vault setting");
 
         let (tx, rx) = mpsc::channel();
         let st = state.clone();
@@ -571,6 +580,14 @@ mod tests {
                     )
                     .map_err(|e| CognitoError::Database(e.to_string()))?;
                 assert_eq!(note_status, "indexed");
+                let graph_status: String = conn
+                    .query_row(
+                        "SELECT graph_status FROM documents WHERE path = ?1",
+                        [&note_s],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(graph_status, "ok");
                 let chunk_n: i64 = conn
                     .query_row(
                         "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.path = ?1",
@@ -590,6 +607,12 @@ mod tests {
                 Ok(())
             })
             .expect("assert first import rows");
+
+        let snap = graph_index_service::get_graph_snapshot(&state, 400).expect("snapshot");
+        let nodes = snap["nodes"].as_array().expect("nodes");
+        let edges = snap["edges"].as_array().expect("edges");
+        assert!(nodes.len() >= 2, "expected at least 2 graph nodes");
+        assert!(edges.len() >= 1, "expected at least 1 graph edge");
 
         // Lock still usable from the test thread (no permanent deadlock).
         state
@@ -646,5 +669,58 @@ mod tests {
                 Ok(())
             })
             .expect("assert second import rows");
+
+        std::fs::write(
+            &note_abs,
+            "Updated note about Ada Chen and Meridian Labs in Cambridge.\n\n\
+             Second paragraph still mentions Priya Nair.\n\n\
+             Third paragraph still covers Jonah Hale in Boston.\n",
+        )
+        .expect("rewrite note.md");
+        run_single_file(
+            &state,
+            None,
+            &vault_root,
+            &note_abs,
+            "nomic-embed-text",
+            "phi4-mini",
+        )
+        .expect("reindex note");
+        state
+            .with_sqlite(|conn| {
+                let (status, gstat): (String, String) = conn
+                    .query_row(
+                        "SELECT status, graph_status FROM documents WHERE path = ?1",
+                        [&note_s],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(status, "indexed");
+                assert_eq!(gstat, "ok");
+                Ok(())
+            })
+            .expect("assert reindex");
+
+        std::fs::remove_file(&note_abs).expect("delete note.md");
+        file_watcher::handle_watch_paths(&state, &[note_abs.clone()]);
+        state
+            .with_sqlite(|conn| {
+                let status: String = conn
+                    .query_row(
+                        "SELECT status FROM documents WHERE path = ?1",
+                        [&note_s],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                assert_eq!(status, "removed");
+                Ok(())
+            })
+            .expect("assert removed");
+        let snap_after = graph_index_service::get_graph_snapshot(&state, 400).expect("snap after");
+        let nodes_after = snap_after["nodes"].as_array().expect("nodes after");
+        assert!(
+            nodes_after.is_empty(),
+            "expected empty graph after document purge"
+        );
     }
 }

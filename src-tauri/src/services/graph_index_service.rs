@@ -1,35 +1,61 @@
-//! DuckDB graph reads for Tauri commands (2-hop, snapshot, evidence).
+//! Graph index reads via sidecar RPC (Python owns graph.duckdb).
 
 use crate::app::state::SharedState;
-use crate::db::duckdb::graph_queries;
 use crate::errors::CognitoResult;
-use serde_json::Value;
+use serde_json::{json, Value};
 
-pub fn search_graph_nodes(state: &SharedState, query: &str, limit: usize) -> CognitoResult<Vec<Value>> {
-    state.with_duckdb(|c| graph_queries::search_nodes(c, query, limit))
+fn sp(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+pub fn search_graph_nodes(
+    state: &SharedState,
+    query: &str,
+    limit: usize,
+) -> CognitoResult<Vec<Value>> {
+    let duck = state.duckdb_path();
+    let v = state.sidecar.with_session(|s| {
+        s.request(
+            "search_graph",
+            json!({
+                "duckdb_path": sp(&duck),
+                "query": query,
+                "limit": limit,
+            }),
+        )
+    })?;
+    Ok(v.get("nodes")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default())
 }
 
 pub fn get_graph_snapshot(state: &SharedState, limit_nodes: usize) -> CognitoResult<Value> {
-    let edge_cap = (limit_nodes * 6).min(800);
-    state.with_duckdb(|c| graph_queries::graph_snapshot(c, limit_nodes, edge_cap))
-}
-
-pub fn get_node_by_normalized_name(state: &SharedState, normalized: &str) -> CognitoResult<Option<Value>> {
-    state.with_duckdb(|c| graph_queries::node_by_normalized_name(c, normalized))
-}
-
-pub fn get_neighbors_two_hop(state: &SharedState, node_id: &str) -> CognitoResult<Value> {
-    state.with_duckdb(|c| graph_queries::neighbors_two_hop(c, node_id))
-}
-
-pub fn get_edges_for_document(state: &SharedState, document_id: &str) -> CognitoResult<Vec<Value>> {
-    state.with_duckdb(|c| graph_queries::edges_for_document(c, document_id))
-}
-
-pub fn get_edges_for_chunk(state: &SharedState, chunk_id: &str) -> CognitoResult<Vec<Value>> {
-    state.with_duckdb(|c| graph_queries::edges_for_chunk(c, chunk_id))
+    let duck = state.duckdb_path();
+    state.sidecar.with_session(|s| {
+        s.request(
+            "get_graph_snapshot",
+            json!({
+                "duckdb_path": sp(&duck),
+                "limit_nodes": limit_nodes,
+            }),
+        )
+    })
 }
 
 pub fn get_node_detail(state: &SharedState, node_id: &str) -> CognitoResult<Option<Value>> {
-    state.with_duckdb(|c| graph_queries::node_detail(c, node_id))
+    let duck = state.duckdb_path();
+    let v = state.sidecar.with_session(|s| {
+        s.request(
+            "get_graph_node_detail",
+            json!({
+                "duckdb_path": sp(&duck),
+                "node_id": node_id,
+            }),
+        )
+    })?;
+    if v.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(v))
 }

@@ -18,7 +18,9 @@ use services::file_watcher;
 use services::model_warm;
 use sidecar::SidecarPool;
 use sidecar_paths::resolve_sidecar_paths;
+use serde_json::json;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
 use tauri::Manager;
@@ -39,10 +41,23 @@ pub fn run() {
             state
                 .with_sqlite(|_| Ok(()))
                 .map_err(|e| e.to_string())?;
-            state
-                .with_duckdb(|_| Ok(()))
-                .map_err(|e| e.to_string())?;
             state.sidecar.ensure().map_err(|e| e.to_string())?;
+            {
+                let st = state.clone();
+                std::thread::spawn(move || {
+                    let duck = st.duckdb_path();
+                    let ok = st
+                        .sidecar
+                        .with_session(|s| {
+                            s.request(
+                                "init_graph_store",
+                                json!({ "duckdb_path": duck.to_string_lossy() }),
+                            )
+                        })
+                        .is_ok();
+                    st.graph_store_ready.store(ok, Ordering::SeqCst);
+                });
+            }
             let (reload_tx, reload_rx) = mpsc::channel::<PathBuf>();
             {
                 let mut wg = state
@@ -74,10 +89,6 @@ pub fn run() {
             commands::update_settings,
             commands::search_graph,
             commands::get_graph_snapshot,
-            commands::get_graph_node_by_normalized_name,
-            commands::get_graph_neighbors_two_hop,
-            commands::get_graph_edges_for_document,
-            commands::get_graph_edges_for_chunk,
             commands::get_graph_node_detail,
         ]);
     let app = builder
