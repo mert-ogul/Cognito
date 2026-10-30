@@ -76,7 +76,7 @@ try {
     { cwd: sidecarDir, stdio: "inherit" },
   );
 
-  const copyEntries = ["main.py", "common", "extraction", "ingestion", "query", "migrations"];
+  const copyEntries = ["main.py", "common", "ingestion", "query"];
   for (const name of copyEntries) {
     const src = path.join(sidecarDir, name);
     if (!fs.existsSync(src)) {
