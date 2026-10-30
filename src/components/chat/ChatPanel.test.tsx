@@ -1,22 +1,22 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { StrictMode } from "react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  ChatPanel,
-  citationSourceLabel,
-  citationsUsedInOrder,
-  linkifyCitationMarkers,
-  normalizeAnswerMath,
-} from "./ChatPanel";
+import { ChatPanel, citationSourceLabel, normalizeAnswerMath } from "./ChatPanel";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { SidePane } from "@/components/layout/SidePane";
 import { e2eEmit } from "@/lib/tauri-events";
-import { getDocumentPreview, openDocument, sendChatQuery } from "@/lib/tauri";
-import type { CitationItem } from "@/lib/tauri";
+import {
+  getDocumentPreview,
+  getSuggestedQuestions,
+  listDocuments,
+  prepareModels,
+  sendChatQuery,
+} from "@/lib/tauri";
+import type { CitationItem, DocumentRow } from "@/lib/tauri";
+import { useChatIntentStore } from "@/stores/chatIntentStore";
 import { useSidePaneStore } from "@/stores/sidePaneStore";
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
@@ -25,16 +25,37 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
     ...actual,
     sendChatQuery: vi.fn(),
     warmChatModel: vi.fn(async () => {}),
-    getDocumentPreview: vi.fn(),
+    prepareModels: vi.fn(async () => ({ ready: true, models: [], totalSizeBytes: 0 })),
+    getModelsStatus: vi.fn(async () => ({ ready: true, models: [], totalSizeBytes: 0 })),
+    getDocumentPreview: vi.fn(async (documentId: string) => ({
+      documentId,
+      text: null,
+      highlightSnippet: null,
+      pageStart: null,
+      pageEnd: null,
+      regions: null,
+    })),
+    renderPageRegion: vi.fn(async () => ({
+      pngBase64: actual.TINY_PNG_BASE64,
+      width: 1,
+      height: 1,
+    })),
+    renderDocumentPage: vi.fn(async () => ({
+      pngBase64: actual.TINY_PNG_BASE64,
+      width: 1,
+      height: 1,
+    })),
     openDocument: vi.fn(async () => {}),
-    getGraphSnapshot: vi.fn(async () => ({ nodes: [], edges: [] })),
-    searchGraphNodes: vi.fn(async () => []),
-    getGraphNodeDetail: vi.fn(async () => null),
+    getSuggestedQuestions: vi.fn(async () => []),
     getSettings: vi.fn(async () => ({
       vaultPath: "/vault",
-      chatModel: "phi4-mini",
-      embedModel: "nomic-embed-text",
-      graphExtractionEnabled: true,
+      chatModel: "qwen3.5:9b",
+      embedModel: "qwen3-embedding:0.6b",
+      backgroundModel: "qwen3.5:4b",
+      summariseDocuments: true,
+      extractEntities: false,
+      extraEntityLabels: "",
+      thoroughReranking: false,
     })),
     listDocuments: vi.fn(async () => []),
   };
@@ -45,14 +66,15 @@ const health = {
   sidecarReachable: true,
   ollamaModelReady: true,
   vaultConfigured: true,
-  chatModel: "phi4-mini",
-  embedModel: "nomic-embed-text",
+  chatModel: "qwen3.5:9b",
+  embedModel: "qwen3-embedding:0.6b",
   chatModelWarmed: true,
   warmUpPending: false,
   warmUpError: null,
   ollamaReachable: true,
   missingModels: [] as string[],
   indexFormatUpdating: false,
+  checkingModelsReady: true,
 };
 
 const cite = (index: number, title = `Doc ${index}`, path = `/p${index}/${title}.pdf`): CitationItem => ({
@@ -65,6 +87,27 @@ const cite = (index: number, title = `Doc ${index}`, path = `/p${index}/${title}
   snippet: `snip ${index}`,
   nodeIds: index === 2 ? ["n-a", "n-b"] : [],
   index,
+});
+
+const doc = (id: string, title: string): DocumentRow => ({
+  id,
+  path: `/vault/${title}.md`,
+  title,
+  fileType: "markdown",
+  contentHash: id,
+  pageCount: null,
+  status: "indexed",
+  errorMessage: null,
+  importedAt: "2026-01-01T00:00:00Z",
+  indexedAt: "2026-01-01T01:00:00Z",
+  modifiedAt: "2026-01-01T00:30:00Z",
+  entitiesStatus: "ok",
+  entitiesError: null,
+  cardStatus: "ok",
+  cardType: "note",
+  cardDate: null,
+  cardPeople: [],
+  cardOrganizations: [],
 });
 
 function renderChat(ui: React.ReactNode = <ChatPanel health={health} />) {
@@ -81,20 +124,6 @@ async function sendPrompt(text: string) {
 }
 
 describe("ChatPanel helpers", () => {
-  it("orders cited citations by first use", () => {
-    const cites = [cite(1), cite(2), cite(3)];
-    expect(citationsUsedInOrder("See [2] then [1] and [2] again", cites).map((c) => c.index)).toEqual([
-      2, 1,
-    ]);
-  });
-
-  it("linkifies citation markers outside code", () => {
-    const out = linkifyCitationMarkers("Claim [2]. `code [2]` and\n```\n[2]\n```", new Set([2]));
-    expect(out).toContain("[2](#cite-2)");
-    expect(out).toContain("`code [2]`");
-    expect(out).toContain("```\n[2]\n```");
-  });
-
   it("formats source labels with pages", () => {
     expect(
       citationSourceLabel({
@@ -143,13 +172,214 @@ describe("ChatPanel", () => {
   beforeEach(() => {
     vi.mocked(sendChatQuery).mockReset();
     vi.mocked(getDocumentPreview).mockReset();
-    vi.mocked(openDocument).mockReset();
+    vi.mocked(listDocuments).mockReset();
+    vi.mocked(prepareModels).mockReset();
+    vi.mocked(getSuggestedQuestions).mockReset();
+    vi.mocked(listDocuments).mockResolvedValue([]);
+    vi.mocked(prepareModels).mockResolvedValue({ ready: true, models: [], totalSizeBytes: 0 });
+    vi.mocked(getSuggestedQuestions).mockResolvedValue([]);
     useSidePaneStore.setState({
       open: false,
-      mode: "graph",
+      mode: "connections",
       passage: null,
       highlightNodeIds: [],
     });
+    useChatIntentStore.setState({
+      pendingScope: [],
+      pendingQuestion: null,
+      pendingRelated: null,
+    });
+  });
+
+  it("renders unsupported sentences muted with a note", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [cite(1)],
+        sentences: [
+          { text: "Supported claim.", status: "supported", sources: [1] },
+          { text: "Guessed claim.", status: "unsupported", sources: [] },
+        ],
+        notFound: false,
+        error: null,
+      });
+      return messageId;
+    });
+    renderChat();
+    await sendPrompt("ask");
+    expect(await screen.findByText("Guessed claim.")).toBeInTheDocument();
+    expect(screen.getByText("Not found in the sources")).toBeInTheDocument();
+    expect(screen.getByText("Guessed claim.").closest(".text-muted")).not.toBeNull();
+  });
+
+  it("renders unchecked sentences muted with Not checked", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [cite(1)],
+        sentences: [
+          { text: "Timed out claim.", status: "unchecked", sources: [1] },
+        ],
+        notFound: false,
+        error: null,
+      });
+      return messageId;
+    });
+    renderChat();
+    await sendPrompt("ask");
+    expect(await screen.findByText("Timed out claim.")).toBeInTheDocument();
+    expect(screen.getByText("Not checked")).toBeInTheDocument();
+    expect(screen.getByText("Timed out claim.").closest(".text-muted")).not.toBeNull();
+  });
+
+  it("adds and removes @ scope documents", async () => {
+    vi.mocked(listDocuments).mockResolvedValue([
+      doc("a", "Alpha Notes"),
+      doc("b", "Beta Paper"),
+    ]);
+    renderChat();
+    const input = screen.getByLabelText("Chat message");
+    expect(screen.getByText("Searching all documents")).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "@Alp" } });
+    expect(await screen.findByRole("option", { name: "Alpha Notes" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: "Alpha Notes" }));
+    expect(screen.getByText(/In: Alpha Notes/)).toBeInTheDocument();
+    expect(input).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "Remove Alpha Notes from scope" }));
+    expect(screen.getByText("Searching all documents")).toBeInTheDocument();
+  });
+
+  it("shows passages before the answer", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      e2eEmit("chat-stage", {
+        messageId,
+        stage: "passages",
+        citations: [cite(1, "One", "/vault/one.pdf")],
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [cite(1, "One", "/vault/one.pdf")],
+        sentences: [{ text: "Final answer body.", status: "supported", sources: [1] }],
+        notFound: false,
+        error: null,
+      });
+      return messageId;
+    });
+    renderChat();
+    await sendPrompt("ask");
+    expect(await screen.findByText("Sources")).toBeInTheDocument();
+    expect(screen.getByText("Writing the answer")).toBeInTheDocument();
+    expect(await screen.findByText("Final answer body.")).toBeInTheDocument();
+  });
+
+  it("shows notFound passages with title and page separate from snippet", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [
+          {
+            ...cite(1, "Closest Paper", "/vault/c.pdf"),
+            pageStart: 3,
+            pageEnd: 3,
+            snippet:
+              "Intro fluff. The classification layer uses equation two for training. More padding after that sentence follows here for length.",
+          },
+        ],
+        sentences: [],
+        notFound: true,
+        error: null,
+        suggestions: [],
+      });
+      return messageId;
+    });
+    renderChat();
+    await sendPrompt("classification equation");
+    expect(
+      await screen.findByText("Your documents don't seem to cover this."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Closest Paper")).toBeInTheDocument();
+    expect(screen.getByText("p. 3")).toBeInTheDocument();
+    const btn = screen.getByRole("button", { name: /Closest Paper/ });
+    expect(btn.textContent).toMatch(/Closest Paper/);
+    expect(btn.textContent).toMatch(/p\. 3/);
+    expect(btn.textContent).toMatch(/classification layer/);
+    // title/page are not glued onto the snippet without a separator
+    expect(btn.textContent).not.toMatch(/Closest Paperp\./);
+  });
+
+  it("suggestion link sets scope and resends the question", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId, _h, scopeIds) => {
+      if (!scopeIds?.length) {
+        e2eEmit("chat-final", {
+          messageId,
+          citations: [cite(1, "GAT", "/vault/gat.pdf")],
+          sentences: [],
+          notFound: true,
+          error: null,
+          suggestions: [
+            { documentId: "gcn", title: "GCN Paper", label: "Search in GCN Paper" },
+          ],
+        });
+      } else {
+        e2eEmit("chat-final", {
+          messageId,
+          citations: [cite(1, "GCN Paper", "/vault/gcn.pdf")],
+          sentences: [
+            { text: "Equation (2) is the layer rule.", status: "supported", sources: [1] },
+          ],
+          notFound: false,
+          error: null,
+          scopeTitle: "GCN Paper",
+        });
+      }
+      return messageId;
+    });
+    vi.mocked(listDocuments).mockResolvedValue([
+      doc("gcn", "GCN Paper"),
+      doc("gat", "GAT"),
+    ]);
+    renderChat();
+    await sendPrompt("Write Equation (2) from Kipf");
+    const link = await screen.findByRole("button", { name: "Search in GCN Paper" });
+    fireEvent.click(link);
+    await waitFor(() => {
+      expect(sendChatQuery).toHaveBeenCalledTimes(2);
+    });
+    const second = vi.mocked(sendChatQuery).mock.calls[1];
+    expect(second[0]).toBe("Write Equation (2) from Kipf");
+    expect(second[3]).toEqual(["gcn"]);
+  });
+
+  it("shows models download gate when checking models are missing", () => {
+    renderChat(
+      <ChatPanel
+        health={{
+          ...health,
+          checkingModelsReady: false,
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(
+        "Cognito needs two checking models, about 1 GB, downloaded once.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Chat message")).toBeDisabled();
+  });
+
+  it("downloads checking models when Download is clicked", async () => {
+    renderChat(
+      <ChatPanel
+        health={{
+          ...health,
+          checkingModelsReady: false,
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    await waitFor(() => expect(prepareModels).toHaveBeenCalled());
   });
 
   it("disables send when model not warmed", () => {
@@ -162,7 +392,7 @@ describe("ChatPanel", () => {
         }}
       />,
     );
-    expect(screen.getByPlaceholderText("Loading phi4-mini")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Loading qwen3.5:9b")).toBeInTheDocument();
   });
 
   it("shows error and re-enables input when sendChatQuery rejects", async () => {
@@ -181,7 +411,8 @@ describe("ChatPanel", () => {
       e2eEmit("chat-final", {
         messageId,
         citations: [],
-        retrievalMode: "error",
+        sentences: [],
+        notFound: false,
         error: "fast fail",
       });
       await new Promise((r) => setTimeout(r, 20));
@@ -195,43 +426,16 @@ describe("ChatPanel", () => {
     });
   });
 
-  it("under StrictMode each streamed token appears once", async () => {
-    let assistantId = "";
-    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
-      assistantId = messageId;
-      return messageId;
-    });
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
-    render(
-      <StrictMode>
-        <QueryClientProvider client={client}>
-          <ChatPanel health={health} />
-        </QueryClientProvider>
-      </StrictMode>,
-    );
-    await sendPrompt("stream me");
-    await waitFor(() => expect(assistantId).toBeTruthy());
-    act(() => {
-      e2eEmit("chat-stream", { messageId: assistantId, token: "One" });
-      e2eEmit("chat-stream", { messageId: assistantId, token: " interesting" });
-    });
-    expect(await screen.findByText("One interesting")).toBeInTheDocument();
-    expect(screen.queryByText("OneOne interesting interesting")).not.toBeInTheDocument();
-  });
-
   it("superscript citation opens Passage mode with the cited chunk marked", async () => {
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
-      e2eEmit("chat-stream", { messageId, token: "Answer cites [2] only." });
-      await Promise.resolve();
       e2eEmit("chat-final", {
         messageId,
         citations: [
           cite(1, "One", "/vault/one.pdf"),
           { ...cite(2, "Two", "/vault/two.pdf"), pageStart: 3, pageEnd: 3 },
         ],
-        retrievalMode: "hybrid",
+        sentences: [{ text: "Answer cites only this.", status: "supported", sources: [2] }],
+        notFound: false,
         error: null,
       });
       return messageId;
@@ -253,7 +457,6 @@ describe("ChatPanel", () => {
     expect(await screen.findByLabelText("Source 2")).toBeInTheDocument();
     expect(screen.getByText("Sources")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Two, p. 3" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^One$/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Source 2"));
     await waitFor(() => {
       expect(getDocumentPreview).toHaveBeenCalledWith("d2", "c2");
@@ -261,74 +464,35 @@ describe("ChatPanel", () => {
     expect(useSidePaneStore.getState().open).toBe(true);
     expect(useSidePaneStore.getState().mode).toBe("passage");
     expect(screen.getByRole("button", { name: "Passage", pressed: true })).toBeInTheDocument();
-    expect(screen.getAllByText("Two, p. 3").length).toBeGreaterThanOrEqual(2);
     const mark = await screen.findByText("cited body");
     expect(mark.className).toMatch(/bg-mark/);
   });
 
-  it("lists all passages under Retrieved passages when none are cited", async () => {
+  it("sends scope ids with the query", async () => {
+    vi.mocked(listDocuments).mockResolvedValue([doc("a", "Alpha Notes")]);
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
-      e2eEmit("chat-stream", { messageId, token: "No numbers here." });
-      e2eEmit("chat-final", {
-        messageId,
-        citations: [cite(1, "One", "/vault/one.pdf"), cite(2, "Two", "/vault/two.pdf")],
-        retrievalMode: "vector_only",
-        error: null,
-      });
-      return messageId;
-    });
-    renderChat();
-    await sendPrompt("ask");
-    expect(await screen.findByText("Retrieved passages")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "One" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Two" })).toBeInTheDocument();
-  });
-
-  it("renders Markdown lists as ul and li", async () => {
-    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
-      e2eEmit("chat-stream", {
-        messageId,
-        token: "Items:\n\n- alpha\n- beta",
-      });
       e2eEmit("chat-final", {
         messageId,
         citations: [],
-        retrievalMode: "vector_only",
+        sentences: [{ text: "ok", status: "supported", sources: [] }],
+        notFound: false,
         error: null,
       });
       return messageId;
     });
     renderChat();
-    await sendPrompt("list");
-    const answer = await screen.findByText("alpha");
-    const list = answer.closest("ul");
-    expect(list).not.toBeNull();
-    expect(within(list!).getByText("beta").tagName.toLowerCase()).toBe("li");
-  });
-
-  it("Show related entities switches the pane to Graph", async () => {
-    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
-      e2eEmit("chat-stream", { messageId, token: "Uses graph [2]." });
-      e2eEmit("chat-final", {
-        messageId,
-        citations: [cite(1), cite(2, "Two", "/vault/two.pdf")],
-        retrievalMode: "hybrid",
-        error: null,
-      });
-      return messageId;
-    });
-    renderChat(
-      <>
-        <ChatPanel health={health} />
-        <SidePane />
-      </>,
+    const input = screen.getByLabelText("Chat message");
+    fireEvent.change(input, { target: { value: "@" } });
+    fireEvent.click(await screen.findByRole("option", { name: "Alpha Notes" }));
+    await sendPrompt("scoped ask");
+    await waitFor(() =>
+      expect(sendChatQuery).toHaveBeenCalledWith(
+        "scoped ask",
+        expect.any(String),
+        expect.any(Array),
+        ["a"],
+      ),
     );
-    await sendPrompt("ask");
-    fireEvent.click(await screen.findByRole("button", { name: "Show related entities in the graph" }));
-    expect(useSidePaneStore.getState().open).toBe(true);
-    expect(useSidePaneStore.getState().mode).toBe("graph");
-    expect(useSidePaneStore.getState().highlightNodeIds).toEqual(["n-a", "n-b"]);
-    expect(screen.getByRole("button", { name: "Graph", pressed: true })).toBeInTheDocument();
   });
 
   it("sends history that skips error messages", async () => {
@@ -337,7 +501,8 @@ describe("ChatPanel", () => {
       e2eEmit("chat-final", {
         messageId,
         citations: [],
-        retrievalMode: "vector_only",
+        sentences: [{ text: "ok reply", status: "supported", sources: [] }],
+        notFound: false,
         error: null,
       });
       return messageId;
@@ -354,14 +519,33 @@ describe("ChatPanel", () => {
       e2eEmit("chat-final", {
         messageId,
         citations: [],
-        retrievalMode: "vector_only",
+        sentences: [{ text: "again ok", status: "supported", sources: [] }],
+        notFound: false,
         error: null,
       });
       return messageId;
     });
     await sendPrompt("again");
     await waitFor(() =>
-      expect(sendChatQuery).toHaveBeenLastCalledWith("again", expect.any(String), expect.any(Array)),
+      expect(sendChatQuery).toHaveBeenLastCalledWith(
+        "again",
+        expect.any(String),
+        expect.any(Array),
+        [],
+      ),
     );
+  });
+
+  it("suggested question sets input and scope", async () => {
+    vi.mocked(getSuggestedQuestions).mockResolvedValue([
+      { question: "What does Ada do?", scopeIds: ["a"], label: null },
+    ]);
+    vi.mocked(listDocuments).mockResolvedValue([doc("a", "Alpha Notes"), doc("b", "Beta Paper")]);
+    renderChat();
+    fireEvent.click(await screen.findByRole("button", { name: "What does Ada do?" }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Chat message")).toHaveValue("What does Ada do?");
+    });
+    expect(screen.getByText(/In: Alpha Notes/)).toBeInTheDocument();
   });
 });

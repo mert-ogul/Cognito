@@ -13,7 +13,7 @@ def _write_mini_pdf(path: Path) -> None:
     doc = fitz.open()
     doc.new_page()
     page = doc.load_page(0)
-    page.insert_text((72, 72), "Hello PDF fixture")
+    page.insert_text((72, 72), "Hello PDF fixture with enough characters")
     doc.save(path)
     doc.close()
 
@@ -44,5 +44,10 @@ def test_parse_pdf_fixture(tmp_path: Path) -> None:
     assert out["pageCount"] == 1
     assert "Hello PDF" in out["text"]
     assert len(out["contentHash"]) == 64
-    assert out["pages"] == [{"page": 1, "text": out["pages"][0]["text"]}]
-    assert "Hello PDF" in out["pages"][0]["text"]
+    page0 = out["pages"][0]
+    assert page0["page"] == 1
+    assert "Hello PDF" in page0["text"]
+    assert page0["scanned"] is False
+    assert page0["ocr"] is False
+    assert isinstance(page0["blocks"], list)
+    assert out.get("scanStatus") is None

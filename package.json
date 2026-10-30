@@ -14,7 +14,8 @@
     "test:unit": "vitest run",
     "test:e2e": "CI=1 playwright test",
     "test": "npm run test:unit && npm run test:py",
-    "benchmark:import": "cd sidecar && uv run python scripts/benchmark_import.py"
+    "benchmark:import": "cd sidecar && uv run python scripts/benchmark_import.py",
+    "eval": "cd sidecar && uv run python scripts/eval_retrieval.py"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
@@ -24,8 +25,6 @@
     "@tauri-apps/api": "^2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "cytoscape": "^3.33.1",
-    "cytoscape-fcose": "^2.2.0",
     "katex": "^0.19.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
@@ -42,7 +41,6 @@
     "@tauri-apps/cli": "^2",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.2.0",
-    "@types/cytoscape-fcose": "^2.2.5",
     "@types/katex": "^0.16.8",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 pub const MAX_FIRST_IMPORT: usize = 100;
 pub const IMPORT_BATCH: usize = 20;
 
-/// Sorted PDF/Markdown paths under `root`, at most `limit` files.
+/// Sorted PDF/Word/Markdown paths under `root`, at most `limit` files.
 pub fn collect_import_paths_bounded(root: &Path, limit: usize) -> CognitoResult<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for entry in WalkDir::new(root).max_depth(64).into_iter().filter_map(|e| e.ok()) {
@@ -15,7 +15,7 @@ pub fn collect_import_paths_bounded(root: &Path, limit: usize) -> CognitoResult<
             continue;
         }
         let p = entry.path();
-        if is_pdf(p) || is_markdown(p) {
+        if is_importable_extension(p) {
             paths.push(p.to_path_buf());
         }
     }
@@ -57,8 +57,15 @@ fn is_markdown(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_docx(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("docx"))
+        .unwrap_or(false)
+}
+
 pub fn is_importable_extension(p: &Path) -> bool {
-    is_pdf(p) || is_markdown(p)
+    is_pdf(p) || is_markdown(p) || is_docx(p)
 }
 
 pub fn ensure_vault_path(raw: &str) -> CognitoResult<PathBuf> {

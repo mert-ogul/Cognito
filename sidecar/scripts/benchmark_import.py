@@ -113,7 +113,6 @@ def main() -> int:
         vault = Path(tmp) / "vault"
         vault.mkdir()
         db = Path(tmp) / "vault.sqlite"
-        duck = Path(tmp) / "graph.duckdb"
 
         paths = _prepare_corpus(vault, n, args.fixture, args.corpus_dir)
         if not paths:
@@ -225,7 +224,6 @@ def main() -> int:
             for q in ("What is this corpus about?", "List main topics.", "Summarize sources."):
                 prepare_chat_retrieval(
                     str(db),
-                    str(duck) if duck.exists() else None,
                     q,
                     args.embed_model,
                 )

@@ -1,16 +1,89 @@
 use crate::app::state::SharedState;
 use crate::db::sqlite;
+use crate::errors::{CognitoError, CognitoResult};
 use crate::events::{IMPORT_PROGRESS, LIBRARY_CHANGED};
-use crate::models::{DocumentPreview, DocumentRow, ImportProgress};
+use crate::models::{
+    DocumentCardPayload, DocumentPreview, DocumentRow, ImportProgress, PageRect, PageRenderResult,
+    SuggestedQuestion,
+};
 use crate::services::import_job;
 use crate::services::ingest;
 use crate::services::library;
-use std::path::PathBuf;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use super::run_blocking;
+
+fn parse_regions_json(raw: Option<String>) -> Option<Value> {
+    let s = raw?.trim().to_string();
+    if s.is_empty() || s == "null" {
+        return None;
+    }
+    serde_json::from_str(&s).ok()
+}
+
+fn resolve_render_path(state: &SharedState, path: &str) -> CognitoResult<PathBuf> {
+    let p = PathBuf::from(path);
+    if p.is_absolute() {
+        return Ok(p);
+    }
+    let vault = state
+        .with_sqlite(|c| sqlite::get_setting(c, "vault_path"))?
+        .ok_or_else(|| CognitoError::Vault("Configure a vault folder first.".into()))?;
+    Ok(Path::new(&vault).join(path))
+}
+
+fn render_rpc(
+    state: &SharedState,
+    method: &str,
+    path: &Path,
+    page: i64,
+    rect: Option<&PageRect>,
+    scale: Option<f64>,
+) -> CognitoResult<PageRenderResult> {
+    let app_data = state.data_dir.to_string_lossy().into_owned();
+    let mut params = json!({
+        "path": path.to_string_lossy(),
+        "page": page,
+        "app_data": app_data,
+    });
+    if let Some(s) = scale {
+        params
+            .as_object_mut()
+            .expect("params object")
+            .insert("scale".into(), json!(s));
+    }
+    if let Some(r) = rect {
+        params.as_object_mut().expect("params object").insert(
+            "rect".into(),
+            json!([r.x0, r.y0, r.x1, r.y1]),
+        );
+    }
+    let result = state.sidecar.with_session(|s| s.request(method, params))?;
+    let png = result
+        .get("pngBase64")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CognitoError::Sidecar("render pngBase64".into()))?
+        .to_string();
+    let width = result
+        .get("width")
+        .and_then(|v| v.as_i64())
+        .or_else(|| result.get("width").and_then(|v| v.as_u64().map(|u| u as i64)))
+        .unwrap_or(0);
+    let height = result
+        .get("height")
+        .and_then(|v| v.as_i64())
+        .or_else(|| result.get("height").and_then(|v| v.as_u64().map(|u| u as i64)))
+        .unwrap_or(0);
+    Ok(PageRenderResult {
+        png_base64: png,
+        width,
+        height,
+    })
+}
 
 #[tauri::command]
 pub async fn list_documents(
@@ -20,12 +93,32 @@ pub async fn list_documents(
 }
 
 #[tauri::command]
+pub async fn get_document_card(
+    state: tauri::State<'_, SharedState>,
+    document_id: String,
+) -> Result<Option<DocumentCardPayload>, String> {
+    run_blocking(state, move |st| {
+        st.with_sqlite(|c| sqlite::get_document_card(c, &document_id))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn get_suggested_questions(
+    state: tauri::State<'_, SharedState>,
+) -> Result<Vec<SuggestedQuestion>, String> {
+    run_blocking(state, |st| st.with_sqlite(|c| sqlite::get_suggested_questions(c))).await
+}
+
+#[tauri::command]
 pub async fn get_document_preview(
     state: tauri::State<'_, SharedState>,
     document_id: String,
     chunk_id: Option<String>,
 ) -> Result<DocumentPreview, String> {
     run_blocking(state, move |st| {
+        let path = st.with_sqlite(|c| sqlite::document_path_by_id(c, &document_id))?;
+        let scan_status = st.with_sqlite(|c| sqlite::document_scan_status(c, &document_id))?;
         if let Some(ref cid) = chunk_id {
             let win = st.with_sqlite(|c| sqlite::chunk_window(c, &document_id, cid))?;
             if let Some(w) = win {
@@ -35,6 +128,9 @@ pub async fn get_document_preview(
                     highlight_snippet: Some(w.highlight),
                     page_start: w.page_start,
                     page_end: w.page_end,
+                    path,
+                    regions: parse_regions_json(w.regions),
+                    scan_status,
                 });
             }
         }
@@ -45,7 +141,39 @@ pub async fn get_document_preview(
             highlight_snippet: None,
             page_start: None,
             page_end: None,
+            path,
+            regions: None,
+            scan_status,
         })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn render_page_region(
+    state: tauri::State<'_, SharedState>,
+    path: String,
+    page: i64,
+    rect: PageRect,
+    scale: Option<f64>,
+) -> Result<PageRenderResult, String> {
+    run_blocking(state, move |st| {
+        let resolved = resolve_render_path(&st, &path)?;
+        render_rpc(&st, "render_region", &resolved, page, Some(&rect), scale)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn render_document_page(
+    state: tauri::State<'_, SharedState>,
+    path: String,
+    page: i64,
+    scale: Option<f64>,
+) -> Result<PageRenderResult, String> {
+    run_blocking(state, move |st| {
+        let resolved = resolve_render_path(&st, &path)?;
+        render_rpc(&st, "render_page", &resolved, page, None, scale)
     })
     .await
 }
@@ -237,7 +365,7 @@ pub async fn import_documents(
     };
     if paths.is_empty() {
         release_import(&*state);
-        return Err("No PDF or Markdown files found.".to_string());
+        return Err("No PDF, Word or Markdown files found.".to_string());
     }
     spawn_import_thread(
         app,
@@ -273,7 +401,7 @@ pub async fn retry_failed_import(
         }
     };
     let vault = PathBuf::from(&vault_str);
-    let graph_n = match state.with_sqlite(|c| sqlite::requeue_failed_graphs(c)) {
+    let entities_n = match state.with_sqlite(|c| sqlite::requeue_failed_entities(c)) {
         Ok(n) => n,
         Err(e) => {
             release_import(&*state);
@@ -287,12 +415,12 @@ pub async fn retry_failed_import(
             return Err(e.to_string());
         }
     };
-    if paths_str.is_empty() && graph_n == 0 {
+    if paths_str.is_empty() && entities_n == 0 {
         release_import(&*state);
         return Err("No failed documents to retry.".to_string());
     }
-    if graph_n > 0 {
-        state.notify_graph_worker();
+    if entities_n > 0 {
+        state.notify_background_worker();
     }
     if !paths_str.is_empty() {
         let paths: Vec<PathBuf> = paths_str.iter().map(PathBuf::from).collect();

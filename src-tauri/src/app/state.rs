@@ -15,32 +15,29 @@ pub type ChatWarmResult = Result<(), String>;
 pub struct AppState {
     pub data_dir: PathBuf,
     sqlite_path: PathBuf,
-    duckdb_path: PathBuf,
     pub sidecar: SidecarPool,
     sql: Mutex<Option<SqlConn>>,
     pub watcher_tx: Mutex<Option<Sender<Option<PathBuf>>>>,
-    pub graph_tx: Mutex<Option<Sender<()>>>,
+    pub background_tx: Mutex<Option<Sender<()>>>,
     /// `None` = warm-up not finished yet.
     pub chat_warm: Mutex<Option<ChatWarmResult>>,
     pub import_running: AtomicBool,
     /// True while a startup rebuild is rewriting embeddings for a new index format.
     pub index_format_updating: AtomicBool,
-    /// Active `send_chat_query` tasks; graph worker pauses while this is above zero.
+    /// Active `send_chat_query` tasks; background worker pauses while this is above zero.
     pub chat_in_flight: AtomicUsize,
 }
 
 impl AppState {
     pub fn new(data_dir: PathBuf, sidecar: SidecarPool) -> Self {
         let sqlite_path = data_dir.join("vault.sqlite");
-        let duckdb_path = data_dir.join("graph.duckdb");
         Self {
             data_dir,
             sqlite_path,
-            duckdb_path,
             sidecar,
             sql: Mutex::new(None),
             watcher_tx: Mutex::new(None),
-            graph_tx: Mutex::new(None),
+            background_tx: Mutex::new(None),
             chat_warm: Mutex::new(None),
             import_running: AtomicBool::new(false),
             index_format_updating: AtomicBool::new(false),
@@ -81,10 +78,6 @@ impl AppState {
         self.sqlite_path.clone()
     }
 
-    pub fn duckdb_path(&self) -> PathBuf {
-        self.duckdb_path.clone()
-    }
-
     pub fn notify_watcher(&self, path: PathBuf) {
         if let Ok(g) = self.watcher_tx.lock() {
             if let Some(tx) = g.as_ref() {
@@ -101,8 +94,8 @@ impl AppState {
         }
     }
 
-    pub fn notify_graph_worker(&self) {
-        if let Ok(g) = self.graph_tx.lock() {
+    pub fn notify_background_worker(&self) {
+        if let Ok(g) = self.background_tx.lock() {
             if let Some(tx) = g.as_ref() {
                 let _ = tx.send(());
             }

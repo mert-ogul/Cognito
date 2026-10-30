@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { GraphPanel } from "@/components/graph/GraphPanel";
+import { ConnectionsPanel } from "@/components/connections/ConnectionsPanel";
 import { PassageView } from "@/components/layout/PassageView";
 import { cn } from "@/lib/utils";
 import { useSidePaneStore } from "@/stores/sidePaneStore";
@@ -18,9 +18,9 @@ export function SidePane() {
           onClick={() => setMode("passage")}
         />
         <ModeButton
-          label="Graph"
-          active={mode === "graph"}
-          onClick={() => setMode("graph")}
+          label="Connections"
+          active={mode === "connections"}
+          onClick={() => setMode("connections")}
         />
       </div>
       <div className="min-h-0 flex-1">
@@ -31,7 +31,7 @@ export function SidePane() {
             <p className="p-3 text-muted">Open a source from the conversation to read a passage.</p>
           )
         ) : (
-          <GraphPanel />
+          <ConnectionsPanel />
         )}
       </div>
     </div>

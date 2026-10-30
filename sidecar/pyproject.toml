@@ -7,13 +7,20 @@ requires-python = ">=3.11"
 dependencies = [
   "httpx>=0.27",
   "numpy>=1.26",
-  "duckdb>=1.0",
   "pymupdf>=1.27.2.2",
+  "python-docx>=1.1",
   "sqlite-vec>=0.1.9",
+  "torch",
+  "transformers>=4.51",
+  "sentence-transformers>=3.0",
+  "huggingface_hub",
+  "gliner",
+  "rapidfuzz>=3.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+ocr = ["ocrmac>=1.0; sys_platform == 'darwin'"]
 
 [tool.ruff]
 line-length = 100

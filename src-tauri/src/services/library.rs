@@ -13,13 +13,11 @@ fn sp(path: &Path) -> String {
 
 pub fn reset(state: &SharedState) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
-    let duck_path = state.duckdb_path();
     state.sidecar.with_session(|s| {
         s.request(
             "reset_index",
             json!({
                 "sqlitePath": sp(&sqlite_path),
-                "duckPath": sp(&duck_path),
             }),
         )?;
         Ok(())
@@ -64,7 +62,7 @@ pub fn plan_rebuild(state: &SharedState) -> CognitoResult<(PathBuf, Vec<PathBuf>
     let vault = vault::ensure_vault_path(&vault_str)?;
     let paths = vault::collect_import_paths_bounded(&vault, vault::slots_remaining(0))?;
     if paths.is_empty() {
-        return Err(CognitoError::Vault("No PDF or Markdown files found.".into()));
+        return Err(CognitoError::Vault("No PDF, Word or Markdown files found.".into()));
     }
     Ok((vault, paths))
 }

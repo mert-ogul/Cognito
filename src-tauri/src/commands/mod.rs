@@ -1,7 +1,8 @@
 mod chat;
+mod connections;
 mod documents;
-mod graph;
 mod health;
+mod models;
 mod settings;
 mod vault;
 
@@ -24,8 +25,9 @@ where
 }
 
 pub use chat::*;
+pub use connections::*;
 pub use documents::*;
-pub use graph::*;
 pub use health::*;
+pub use models::*;
 pub use settings::*;
 pub use vault::*;

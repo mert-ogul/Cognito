@@ -11,14 +11,15 @@ vi.mock("@tauri-apps/api/core", () => ({
         sidecarReachable: true,
         ollamaModelReady: true,
         vaultConfigured: false,
-        chatModel: "phi4-mini",
-        embedModel: "nomic-embed-text",
+        chatModel: "qwen3.5:9b",
+        embedModel: "qwen3-embedding:0.6b",
         chatModelWarmed: true,
         warmUpPending: false,
         warmUpError: null,
         ollamaReachable: true,
         missingModels: [],
         indexFormatUpdating: false,
+        checkingModelsReady: true,
       };
     }
     if (cmd === "list_documents") {
@@ -36,9 +37,13 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "get_settings") {
       return {
         vaultPath: null,
-        chatModel: "phi4-mini",
-        embedModel: "nomic-embed-text",
-        graphExtractionEnabled: true,
+        chatModel: "qwen3.5:9b",
+        embedModel: "qwen3-embedding:0.6b",
+        backgroundModel: "qwen3.5:4b",
+        summariseDocuments: true,
+        extractEntities: false,
+      extraEntityLabels: "",
+      thoroughReranking: false,
       };
     }
     return {};
@@ -56,7 +61,7 @@ describe("App shell", () => {
     expect(screen.getByText("Cognito")).toBeInTheDocument();
     expect(screen.getByText("Library")).toBeInTheDocument();
     expect(screen.getByLabelText("Chat message")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Graph" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connections" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open settings" })).toBeInTheDocument();
   });
 });

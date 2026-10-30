@@ -25,8 +25,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("cognito.sidecar")
 
+from common.model_store import download_models, models_status, warm_checking_models
 from common.ollama import warm_model
-from ingestion.rpc_graph import rpc_purge_graph_document, rpc_store_graph_chunk
+from ingestion.rpc_entities import (
+    rpc_extract_entities,
+    rpc_purge_document_entities,
+    rpc_recompute_links,
+)
+from ingestion.page_render import rpc_render_page, rpc_render_region
 from ingestion.rpc_ingest import (
     rpc_chunk_documents,
     rpc_embed_chunks,
@@ -34,11 +40,12 @@ from ingestion.rpc_ingest import (
     rpc_purge_chunk_embeddings,
     rpc_reset_index,
 )
-from ingestion.rpc_link_document import rpc_link_document
-from query.graph_read import node_detail as graph_node_detail
-from query.graph_read import search_nodes as graph_search_nodes
-from query.graph_read import snapshot as graph_snapshot
-from query.chat_pipeline import prepare_chat_retrieval
+from query.chat_pipeline import (
+    prepare_chat_retrieval,
+    prepare_related_retrieval,
+    rerank_chat_candidates,
+)
+from query.check_answer import check_answer
 
 
 def _reply(req_id: Any, result: Any) -> None:
@@ -57,9 +64,36 @@ def dispatch(method: str, params: dict) -> Any:
     if method == "ping":
         return {"pong": True}
     if method == "warm_model":
-        chat = params.get("chat_model", "phi4-mini")
+        chat = params.get("chat_model", "qwen3.5:9b")
         warm_model(chat)
         return {"warmed": True}
+    if method == "models_status":
+        return models_status(
+            str(params["app_data"]),
+            thorough_reranking=bool(params.get("thorough_reranking") or params.get("thoroughReranking")),
+        )
+    if method == "download_models":
+        return download_models(
+            str(params["app_data"]),
+            progress_cb=lambda line: log.info("%s", line),
+            thorough_reranking=bool(params.get("thorough_reranking") or params.get("thoroughReranking")),
+        )
+    if method == "warm_checking_models":
+        return warm_checking_models(
+            str(params["app_data"]),
+            thorough_reranking=bool(params.get("thorough_reranking") or params.get("thoroughReranking")),
+        )
+    if method == "check_answer":
+        draft = params.get("draft")
+        if draft is None:
+            draft = params.get("answer")
+        if not isinstance(draft, dict):
+            draft = {}
+        return check_answer(
+            str(params["app_data"]),
+            list(params.get("passages") or []),
+            draft,
+        )
     if method == "parse_documents":
         return rpc_parse_documents(params)
     if method == "chunk_documents":
@@ -70,39 +104,90 @@ def dispatch(method: str, params: dict) -> Any:
         return rpc_purge_chunk_embeddings(params)
     if method == "reset_index":
         return rpc_reset_index(params)
-    if method == "store_graph_chunk":
-        return rpc_store_graph_chunk(params)
-    if method == "purge_graph_document":
-        return rpc_purge_graph_document(params)
-    if method == "link_document":
-        return rpc_link_document(params)
+    if method == "extract_entities":
+        return rpc_extract_entities(params)
+    if method == "purge_document_entities":
+        return rpc_purge_document_entities(params)
+    if method == "recompute_links":
+        return rpc_recompute_links(params)
+    if method == "render_region":
+        return rpc_render_region(params)
+    if method == "render_page":
+        return rpc_render_page(params)
     if method == "prepare_chat_retrieval":
         hist = params.get("history", [])
         if not isinstance(hist, list):
             hist = []
+        scope = params.get("scope_ids")
+        if not isinstance(scope, list):
+            scope = None
         return prepare_chat_retrieval(
             str(params["sqlite_path"]),
-            str(params.get("duckdb_path") or "") or None,
             str(params["query"]),
-            str(params.get("embed_model", "nomic-embed-text")),
-            int(params.get("top_k", 12)),
+            str(params.get("embed_model", "qwen3-embedding:0.6b")),
+            int(params.get("top_k", 30)),
             history=hist,
+            scope_ids=scope,
+            app_data=str(params["app_data"]) if params.get("app_data") is not None else None,
+            thorough_reranking=bool(
+                params.get("thorough_reranking") or params.get("thoroughReranking")
+            ),
+            skip_rerank=bool(params.get("skip_rerank") or params.get("skipRerank")),
         )
-    if method == "get_graph_snapshot":
-        return graph_snapshot(
-            params["duckdb_path"],
-            int(params.get("limit_nodes", 400)),
+    if method == "rerank_chat_candidates":
+        cands = params.get("candidates") or []
+        if not isinstance(cands, list):
+            cands = []
+        profile_matches = params.get("profile_matches") or params.get("profileMatches") or []
+        if not isinstance(profile_matches, list):
+            profile_matches = []
+        labels = params.get("labels") or []
+        if not isinstance(labels, list):
+            labels = []
+        scope_ids = params.get("scope_ids") or params.get("scopeIds") or []
+        if not isinstance(scope_ids, list):
+            scope_ids = []
+        counts = params.get("candidate_counts") or params.get("candidateCounts") or {}
+        if not isinstance(counts, dict):
+            counts = {}
+        return rerank_chat_candidates(
+            str(params["app_data"]),
+            str(params.get("query") or ""),
+            cands,
+            thorough_reranking=bool(
+                params.get("thorough_reranking") or params.get("thoroughReranking")
+            ),
+            sqlite_path=str(params["sqlite_path"])
+            if params.get("sqlite_path") is not None
+            else None,
+            embed_model=str(params["embed_model"])
+            if params.get("embed_model") is not None
+            else None,
+            profile_matches=profile_matches,
+            explicit_scope=bool(
+                params.get("explicit_scope") or params.get("explicitScope")
+            ),
+            labels=[str(x) for x in labels],
+            normalised_question=str(params["normalised_question"])
+            if params.get("normalised_question") is not None
+            else (
+                str(params["normalisedQuestion"])
+                if params.get("normalisedQuestion") is not None
+                else None
+            ),
+            scope_ids=[str(x) for x in scope_ids],
+            scope_reason=str(params.get("scope_reason") or params.get("scopeReason") or "")
+            or None,
+            candidate_counts={str(k): int(v) for k, v in counts.items()},
         )
-    if method == "search_graph":
-        return graph_search_nodes(
-            params["duckdb_path"],
-            params["query"],
-            int(params.get("limit", 50)),
-        )
-    if method == "get_graph_node_detail":
-        return graph_node_detail(
-            params["duckdb_path"],
-            str(params["node_id"]),
+    if method == "prepare_related_retrieval":
+        return prepare_related_retrieval(
+            str(params["sqlite_path"]),
+            str(params.get("entity_id_a") or params.get("entityIdA") or ""),
+            str(params.get("entity_id_b") or params.get("entityIdB") or ""),
+            str(params.get("embed_model", "qwen3-embedding:0.6b")),
+            app_data=str(params["app_data"]) if params.get("app_data") is not None else None,
+            top_k=int(params.get("top_k", 5)),
         )
     raise ValueError(f"unknown method: {method}")
 

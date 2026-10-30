@@ -6,21 +6,21 @@ import { cn } from "@/lib/utils";
 type Props = {
   health: AppHealth | undefined;
   importProgress: ImportProgress | null;
-  graphQueue: number;
-  graphOpen: boolean;
-  onToggleGraph: () => void;
+  entitiesQueue: number;
+  sidePaneOpen: boolean;
+  onToggleSidePane: () => void;
   onOpenSettings: () => void;
 };
 
 export function Toolbar({
   health,
   importProgress,
-  graphQueue,
-  graphOpen,
-  onToggleGraph,
+  entitiesQueue,
+  sidePaneOpen,
+  onToggleSidePane,
   onOpenSettings,
 }: Props) {
-  const status = describeStatus(health, importProgress, graphQueue);
+  const status = describeStatus(health, importProgress, entitiesQueue);
 
   return (
     <header className="flex h-10 shrink-0 items-center gap-3 border-b border-line bg-bg px-3">
@@ -41,10 +41,10 @@ export function Toolbar({
         <Button
           type="button"
           variant="quiet"
-          aria-pressed={graphOpen}
-          onClick={onToggleGraph}
+          aria-pressed={sidePaneOpen}
+          onClick={onToggleSidePane}
         >
-          Graph
+          Connections
         </Button>
         <Button type="button" variant="quiet" onClick={onOpenSettings} aria-label="Open settings">
           Settings

@@ -1,12 +1,16 @@
-"""PDF (PyMuPDF) and Markdown text extraction."""
+"""PDF (PyMuPDF), Word (.docx), and Markdown text extraction."""
 
 from __future__ import annotations
 
 import hashlib
+import platform
 import re
+import tempfile
 from pathlib import Path
 
 import fitz  # PyMuPDF
+
+from common.text_norm import normalize_search_text
 
 _SMALL_CAPS_JOIN = re.compile(r"\b([A-Z]) ([A-Z]{2,})")
 _DASH_JOIN = re.compile(r"(\w) -(\w)")
@@ -28,6 +32,8 @@ _TITLE_CASE_SMALL = frozenset(
         "with",
     }
 )
+_SCANNED_TEXT_MIN = 20
+_HEADING_STYLE_RE = re.compile(r"^heading\s*(\d+)$", re.IGNORECASE)
 
 
 def hash_bytes(data: bytes) -> str:
@@ -73,12 +79,51 @@ def _metadata_title_ok(title: str) -> bool:
     return True
 
 
+def _line_upright(line: dict) -> bool:
+    direction = line.get("dir") or [1, 0]
+    try:
+        dx = float(direction[0])
+        dy = float(direction[1])
+    except (TypeError, ValueError, IndexError):
+        return True
+    return abs(dy) < 0.15 and dx > 0.85
+
+
+def _line_y0(line: dict) -> float:
+    bbox = line.get("bbox")
+    if bbox and len(bbox) >= 2:
+        try:
+            return float(bbox[1])
+        except (TypeError, ValueError):
+            pass
+    for span in line.get("spans") or []:
+        sb = span.get("bbox")
+        if sb and len(sb) >= 2:
+            try:
+                return float(sb[1])
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
 def _largest_font_title(page: fitz.Page) -> str | None:
     data = page.get_text("dict") or {}
+    page_h = float(page.rect.height) or 1.0
+    y_limit = 0.6 * page_h
     best_size = -1.0
     for block in data.get("blocks") or []:
         for line in block.get("lines") or []:
-            for span in line.get("spans") or []:
+            if not _line_upright(line):
+                continue
+            if _line_y0(line) >= y_limit:
+                continue
+            spans = line.get("spans") or []
+            if not spans:
+                continue
+            line_text = "".join(str(s.get("text") or "") for s in spans)
+            if "arXiv:" in line_text:
+                continue
+            for span in spans:
                 size = float(span.get("size") or 0)
                 if size > best_size:
                     best_size = size
@@ -87,6 +132,10 @@ def _largest_font_title(page: fitz.Page) -> str | None:
     parts: list[str] = []
     for block in data.get("blocks") or []:
         for line in block.get("lines") or []:
+            if not _line_upright(line):
+                continue
+            if _line_y0(line) >= y_limit:
+                continue
             spans = line.get("spans") or []
             if not spans:
                 continue
@@ -128,21 +177,206 @@ def markdown_title(text: str, fallback: str) -> str:
     return fallback
 
 
+def _text_block_from_dict(block: dict) -> dict | None:
+    """Build `{text, bbox}` from a PyMuPDF dict text block (type 0)."""
+    raw_type = block.get("type")
+    try:
+        block_type = int(raw_type) if raw_type is not None else -1
+    except (TypeError, ValueError):
+        return None
+    if block_type != 0:
+        return None
+    parts: list[str] = []
+    for line in block.get("lines") or []:
+        spans = line.get("spans") or []
+        line_text = "".join(str(s.get("text") or "") for s in spans).strip()
+        if line_text:
+            parts.append(line_text)
+    text = "\n".join(parts).strip()
+    if not text:
+        return None
+    bbox = block.get("bbox")
+    if not bbox or len(bbox) < 4:
+        return None
+    try:
+        box = [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])]
+    except (TypeError, ValueError):
+        return None
+    return {"text": normalize_search_text(text), "bbox": box}
+
+
+def _ocr_page_darwin(page: fitz.Page) -> tuple[str, list[dict]]:
+    """Run macOS Vision OCR via ocrmac; return text and block-like regions in page coords."""
+    try:
+        from ocrmac import ocrmac  # type: ignore
+    except ImportError:
+        return "", []
+
+    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        pix.save(str(tmp_path))
+        annotations = ocrmac.OCR(str(tmp_path), recognition_level="accurate").recognize()
+    except Exception:  # noqa: BLE001
+        return "", []
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    page_w = float(page.rect.width) or 1.0
+    page_h = float(page.rect.height) or 1.0
+    lines: list[str] = []
+    blocks: list[dict] = []
+    for item in annotations or []:
+        # ocrmac returns (text, confidence, [x, y, w, h]) in normalized coords.
+        if not isinstance(item, (list, tuple)) or len(item) < 3:
+            continue
+        text = str(item[0] or "").strip()
+        box = item[2]
+        if not text or not isinstance(box, (list, tuple)) or len(box) < 4:
+            continue
+        try:
+            x, y, w, h = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+        except (TypeError, ValueError):
+            continue
+        # Vision uses bottom-left origin with normalized values; convert to PDF top-left.
+        x0 = x * page_w
+        x1 = (x + w) * page_w
+        y0 = (1.0 - y - h) * page_h
+        y1 = (1.0 - y) * page_h
+        norm = normalize_search_text(text)
+        lines.append(norm)
+        blocks.append({"text": norm, "bbox": [x0, y0, x1, y1]})
+    return "\n".join(lines).strip(), blocks
+
+
+def _parse_pdf_page(page: fitz.Page, page_no: int) -> dict:
+    plain = normalize_search_text((page.get_text("text") or "").strip())
+    if len(plain) < _SCANNED_TEXT_MIN:
+        if platform.system() == "Darwin":
+            ocr_text, ocr_blocks = _ocr_page_darwin(page)
+            if ocr_text:
+                return {
+                    "page": page_no,
+                    "text": normalize_search_text(ocr_text),
+                    "blocks": ocr_blocks,
+                    "scanned": True,
+                    "ocr": True,
+                }
+        return {
+            "page": page_no,
+            "text": "",
+            "blocks": [],
+            "scanned": True,
+            "ocr": False,
+        }
+
+    data = page.get_text("dict") or {}
+    blocks: list[dict] = []
+    for block in data.get("blocks") or []:
+        item = _text_block_from_dict(block)
+        if item:
+            blocks.append(item)
+    text = "\n\n".join(b["text"] for b in blocks) if blocks else plain
+    return {
+        "page": page_no,
+        "text": normalize_search_text(text),
+        "blocks": blocks,
+        "scanned": False,
+        "ocr": False,
+    }
+
+
+def _scan_status_from_pages(pages: list[dict]) -> str | None:
+    any_ocr = any(bool(p.get("ocr")) for p in pages)
+    if any_ocr:
+        return "ocr"
+    any_scanned_empty = any(
+        bool(p.get("scanned")) and not str(p.get("text") or "").strip() for p in pages
+    )
+    if any_scanned_empty:
+        return "no_text"
+    return None
+
+
 def read_pdf_text(path: Path) -> tuple[str, list[dict], int]:
     doc = fitz.open(path)
     try:
         pages: list[dict] = []
         for i in range(len(doc)):
-            page = doc.load_page(i)
-            pages.append({"page": i + 1, "text": page.get_text("text") or ""})
-        text = "\n\n".join(p["text"] for p in pages)
+            pages.append(_parse_pdf_page(doc.load_page(i), i + 1))
+        text = "\n\n".join(p["text"] for p in pages if p.get("text"))
         return text, pages, len(doc)
     finally:
         doc.close()
 
 
 def read_markdown_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")
+    return normalize_search_text(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def _heading_level_from_style(style_name: str) -> int | None:
+    name = (style_name or "").strip()
+    m = _HEADING_STYLE_RE.match(name)
+    if not m:
+        return None
+    level = int(m.group(1))
+    if 1 <= level <= 6:
+        return level
+    return None
+
+
+def parse_docx(path: Path) -> dict:
+    from docx import Document  # type: ignore
+    from docx.table import Table  # type: ignore
+    from docx.text.paragraph import Paragraph  # type: ignore
+
+    doc = Document(str(path))
+    lines: list[str] = []
+
+    def emit_paragraph(para: Paragraph) -> None:
+        text = (para.text or "").strip()
+        if not text:
+            return
+        style_name = ""
+        try:
+            style_name = str(para.style.name) if para.style is not None else ""
+        except Exception:  # noqa: BLE001
+            style_name = ""
+        level = _heading_level_from_style(style_name)
+        if level is not None:
+            lines.append("#" * level + " " + text)
+        else:
+            lines.append(text)
+
+    def emit_table(table: Table) -> None:
+        for row in table.rows:
+            cells = [(c.text or "").replace("\n", " ").strip() for c in row.cells]
+            if any(cells):
+                lines.append("\t".join(cells))
+
+    body = doc.element.body
+    for child in body.iterchildren():
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if tag == "p":
+            emit_paragraph(Paragraph(child, doc))
+        elif tag == "tbl":
+            emit_table(Table(child, doc))
+
+    text = normalize_search_text("\n\n".join(lines).strip())
+    title = markdown_title(text, path.stem)
+    return {
+        "path": str(path.resolve()),
+        "title": title,
+        "fileType": "docx",
+        "pageCount": None,
+        "text": text,
+        "contentHash": hash_bytes(path.read_bytes()),
+        "scanStatus": None,
+    }
 
 
 def parse_file(path: Path) -> dict:
@@ -155,14 +389,14 @@ def parse_file(path: Path) -> dict:
         try:
             pages: list[dict] = []
             for i in range(len(doc)):
-                page = doc.load_page(i)
-                pages.append({"page": i + 1, "text": page.get_text("text") or ""})
-            text = "\n\n".join(p["text"] for p in pages)
+                pages.append(_parse_pdf_page(doc.load_page(i), i + 1))
+            text = "\n\n".join(p["text"] for p in pages if p.get("text"))
             title = pdf_title(doc, fallback)
             page_count = len(doc)
         finally:
             doc.close()
-        return {
+        scan_status = _scan_status_from_pages(pages)
+        out = {
             "path": str(path.resolve()),
             "title": title,
             "fileType": "pdf",
@@ -170,7 +404,11 @@ def parse_file(path: Path) -> dict:
             "text": text,
             "pages": pages,
             "contentHash": chash,
+            "scanStatus": scan_status,
         }
+        if scan_status == "ocr":
+            out["textSource"] = "ocr"
+        return out
     if suf in (".md", ".markdown"):
         text = read_markdown_text(path)
         return {
@@ -180,5 +418,10 @@ def parse_file(path: Path) -> dict:
             "pageCount": None,
             "text": text,
             "contentHash": chash,
+            "scanStatus": None,
         }
+    if suf == ".docx":
+        parsed = parse_docx(path)
+        parsed["contentHash"] = chash
+        return parsed
     raise ValueError(f"unsupported file type: {suf}")

@@ -6,7 +6,6 @@ use crate::errors::{CognitoError, CognitoResult};
 use crate::events::IMPORT_PROGRESS;
 use crate::models::ImportProgress;
 use crate::services::import_job;
-use crate::services::graph_worker::sidecar_purge_graph;
 use crate::vault::IMPORT_BATCH;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -63,7 +62,6 @@ fn sidecar_purge(state: &SharedState, sqlite_path: &Path, ids: &[String]) -> Cog
 fn remove_existing_doc(
     state: &SharedState,
     sqlite_path: &Path,
-    duck_path: &Path,
     path: &str,
 ) -> CognitoResult<()> {
     let Some(oid) = state.with_sqlite(|conn| sqlite::document_id_including_removed(conn, path))?
@@ -71,7 +69,7 @@ fn remove_existing_doc(
         return Ok(());
     };
     let cids = state.with_sqlite(|conn| sqlite::list_chunk_ids_for_document(conn, &oid))?;
-    sidecar_purge_graph(state, duck_path, &oid)?;
+    state.with_sqlite(|conn| sqlite::clear_document_entity_rows(conn, &oid))?;
     sidecar_purge(state, sqlite_path, &cids)?;
     state.with_sqlite(|conn| sqlite::delete_document_by_id(conn, &oid))?;
     Ok(())
@@ -136,7 +134,6 @@ fn chunk_items(state: &SharedState, items: &[Value]) -> CognitoResult<Value> {
 fn embed_items_rpc(
     state: &SharedState,
     sqlite_path: &Path,
-    duck: &Path,
     embed: &str,
     chat: &str,
     document_id: &str,
@@ -148,7 +145,6 @@ fn embed_items_rpc(
             json!({
                 "sqlitePath": sp(sqlite_path),
                 "embedModel": embed,
-                "duckPath": sp(duck),
                 "chatModel": chat,
                 "documentId": document_id,
                 "items": items,
@@ -166,6 +162,7 @@ fn file_type_label(path: &Path) -> String {
     match ext.as_str() {
         "pdf" => "pdf".into(),
         "md" | "markdown" => "markdown".into(),
+        "docx" => "docx".into(),
         _ => ext,
     }
 }
@@ -198,7 +195,6 @@ fn page_count_opt(v: &Value) -> Option<i64> {
 fn process_one_parsed(
     state: &SharedState,
     sqlite_path: &Path,
-    duck_path: &Path,
     embed: &str,
     chat: &str,
     parsed: &Value,
@@ -222,7 +218,7 @@ fn process_one_parsed(
     if skip {
         return Ok(true);
     }
-    remove_existing_doc(state, sqlite_path, duck_path, path)?;
+    remove_existing_doc(state, sqlite_path, path)?;
     let chunked = chunk_items(state, &[parsed.clone()])?;
     let items = chunked
         .get("items")
@@ -248,6 +244,10 @@ fn process_one_parsed(
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| CognitoError::Database(e.to_string()))?;
+        let scan_status = parsed
+            .get("scanStatus")
+            .and_then(|x| x.as_str())
+            .filter(|s| *s == "ocr" || *s == "no_text");
         sqlite::insert_document_row(
             conn,
             &doc_id,
@@ -258,6 +258,7 @@ fn process_one_parsed(
             page_count_opt(parsed),
             "indexing",
             None,
+            scan_status,
         )?;
         let mut embed_payload: Vec<Value> = Vec::new();
         for ch in chunks {
@@ -278,9 +279,36 @@ fn process_one_parsed(
                 .get("role")
                 .and_then(|x| x.as_str())
                 .unwrap_or("body");
+            let labels = match ch.get("labels") {
+                None => "[]".to_string(),
+                Some(Value::String(s)) => s.clone(),
+                Some(v) => v.to_string(),
+            };
+            let regions = match ch.get("regions") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => {
+                    if s.is_empty() || s == "null" {
+                        None
+                    } else {
+                        Some(s.clone())
+                    }
+                }
+                Some(v) => Some(v.to_string()),
+            };
             let cid = Uuid::new_v4().to_string();
             sqlite::insert_chunk_row(
-                conn, &cid, &doc_id, ord, ps, pe, &text, tok, c_hash, role,
+                conn,
+                &cid,
+                &doc_id,
+                ord,
+                ps,
+                pe,
+                &text,
+                tok,
+                c_hash,
+                role,
+                &labels,
+                regions.as_deref(),
             )?;
             let heading_trail = ch
                 .get("headingTrail")
@@ -311,7 +339,6 @@ fn process_one_parsed(
     let emb = embed_items_rpc(
         state,
         sqlite_path,
-        duck_path,
         embed,
         chat,
         &doc_id,
@@ -347,7 +374,6 @@ pub fn run_import_job(
     chat_model: String,
 ) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
-    let duck_path = state.duckdb_path();
     let total = paths.len() as u32;
     state.with_sqlite(|c| import_job::start_job(c, &job_id, paths.len() as i64))?;
     emit_job(
@@ -402,7 +428,6 @@ pub fn run_import_job(
             let r = process_one_parsed(
                 &state,
                 &sqlite_path,
-                &duck_path,
                 &embed_model,
                 &chat_model,
                 p,
@@ -457,7 +482,7 @@ pub fn run_import_job(
     if let Some(ref a) = app {
         let _ = a.emit(crate::events::LIBRARY_CHANGED, &());
     }
-    state.notify_graph_worker();
+    state.notify_background_worker();
     Ok(())
 }
 
@@ -474,7 +499,6 @@ pub fn run_single_file(
         return Ok(());
     }
     let sqlite_path = state.sqlite_path();
-    let duck_path = state.duckdb_path();
     let job_id = "watcher".to_string();
     emit_job(
         app,
@@ -502,7 +526,6 @@ pub fn run_single_file(
         process_one_parsed(
             state,
             &sqlite_path,
-            &duck_path,
             embed_model,
             chat_model,
             p,
@@ -519,7 +542,7 @@ pub fn run_single_file(
         Some(&sp(file_path)),
         None,
     );
-    state.notify_graph_worker();
+    state.notify_background_worker();
     Ok(())
 }
 
@@ -528,8 +551,7 @@ mod tests {
     use super::*;
     use crate::app::state::AppState;
     use crate::services::file_watcher;
-    use crate::services::graph_index_service;
-    use crate::services::graph_worker;
+    use crate::services::background_worker;
     use crate::sidecar::SidecarPool;
     use std::sync::mpsc;
     use std::sync::Arc;
@@ -539,7 +561,8 @@ mod tests {
     #[ignore = "needs the sidecar venv: cd sidecar && uv sync"]
     fn import_job_indexes_md_and_fails_broken_pdf_without_deadlock() {
         std::env::set_var("COGNITO_MOCK_EMBED", "1");
-        std::env::set_var("COGNITO_MOCK_EXTRACT", "1");
+        std::env::set_var("COGNITO_MOCK_LLM", "1");
+        std::env::set_var("COGNITO_MOCK_MODELS", "1");
 
         let data = tempfile::tempdir().expect("data tempdir");
         let vault = tempfile::tempdir().expect("vault tempdir");
@@ -576,6 +599,8 @@ mod tests {
         state
             .with_sqlite(|c| {
                 sqlite::upsert_setting(c, "vault_path", &sp(&vault_root))?;
+                sqlite::upsert_setting(c, "extract_entities", "true")?;
+                sqlite::upsert_setting(c, "summarise_documents", "false")?;
                 Ok(())
             })
             .expect("vault setting");
@@ -613,14 +638,14 @@ mod tests {
                     )
                     .map_err(|e| CognitoError::Database(e.to_string()))?;
                 assert_eq!(note_status, "indexed");
-                let graph_status: String = conn
+                let entities_status: String = conn
                     .query_row(
-                        "SELECT graph_status FROM documents WHERE path = ?1",
+                        "SELECT entities_status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| r.get(0),
                     )
                     .map_err(|e| CognitoError::Database(e.to_string()))?;
-                assert_eq!(graph_status, "pending");
+                assert_eq!(entities_status, "pending");
                 let chunk_n: i64 = conn
                     .query_row(
                         "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.path = ?1",
@@ -641,26 +666,21 @@ mod tests {
             })
             .expect("assert first import rows");
 
-        let processed = graph_worker::process_pending(&state, None);
+        let processed = background_worker::process_pending(&state, None);
         assert!(processed >= 1, "expected process_pending to handle note.md");
         state
             .with_sqlite(|conn| {
-                let graph_status: String = conn
+                let entities_status: String = conn
                     .query_row(
-                        "SELECT graph_status FROM documents WHERE path = ?1",
+                        "SELECT entities_status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| r.get(0),
                     )
                     .map_err(|e| CognitoError::Database(e.to_string()))?;
-                assert_eq!(graph_status, "ok");
+                assert_eq!(entities_status, "ok");
                 Ok(())
             })
-            .expect("graph ok after process_pending");
-        let snap = graph_index_service::get_graph_snapshot(&state, 400).expect("snapshot");
-        let nodes = snap["nodes"].as_array().expect("nodes");
-        let edges = snap["edges"].as_array().expect("edges");
-        assert!(nodes.len() >= 2, "expected at least 2 graph nodes");
-        assert!(edges.len() >= 1, "expected at least 1 graph edge");
+            .expect("entities ok after process_pending");
 
         let index_model = state
             .with_sqlite(|c| sqlite::get_setting(c, "index_embed_model"))
@@ -687,14 +707,6 @@ mod tests {
                 Ok(())
             })
             .expect("empty after reset");
-        let snap_reset = graph_index_service::get_graph_snapshot(&state, 400).expect("snap reset");
-        assert!(
-            snap_reset["nodes"]
-                .as_array()
-                .map(|a| a.is_empty())
-                .unwrap_or(false),
-            "expected empty graph after reset"
-        );
 
         let (tx_r, rx_r) = mpsc::channel();
         let st_r = state.clone();
@@ -750,7 +762,7 @@ mod tests {
                 Ok(())
             })
             .expect("mark removed");
-        let _ = graph_worker::process_pending(&state, None);
+        let _ = background_worker::process_pending(&state, None);
 
         // Lock still usable from the test thread (no permanent deadlock).
         state
@@ -826,32 +838,32 @@ mod tests {
         .expect("reindex note");
         state
             .with_sqlite(|conn| {
-                let (status, gstat): (String, String) = conn
+                let (status, estat): (String, String) = conn
                     .query_row(
-                        "SELECT status, graph_status FROM documents WHERE path = ?1",
+                        "SELECT status, entities_status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .map_err(|e| CognitoError::Database(e.to_string()))?;
                 assert_eq!(status, "indexed");
-                assert_eq!(gstat, "pending");
+                assert_eq!(estat, "pending");
                 Ok(())
             })
             .expect("assert reindex pending");
-        let _ = graph_worker::process_pending(&state, None);
+        let _ = background_worker::process_pending(&state, None);
         state
             .with_sqlite(|conn| {
-                let gstat: String = conn
+                let estat: String = conn
                     .query_row(
-                        "SELECT graph_status FROM documents WHERE path = ?1",
+                        "SELECT entities_status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| r.get(0),
                     )
                     .map_err(|e| CognitoError::Database(e.to_string()))?;
-                assert_eq!(gstat, "ok");
+                assert_eq!(estat, "ok");
                 Ok(())
             })
-            .expect("assert reindex graph ok");
+            .expect("assert reindex entities ok");
 
         std::fs::remove_file(&note_abs).expect("delete note.md");
         file_watcher::handle_watch_paths(&state, None, &[note_abs.clone()]);
@@ -868,12 +880,6 @@ mod tests {
                 Ok(())
             })
             .expect("assert removed");
-        let snap_after = graph_index_service::get_graph_snapshot(&state, 400).expect("snap after");
-        let nodes_after = snap_after["nodes"].as_array().expect("nodes after");
-        assert!(
-            nodes_after.is_empty(),
-            "expected empty graph after document purge"
-        );
 
         let vault_b = tempfile::tempdir().expect("vault B");
         let b_note = vault_b.path().join("only-b.md");
@@ -970,14 +976,5 @@ mod tests {
                 Ok(())
             })
             .expect("empty after forget");
-        let snap_forget =
-            graph_index_service::get_graph_snapshot(&state, 400).expect("snap forget");
-        assert!(
-            snap_forget["nodes"]
-                .as_array()
-                .map(|a| a.is_empty())
-                .unwrap_or(false),
-            "expected empty graph after forget"
-        );
     }
 }

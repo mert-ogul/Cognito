@@ -11,7 +11,7 @@ export type StatusLine = {
 export function describeStatus(
   health: AppHealth | undefined,
   importProgress: ImportProgress | null | undefined,
-  graphQueue: number,
+  entitiesQueue: number,
 ): StatusLine | null {
   if (!health) {
     return null;
@@ -49,9 +49,9 @@ export function describeStatus(
   if (health.warmUpPending) {
     return { text: `Loading ${health.chatModel}`, tone: "muted" };
   }
-  if (graphQueue > 0) {
+  if (entitiesQueue > 0) {
     return {
-      text: `Building graph, ${graphQueue} file${graphQueue === 1 ? "" : "s"} left`,
+      text: `Finding names, ${entitiesQueue} file${entitiesQueue === 1 ? "" : "s"} left`,
       tone: "muted",
     };
   }

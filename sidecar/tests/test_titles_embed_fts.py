@@ -35,6 +35,12 @@ def test_embed_prefixes_by_model() -> None:
         "Represent this sentence for searching relevant passages: ",
         "",
     )
+    qwen_q = (
+        "Instruct: Given a question, retrieve passages from the user's documents "
+        "that answer it\nQuery: "
+    )
+    assert embed_prefixes("qwen3-embedding") == (qwen_q, "")
+    assert embed_prefixes("qwen3-embedding:latest") == (qwen_q, "")
     assert embed_prefixes("other-model") == ("", "")
 
 
@@ -61,7 +67,7 @@ def test_reciprocal_rank_fusion_order() -> None:
     assert [c["chunk_id"] for c in fused] == ["a", "c", "b", "d"]
 
 
-def test_prompt_labels_use_title(monkeypatch) -> None:
+def test_citations_use_document_title(monkeypatch) -> None:
     import tempfile
     from pathlib import Path
 
@@ -69,6 +75,7 @@ def test_prompt_labels_use_title(monkeypatch) -> None:
     from common.sqlite_vec_util import MOCK_EMBED_ENV
 
     monkeypatch.setenv(MOCK_EMBED_ENV, "1")
+    monkeypatch.setenv("COGNITO_MOCK_MODELS", "1")
     monkeypatch.setattr(
         cp,
         "vector_top_k",
@@ -81,6 +88,8 @@ def test_prompt_labels_use_title(monkeypatch) -> None:
                 "page_end": 2,
                 "title": "Semi-Supervised Classification with Graph Convolutional Networks",
                 "path": "/vault/1609.02907v4.pdf",
+                "role": "body",
+                "labels": ["(2)"],
             }
         ],
     )
@@ -89,13 +98,12 @@ def test_prompt_labels_use_title(monkeypatch) -> None:
     d = tempfile.mkdtemp()
     out = cp.prepare_chat_retrieval(
         str(Path(d) / "v.sqlite"),
-        None,
         "Equation (2)",
         "nomic-embed-text",
     )
-    user = out["messages"][-1]["content"]
-    assert (
-        "[1] Semi-Supervised Classification with Graph Convolutional Networks, p. 2" in user
+    assert out["citations"][0]["title"] == (
+        "Semi-Supervised Classification with Graph Convolutional Networks"
     )
-    assert "1609.02907" not in user
-    assert "LaTeX" in out["messages"][0]["content"]
+    assert out["citations"][0]["pageStart"] == 2
+    assert "1609.02907" not in out["citations"][0]["title"]
+    assert "messages" not in out

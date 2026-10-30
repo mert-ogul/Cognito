@@ -7,14 +7,15 @@ const baseHealth: AppHealth = {
   sidecarReachable: true,
   ollamaModelReady: true,
   vaultConfigured: true,
-  chatModel: "phi4-mini",
-  embedModel: "nomic-embed-text",
+  chatModel: "qwen3.5:9b",
+  embedModel: "qwen3-embedding:0.6b",
   chatModelWarmed: true,
   warmUpPending: false,
   warmUpError: null,
   ollamaReachable: true,
   missingModels: [],
   indexFormatUpdating: false,
+  checkingModelsReady: true,
 };
 
 const indexing: ImportProgress = {
@@ -37,7 +38,7 @@ describe("describeStatus", () => {
       {
         ...baseHealth,
         ollamaReachable: false,
-        missingModels: ["phi4-mini"],
+        missingModels: ["qwen3.5:9b"],
         sidecarReachable: false,
         warmUpError: "warm failed",
       },
@@ -51,14 +52,14 @@ describe("describeStatus", () => {
     const line = describeStatus(
       {
         ...baseHealth,
-        missingModels: ["nomic-embed-text"],
+        missingModels: ["qwen3-embedding:0.6b"],
         sidecarReachable: false,
         warmUpError: "warm failed",
       },
       indexing,
       5,
     );
-    expect(line).toEqual({ text: "Missing model: nomic-embed-text", tone: "danger" });
+    expect(line).toEqual({ text: "Missing model: qwen3-embedding:0.6b", tone: "danger" });
   });
 
   it("prioritises sidecar stopped over warm-up error", () => {
@@ -95,7 +96,7 @@ describe("describeStatus", () => {
     expect(line).toEqual({ text: "Updating the search index", tone: "muted" });
   });
 
-  it("prioritises indexing over model loading and graph queue", () => {
+  it("prioritises indexing over model loading and entities queue", () => {
     const line = describeStatus(
       { ...baseHealth, warmUpPending: true },
       indexing,
@@ -104,22 +105,22 @@ describe("describeStatus", () => {
     expect(line).toEqual({ text: "Indexing 12 of 40", tone: "muted" });
   });
 
-  it("prioritises model loading over graph queue", () => {
+  it("prioritises model loading over entities queue", () => {
     const line = describeStatus(
       { ...baseHealth, warmUpPending: true },
       null,
       5,
     );
-    expect(line).toEqual({ text: "Loading phi4-mini", tone: "muted" });
+    expect(line).toEqual({ text: "Loading qwen3.5:9b", tone: "muted" });
   });
 
-  it("reports graph queue when nothing else is wrong", () => {
+  it("reports entities queue when nothing else is wrong", () => {
     expect(describeStatus(baseHealth, null, 5)).toEqual({
-      text: "Building graph, 5 files left",
+      text: "Finding names, 5 files left",
       tone: "muted",
     });
     expect(describeStatus(baseHealth, null, 1)).toEqual({
-      text: "Building graph, 1 file left",
+      text: "Finding names, 1 file left",
       tone: "muted",
     });
   });

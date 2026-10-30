@@ -8,6 +8,7 @@ import {
   getSettings,
   listDocuments,
   openLogsFolder,
+  rebuildConnections,
   rebuildIndex,
   selectVaultFolder,
   setVault,
@@ -28,9 +29,13 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
   const qc = useQueryClient();
   const { data } = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: open });
   const docs = useQuery({ queryKey: ["documents"], queryFn: listDocuments, enabled: open });
-  const [chat, setChat] = useState("phi4-mini");
-  const [embed, setEmbed] = useState("nomic-embed-text");
-  const [graphOn, setGraphOn] = useState(true);
+  const [chat, setChat] = useState("qwen3.5:9b");
+  const [background, setBackground] = useState("qwen3.5:4b");
+  const [embed, setEmbed] = useState("qwen3-embedding:0.6b");
+  const [summariseOn, setSummariseOn] = useState(true);
+  const [thoroughOn, setThoroughOn] = useState(false);
+  const [findNamesOn, setFindNamesOn] = useState(true);
+  const [alsoFind, setAlsoFind] = useState("");
   const [ver, setVer] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmKind>(null);
   const [pendingFolder, setPendingFolder] = useState<string | null>(null);
@@ -51,8 +56,12 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
   useEffect(() => {
     if (!data) return;
     setChat(data.chatModel);
+    setBackground(data.backgroundModel);
     setEmbed(data.embedModel);
-    setGraphOn(data.graphExtractionEnabled);
+    setSummariseOn(data.summariseDocuments);
+    setThoroughOn(data.thoroughReranking ?? false);
+    setFindNamesOn(data.extractEntities);
+    setAlsoFind(data.extraEntityLabels ?? "");
     setConfirm(null);
     setPendingFolder(null);
     setActionError(null);
@@ -70,29 +79,33 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
       return `Switching to ${pendingFolder} removes the ${docCount} documents from ${folderLabel} from Cognito. Your files stay where they are.`;
     }
     if (confirm === "rebuild") {
-      return `Every document in ${folderLabel} is indexed again and the graph is rebuilt.`;
+      return `Every document in ${folderLabel} is indexed again and connections are rebuilt.`;
     }
     if (confirm === "remove-library") {
-      return `Cognito forgets ${folderLabel} and deletes its index and graph. Your files stay where they are.`;
+      return `Cognito forgets ${folderLabel} and deletes its index. Your files stay where they are.`;
     }
-    return `All ${docCount} documents will be indexed again with ${confirmModel}, and the graph will be rebuilt.`;
+    return `All ${docCount} documents will be indexed again with ${confirmModel}, and connections will be rebuilt.`;
   }, [confirm, confirmModel, docCount, folderLabel, pendingFolder]);
 
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: ["settings"] });
     void qc.invalidateQueries({ queryKey: ["health"] });
     void qc.invalidateQueries({ queryKey: ["documents"] });
-    void qc.invalidateQueries({ queryKey: ["graph-snapshot"] });
   };
 
+  const settingsPayload = () => ({
+    vaultPath: data?.vaultPath ?? null,
+    chatModel: chat,
+    embedModel: embed,
+    backgroundModel: background,
+    summariseDocuments: summariseOn,
+    extractEntities: findNamesOn,
+    extraEntityLabels: alsoFind,
+    thoroughReranking: thoroughOn,
+  });
+
   const savePlain = useMutation({
-    mutationFn: () =>
-      updateSettings({
-        vaultPath: data?.vaultPath ?? null,
-        chatModel: chat,
-        embedModel: embed,
-        graphExtractionEnabled: graphOn,
-      }),
+    mutationFn: () => updateSettings(settingsPayload()),
     onMutate: () => setActionError(null),
     onSuccess: () => {
       invalidate();
@@ -149,7 +162,11 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
           vaultPath: data.vaultPath ?? null,
           chatModel: chat,
           embedModel: data.embedModel,
-          graphExtractionEnabled: graphOn,
+          backgroundModel: background,
+          summariseDocuments: summariseOn,
+          extractEntities: findNamesOn,
+          extraEntityLabels: alsoFind,
+          thoroughReranking: thoroughOn,
         });
         await rebuildIndex(embed.trim());
       } else if (confirm === "rebuild") {
@@ -218,30 +235,91 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
         <section className="space-y-2">
           <h3 className="font-medium text-text">Models</h3>
           <div className="space-y-1">
-            <Label htmlFor="chat-model">Chat model</Label>
+            <Label htmlFor="chat-model">Answer model</Label>
             <Input id="chat-model" value={chat} onChange={(e) => setChat(e.target.value)} autoComplete="off" />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="background-model">Background model</Label>
+            <Input
+              id="background-model"
+              value={background}
+              onChange={(e) => setBackground(e.target.value)}
+              autoComplete="off"
+            />
           </div>
           <div className="space-y-1">
             <Label htmlFor="embed-model">Embedding model</Label>
             <Input id="embed-model" value={embed} onChange={(e) => setEmbed(e.target.value)} autoComplete="off" />
           </div>
-        </section>
-
-        <section className="space-y-2">
-          <h3 className="font-medium text-text">Knowledge graph</h3>
           <div className="flex items-center justify-between gap-3 border border-line px-3 py-2">
             <div>
-              <p className="text-text">Build knowledge graph</p>
+              <p className="text-text">Summarise documents in the background</p>
               <p className="text-muted">
-                Runs the chat model on every chunk. Slow on large libraries.
+                Builds a checked card per document with the background model.
               </p>
             </div>
             <Switch
-              checked={graphOn}
-              onCheckedChange={setGraphOn}
-              aria-label="Build knowledge graph"
+              checked={summariseOn}
+              onCheckedChange={setSummariseOn}
+              aria-label="Summarise documents in the background"
             />
           </div>
+          <div className="flex items-center justify-between gap-3 border border-line px-3 py-2">
+            <div>
+              <p className="text-text">Thorough reranking (slower)</p>
+              <p className="text-muted">
+                Optional Qwen3-Reranker on Apple GPU when available; off by default.
+              </p>
+            </div>
+            <Switch
+              checked={thoroughOn}
+              onCheckedChange={setThoroughOn}
+              aria-label="Thorough reranking (slower)"
+            />
+          </div>
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-medium text-text">Connections</h3>
+          <div className="flex items-center justify-between gap-3 border border-line px-3 py-2">
+            <div>
+              <p className="text-text">Find names, places and dates</p>
+              <p className="text-muted">
+                Extracts people, places and dates so documents can be linked.
+              </p>
+            </div>
+            <Switch
+              checked={findNamesOn}
+              onCheckedChange={setFindNamesOn}
+              aria-label="Find names, places and dates"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="also-find">Also find</Label>
+            <Input
+              id="also-find"
+              value={alsoFind}
+              onChange={(e) => setAlsoFind(e.target.value)}
+              placeholder="projects, products, …"
+              autoComplete="off"
+            />
+            <p className="text-muted">Comma-separated labels to look for in addition to names.</p>
+          </div>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={busy || !!confirm || docCount === 0}
+            onClick={() => {
+              setBusy(true);
+              setActionError(null);
+              void rebuildConnections()
+                .then(() => invalidate())
+                .catch((e) => setActionError(String(e)))
+                .finally(() => setBusy(false));
+            }}
+          >
+            Rebuild connections
+          </Button>
         </section>
 
         <section className="space-y-2">

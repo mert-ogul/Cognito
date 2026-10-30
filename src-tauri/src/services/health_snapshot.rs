@@ -1,10 +1,10 @@
-//! Compose [`AppHealth`](crate::models::AppHealth) from local probes (no sidecar RPC).
+//! Compose [`AppHealth`](crate::models::AppHealth) from local probes and sidecar status.
 
 use crate::db::sqlite;
 use crate::errors::{CognitoError, CognitoResult};
 use crate::models::AppHealth;
 use crate::services::ollama_stream::ollama_base_url;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -79,6 +79,26 @@ async fn probe_ollama(chat_model: &str, embed_model: &str) -> (bool, Vec<String>
     (true, missing)
 }
 
+fn probe_checking_models(state: &crate::app::state::SharedState) -> bool {
+    if std::env::var("COGNITO_MOCK_MODELS").ok().as_deref() == Some("1") {
+        return true;
+    }
+    let app_data = state.data_dir.to_string_lossy().into_owned();
+    let thorough = state
+        .with_sqlite(|c| sqlite::load_settings(c))
+        .map(|s| s.thorough_reranking)
+        .unwrap_or(false);
+    match state.sidecar.with_session(|s| {
+        s.request(
+            "models_status",
+            json!({ "app_data": app_data, "thorough_reranking": thorough }),
+        )
+    }) {
+        Ok(v) => v.get("ready").and_then(|x| x.as_bool()).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 pub async fn read_app_health(
     state: crate::app::state::SharedState,
 ) -> CognitoResult<AppHealth> {
@@ -95,6 +115,7 @@ pub async fn read_app_health(
         let chat_model_warmed = st.chat_warm_ready() == Some(true);
         let warm_up_error = st.chat_warm_error();
         let index_format_updating = st.index_format_updating.load(Ordering::SeqCst);
+        let checking_models_ready = probe_checking_models(&st);
         Ok::<_, CognitoError>((
             sqlite_ok,
             vault_configured,
@@ -104,6 +125,7 @@ pub async fn read_app_health(
             chat_model_warmed,
             warm_up_error,
             index_format_updating,
+            checking_models_ready,
         ))
     })
     .await
@@ -118,6 +140,7 @@ pub async fn read_app_health(
         chat_model_warmed,
         warm_up_error,
         index_format_updating,
+        checking_models_ready,
     ) = sync;
 
     let (ollama_reachable, missing_models) =
@@ -137,6 +160,7 @@ pub async fn read_app_health(
         ollama_reachable,
         missing_models,
         index_format_updating,
+        checking_models_ready,
     })
 }
 

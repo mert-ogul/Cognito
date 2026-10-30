@@ -5,10 +5,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import duckdb
 import pytest
 
-from common.duckdb_util import ensure_schema
 from common.sqlite_vec_util import (
     connect_with_vec,
     ensure_chunk_embedding_table,
@@ -38,34 +36,15 @@ def test_insert_wrong_size_raises(tmp_path: Path) -> None:
     con.close()
 
 
-def test_reset_index_removes_table_and_graph_rows(tmp_path: Path) -> None:
+def test_reset_index_removes_embedding_table(tmp_path: Path) -> None:
     sqlite_path = str(tmp_path / "v.sqlite")
-    duck_path = str(tmp_path / "g.duckdb")
     con = connect_with_vec(sqlite_path)
     ensure_chunk_embedding_table(con, 4)
     insert_chunk_embedding(con, "c1", [0.1, 0.2, 0.3, 0.4])
     con.commit()
     con.close()
 
-    ensure_schema(duck_path)
-    duck = duckdb.connect(duck_path)
-    duck.execute(
-        """
-        INSERT INTO graph_nodes
-        (node_id, name, kind, normalized_name, source_count, confidence_avg, metadata_json, created_at, updated_at)
-        VALUES ('n1', 'A', 'entity', 'a', 1, 1.0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        """
-    )
-    duck.execute(
-        """
-        INSERT INTO graph_edges
-        (edge_id, source_node_id, target_node_id, relation, document_id, chunk_id, confidence, created_at)
-        VALUES ('e1', 'n1', 'n1', 'relates_to', 'd1', 'c1', 1.0, CURRENT_TIMESTAMP)
-        """
-    )
-    duck.close()
-
-    out = rpc_reset_index({"sqlitePath": sqlite_path, "duckPath": duck_path})
+    out = rpc_reset_index({"sqlitePath": sqlite_path})
     assert out["ok"] is True
 
     con2 = sqlite3.connect(sqlite_path)
@@ -74,8 +53,3 @@ def test_reset_index_removes_table_and_graph_rows(tmp_path: Path) -> None:
     ).fetchone()[0]
     con2.close()
     assert n == 0
-
-    duck2 = duckdb.connect(duck_path)
-    assert duck2.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0] == 0
-    assert duck2.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0] == 0
-    duck2.close()
