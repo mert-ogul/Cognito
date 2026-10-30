@@ -5,6 +5,6 @@ export type LabelProps = React.LabelHTMLAttributes<HTMLLabelElement>;
 
 export function Label({ className, ...props }: LabelProps) {
   return (
-    <label className={cn("text-xs font-medium leading-none text-[var(--foreground)]", className)} {...props} />
+    <label className={cn("text-[13px] font-medium leading-none text-text", className)} {...props} />
   );
 }

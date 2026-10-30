@@ -1,4 +1,4 @@
--- Cognito MVP schema: SQLite vault + metadata (embeddings in chunk_embeddings BLOB; sqlite-vec compatible layout)
+-- SQLite vault metadata (embeddings in chunk_embeddings BLOB; sqlite-vec compatible layout)
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;

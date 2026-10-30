@@ -1,39 +1,45 @@
-# Manual QA checklist (release candidate)
+# Manual QA checklist
 
-Use this list before tagging a release candidate or public alpha. Adjust expected behavior to the current MVP in [CONSTITUTION.md](../CONSTITUTION.md).
+Use this list before tagging a release candidate or public alpha.
 
 ## Environment
 
-- [ ] **First launch**: App opens; status area shows sidecar and subsystem health when applicable.
-- [ ] **Missing Ollama**: With Ollama stopped, UI shows a clear blocked/warm-up state; no silent crash when opening chat or settings.
-- [ ] **Missing model**: Wrong or unpulled model name surfaces a readable error (pull / fix model in settings).
+- [ ] First launch: the app opens; the toolbar status reflects sidecar and Ollama health.
+- [ ] Missing Ollama: with Ollama stopped, the banner and chat stay blocked with a clear message.
+- [ ] Missing model: a wrong or unpulled model name surfaces a readable error; Retry after pull works.
 
 ## Vault and import
 
-- [ ] **Import folder**: PDF/Markdown under the vault import successfully within the 100-document first-import cap.
-- [ ] **Progress display**: Import job shows progress phases (parse/index) without freezing the shell.
-- [ ] **Over-cap first import**: At 100 active documents, additional import is refused with the documented message.
-- [ ] **Empty vault**: Chat explains no indexed content when the library is empty (not hallucinated citations).
+- [ ] Choosing a folder indexes PDF and Markdown within the 100-document first-import cap.
+- [ ] Import progress shows in Sources without freezing the shell.
+- [ ] At 100 active documents, further import is refused with the documented message.
+- [ ] Empty library: chat explains there is no indexed content (no invented citations).
 
 ## Index and graph
 
-- [ ] **Graph builds**: After import, graph snapshot loads; nodes/edges appear for extracted content.
-- [ ] **Embedding failure path**: If embeddings cannot be produced, documents fail with a recorded error; app remains usable.
-- [ ] **Graph extraction failure**: Failure does not corrupt the vault; vector search still works where embeddings exist (vector-only fallback).
+- [ ] After import, the graph pane loads nodes and edges for extracted content.
+- [ ] Embedding failures mark documents failed; the rest of the app stays usable.
+- [ ] Graph extraction failure does not corrupt the vault; chat still works with vector-only retrieval.
 
 ## Chat and citations
 
-- [ ] **Ask question**: Grounded answer path runs with Ollama when models are available.
-- [ ] **Receive citations**: Assistant responses include chunk citations when evidence is returned.
-- [ ] **Open citation preview**: Clicking a citation opens preview and highlights relevant text where implemented.
-- [ ] **Node detail**: Graph node selection shows detail consistent with stored extraction.
+- [ ] Asking a question returns a grounded answer when Ollama and models are available.
+- [ ] Answers include numbered citations when evidence is returned.
+- [ ] Clicking a citation opens the passage pane with the source text.
+- [ ] Selecting a graph node shows detail consistent with stored extraction.
+
+## Library controls
+
+- [ ] Switch folder: old index and graph are cleared; new folder indexes cleanly.
+- [ ] Rebuild index: validates the folder before wiping; reindexes successfully.
+- [ ] Remove library: Cognito forgets the folder; files remain on disk.
 
 ## Reliability
 
-- [ ] **Offline usage**: With Ollama off after index exists, behavior degrades gracefully (no indexed query embeddings → explicit message, not invented sources).
-- [ ] **Recovery after sidecar restart**: Restarting the sidecar (or killing Python child) recovers without requiring a full app reinstall; vault data intact.
-- [ ] **Deleted files**: Removing a vault file is handled per product rules (re-index or stale handling); no crash.
+- [ ] With Ollama off after an index exists, missing query embeddings produce an explicit message.
+- [ ] Restarting or killing the sidecar recovers without reinstalling; vault data stays intact.
+- [ ] Removing a vault file is handled without crashing the shell.
 
 ## Packaged build
 
-- [ ] **Packaged app smoke test**: Built `.app` / installer launches, finds sidecar resources, completes one import and one chat turn.
+- [ ] Built app or installer launches, finds sidecar resources, completes one import and one chat turn.

@@ -1,13 +1,55 @@
 @import "tailwindcss";
 
 :root {
-  color-scheme: dark;
-  --bg: #0c0f14;
-  --surface: #151a22;
-  --border: #2a3344;
-  --text: #e8edf5;
-  --muted: #8b98ab;
-  --accent: #3d9eff;
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --bg-pane: #f4f4f3;
+  --bg-hover: #ebebea;
+  --text: #1d1d1f;
+  --text-muted: #6b6b70;
+  --line: #e2e2e0;
+  --accent: #1f6378;
+  --on-accent: #ffffff;
+  --danger: #b42318;
+  --warning: #8a5a00;
+  --mark: #fff1a8;
+  --family-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui,
+    sans-serif;
+  --family-read: "Iowan Old Style", Charter, "Sitka Text", Cambria, Georgia, serif;
+  --family-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1e;
+    --bg-pane: #232325;
+    --bg-hover: #2c2c2f;
+    --text: #ececec;
+    --text-muted: #9a9aa0;
+    --line: #333336;
+    --accent: #7fb7c9;
+    --on-accent: #10262e;
+    --danger: #f97066;
+    --warning: #e0b25a;
+    --mark: #5a4a12;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-pane: var(--bg-pane);
+  --color-hover: var(--bg-hover);
+  --color-text: var(--text);
+  --color-muted: var(--text-muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-danger: var(--danger);
+  --color-warning: var(--warning);
+  --color-mark: var(--mark);
+  --font-ui: var(--family-ui);
+  --font-read: var(--family-read);
+  --font-mono: var(--family-mono);
 }
 
 body {
@@ -15,9 +57,126 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-family: var(--family-ui);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 #root {
   min-height: 100vh;
 }
+
+.answer {
+  font-family: var(--family-read);
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.answer p {
+  margin: 0 0 0.75em;
+}
+
+.answer p:last-child {
+  margin-bottom: 0;
+}
+
+.answer ul,
+.answer ol {
+  margin: 0 0 0.75em;
+  padding-left: 1.25em;
+}
+
+.answer ul {
+  list-style-type: disc;
+}
+
+.answer ol {
+  list-style-type: decimal;
+}
+
+.answer li {
+  margin: 0.2em 0;
+}
+
+.answer h1,
+.answer h2,
+.answer h3,
+.answer h4 {
+  font-family: var(--family-ui);
+  font-weight: 600;
+  color: var(--text);
+  margin: 1em 0 0.4em;
+}
+
+.answer h1 {
+  font-size: 16px;
+}
+
+.answer h2 {
+  font-size: 15px;
+}
+
+.answer h3,
+.answer h4 {
+  font-size: 14px;
+}
+
+.answer code {
+  font-family: var(--family-mono);
+  font-size: 12.5px;
+  background: var(--bg-pane);
+  border-radius: 4px;
+  padding: 0.1em 0.3em;
+}
+
+.answer pre {
+  font-family: var(--family-mono);
+  font-size: 12.5px;
+  background: var(--bg-pane);
+  padding: 0.75em 1em;
+  overflow-x: auto;
+  margin: 0 0 0.75em;
+  border-radius: 4px;
+}
+
+.answer pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+
+.answer blockquote {
+  margin: 0 0 0.75em;
+  padding-left: 0.75em;
+  border-left: 2px solid var(--line);
+  color: var(--text-muted);
+}
+
+.answer table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 0.75em;
+  font-size: 14px;
+}
+
+.answer th,
+.answer td {
+  border: 1px solid var(--line);
+  padding: 0.35em 0.5em;
+  text-align: left;
+}
+
+.answer a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.answer .katex-display {
+  display: block;
+  margin: 1em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+}
+

@@ -1,16 +1,17 @@
 export const E2E_HEALTH = {
   sqliteOk: true,
-  duckdbOk: true,
   sidecarReachable: true,
   ollamaModelReady: true,
   vaultConfigured: true,
-  chatModel: "phi4-mini",
-  embedModel: "nomic-embed-text",
+  chatModel: "qwen3.5:9b",
+  embedModel: "qwen3-embedding:0.6b",
   chatModelWarmed: true,
   warmUpPending: false,
   warmUpError: null,
   ollamaReachable: true,
   missingModels: [] as string[],
+  indexFormatUpdating: false,
+  checkingModelsReady: true,
 } as const;
 
 export const E2E_DOCUMENTS = [
@@ -26,54 +27,54 @@ export const E2E_DOCUMENTS = [
     importedAt: "2026-01-01T00:00:00Z",
     indexedAt: "2026-01-01T01:00:00Z",
     modifiedAt: "2026-01-01T00:30:00Z",
-    graphStatus: "ok",
-    graphError: null,
+    entitiesStatus: "ok",
+    entitiesError: null,
+    cardStatus: "ok",
+    cardType: "note",
+    cardDate: "2026-01-01",
+    cardPeople: ["Ada Chen"],
+    cardOrganizations: ["Meridian Labs"],
   },
 ] as const;
 
-export const E2E_GRAPH_SNAPSHOT = {
-  nodes: [
+export const E2E_DOCUMENT_CARD = {
+  documentId: "e2e-doc-1",
+  type: "note",
+  title: "Fixture sample",
+  date: "2026-01-01",
+  people: [{ name: "Ada Chen", role: "author" }],
+  organizations: ["Meridian Labs"],
+  summary: [
     {
-      nodeId: "n-e2e-1",
-      name: "Sample Entity",
-      kind: "concept",
-      normalizedName: "sample entity",
-      sourceCount: 2,
-      confidenceAvg: 0.9,
-    },
-    {
-      nodeId: "n-e2e-2",
-      name: "Related Term",
-      kind: "topic",
-      normalizedName: "related term",
-      sourceCount: 1,
-      confidenceAvg: 0.7,
+      text: "Ada Chen works at Meridian Labs.",
+      quotes: [{ source: 1, text: "Ada Chen works at Meridian Labs." }],
     },
   ],
-  edges: [
+  facts: [
     {
-      edgeId: "e2e-e1",
-      sourceNodeId: "n-e2e-1",
-      targetNodeId: "n-e2e-2",
-      relation: "relates_to",
-      documentId: "e2e-doc-1",
-      chunkId: "c1",
-      confidence: 0.85,
+      text: "Ada Chen works at Meridian Labs.",
+      quotes: [{ source: 1, text: "Ada Chen works at Meridian Labs." }],
     },
   ],
+  fields: [
+    {
+      key: "topic",
+      value: "fixture",
+      quotes: [{ source: 1, text: "Ada Chen works at Meridian Labs." }],
+    },
+  ],
+  aliases: [],
+  questions: ["What does Ada Chen do?"],
+  model: "qwen3.5:4b",
+  createdAt: "2026-01-01T02:00:00Z",
 } as const;
 
-export const E2E_NODE_DETAIL = {
-  node: {
-    nodeId: "n-e2e-1",
-    name: "Sample Entity",
-    kind: "concept",
-    normalizedName: "sample entity",
-    sourceCount: 2,
-    confidenceAvg: 0.9,
-    metadataJson: null,
-    createdAt: "2026-01-01",
-    updatedAt: "2026-01-01",
+export const E2E_SUGGESTED_QUESTIONS = [
+  {
+    question: "What does Ada Chen do?",
+    scopeIds: ["e2e-doc-1"],
+    label: null,
   },
-  edges: E2E_GRAPH_SNAPSHOT.edges,
-} as const;
+] as const;
+
+

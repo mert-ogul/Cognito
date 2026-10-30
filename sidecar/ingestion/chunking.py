@@ -8,9 +8,22 @@ from dataclasses import dataclass, field
 
 TARGET = 512
 OVERLAP = 50
+_REGION_GAP = 4.0
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+_REF_SECTION_KEYS = frozenset(
+    {"references", "bibliography", "acknowledgments", "acknowledgements"}
+)
+_CITATION_LINE_RE = re.compile(
+    r"^\s*(?:\[\d+\]|\d+\.)\s+.*\b(?:19|20)\d{2}\b",
+    re.IGNORECASE,
+)
+_EQ_LABEL_RE = re.compile(r"^\s*(\(\d+\))\s*$")
+_CAPTION_LABEL_RE = re.compile(
+    r"^\s*((?:Table|Figure|Fig\.)\s+\d+)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -18,6 +31,9 @@ class ChunkDraft:
     text: str
     page_start: int | None
     page_end: int | None
+    heading_trail: list[str] = field(default_factory=list)
+    role: str = "body"
+    regions: list[dict] | None = None
 
 
 @dataclass
@@ -25,6 +41,7 @@ class _Block:
     text: str
     page: int | None = None
     heading_trail: list[str] = field(default_factory=list)
+    bbox: tuple[float, float, float, float] | None = None
 
 
 def estimate_tokens(text: str) -> int:
@@ -94,16 +111,118 @@ def _markdown_blocks(text: str) -> list[_Block]:
     return blocks
 
 
+def _bbox_from_raw(raw: object) -> tuple[float, float, float, float] | None:
+    if not isinstance(raw, (list, tuple)) or len(raw) < 4:
+        return None
+    try:
+        return (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
+    except (TypeError, ValueError):
+        return None
+
+
 def _pdf_blocks(pages: list[dict] | None, text: str) -> list[_Block]:
     if pages:
         blocks: list[_Block] = []
         for p in pages:
             page_no = int(p.get("page", 0)) or None
+            raw_blocks = p.get("blocks")
+            if isinstance(raw_blocks, list) and raw_blocks:
+                for rb in raw_blocks:
+                    if not isinstance(rb, dict):
+                        continue
+                    bt = str(rb.get("text") or "").strip()
+                    if not bt:
+                        continue
+                    bbox = _bbox_from_raw(rb.get("bbox"))
+                    blocks.append(_Block(text=bt, page=page_no, bbox=bbox))
+                continue
             for para in _paragraphs_from_text(str(p.get("text", ""))):
                 blocks.append(_Block(text=para, page=page_no))
         if blocks:
             return blocks
     return [_Block(text=p, page=None) for p in _paragraphs_from_text(text)]
+
+
+def _rects_overlap_or_near(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+    gap: float,
+) -> bool:
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    if ax1 + gap < bx0 or bx1 + gap < ax0:
+        return False
+    if ay1 + gap < by0 or by1 + gap < ay0:
+        return False
+    return True
+
+
+def _union_rect(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
+def merge_regions(
+    regions: list[dict],
+    *,
+    gap: float = _REGION_GAP,
+) -> list[dict]:
+    """Union overlapping/adjacent rects on the same page."""
+    by_page: dict[int, list[tuple[float, float, float, float]]] = {}
+    for r in regions:
+        try:
+            page = int(r["page"])
+            box = (float(r["x0"]), float(r["y0"]), float(r["x1"]), float(r["y1"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        by_page.setdefault(page, []).append(box)
+
+    out: list[dict] = []
+    for page in sorted(by_page):
+        boxes = by_page[page]
+        merged: list[tuple[float, float, float, float]] = []
+        for box in sorted(boxes, key=lambda b: (b[1], b[0])):
+            placed = False
+            for i, cur in enumerate(merged):
+                if _rects_overlap_or_near(cur, box, gap):
+                    merged[i] = _union_rect(cur, box)
+                    placed = True
+                    break
+            if not placed:
+                merged.append(box)
+        # Second pass: unions can create new overlaps after sequential merges.
+        changed = True
+        while changed:
+            changed = False
+            nxt: list[tuple[float, float, float, float]] = []
+            for box in merged:
+                absorbed = False
+                for i, cur in enumerate(nxt):
+                    if _rects_overlap_or_near(cur, box, gap):
+                        nxt[i] = _union_rect(cur, box)
+                        absorbed = True
+                        changed = True
+                        break
+                if not absorbed:
+                    nxt.append(box)
+            merged = nxt
+        for x0, y0, x1, y1 in merged:
+            out.append({"page": page, "x0": x0, "y0": y0, "x1": x1, "y1": y1})
+    return out
+
+
+def _regions_from_pack(pack: list[_Block]) -> list[dict] | None:
+    raw: list[dict] = []
+    for b in pack:
+        if b.page is None or b.bbox is None:
+            continue
+        x0, y0, x1, y1 = b.bbox
+        raw.append({"page": b.page, "x0": x0, "y0": y0, "x1": x1, "y1": y1})
+    if not raw:
+        return None
+    return merge_regions(raw)
 
 
 def _split_at_whitespace(text: str, max_tokens: int) -> list[str]:
@@ -150,7 +269,12 @@ def _split_oversized_block(block: _Block) -> list[_Block]:
     if len(sentences) <= 1:
         for part in _split_at_whitespace(block.text, TARGET):
             pieces.append(
-                _Block(text=part, page=block.page, heading_trail=list(block.heading_trail))
+                _Block(
+                    text=part,
+                    page=block.page,
+                    heading_trail=list(block.heading_trail),
+                    bbox=block.bbox,
+                )
             )
         return pieces
     buf: list[str] = []
@@ -162,7 +286,12 @@ def _split_oversized_block(block: _Block) -> list[_Block]:
         if buf and estimate_tokens(candidate) > TARGET:
             for part in _split_at_whitespace(" ".join(buf), TARGET):
                 pieces.append(
-                    _Block(text=part, page=block.page, heading_trail=list(block.heading_trail))
+                    _Block(
+                        text=part,
+                        page=block.page,
+                        heading_trail=list(block.heading_trail),
+                        bbox=block.bbox,
+                    )
                 )
             buf = [sent]
             if estimate_tokens(sent) > TARGET:
@@ -172,6 +301,7 @@ def _split_oversized_block(block: _Block) -> list[_Block]:
                             text=part,
                             page=block.page,
                             heading_trail=list(block.heading_trail),
+                            bbox=block.bbox,
                         )
                     )
                 buf = []
@@ -180,7 +310,12 @@ def _split_oversized_block(block: _Block) -> list[_Block]:
     if buf:
         for part in _split_at_whitespace(" ".join(buf), TARGET):
             pieces.append(
-                _Block(text=part, page=block.page, heading_trail=list(block.heading_trail))
+                _Block(
+                    text=part,
+                    page=block.page,
+                    heading_trail=list(block.heading_trail),
+                    bbox=block.bbox,
+                )
             )
     return pieces
 
@@ -214,6 +349,74 @@ def _trail_line(trail: list[str]) -> str:
     return " > ".join(t for t in trail if t)
 
 
+def _heading_key(line: str) -> str:
+    raw = line.strip()
+    if raw.startswith("#"):
+        m = _HEADING_RE.match(raw)
+        raw = m.group(2) if m else raw.lstrip("#").strip()
+    return re.sub(r"[^a-z0-9]", "", raw.lower())
+
+
+def is_references_heading(line: str) -> bool:
+    return _heading_key(line) in _REF_SECTION_KEYS
+
+
+def citation_line_ratio(text: str) -> float:
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return 0.0
+    hits = sum(1 for ln in lines if _CITATION_LINE_RE.search(ln))
+    return hits / len(lines)
+
+
+def extract_chunk_labels(text: str) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for ln in (text or "").splitlines():
+        m = _EQ_LABEL_RE.match(ln)
+        if m:
+            label = m.group(1)
+        else:
+            m = _CAPTION_LABEL_RE.match(ln)
+            if not m:
+                continue
+            label = m.group(1)
+        if label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+    return labels
+
+
+def assign_chunk_role(
+    text: str,
+    heading_trail: list[str],
+    *,
+    after_references_heading: bool,
+) -> str:
+    if after_references_heading:
+        return "references"
+    for h in heading_trail:
+        if is_references_heading(h):
+            return "references"
+    for ln in (text or "").splitlines()[:8]:
+        if is_references_heading(ln):
+            return "references"
+    if citation_line_ratio(text) >= 0.4:
+        return "references"
+    return "body"
+
+
+def _pack_contains_references_heading(pack: list[_Block], trail: list[str]) -> bool:
+    if any(is_references_heading(h) for h in trail):
+        return True
+    for b in pack:
+        for ln in b.text.splitlines():
+            if is_references_heading(ln):
+                return True
+    return False
+
+
 def _pack_blocks(blocks: list[_Block], file_type: str) -> list[ChunkDraft]:
     blocks = _expand_blocks(blocks)
     if not blocks:
@@ -221,6 +424,8 @@ def _pack_blocks(blocks: list[_Block], file_type: str) -> list[ChunkDraft]:
     chunks: list[ChunkDraft] = []
     i = 0
     prev_body = ""
+    after_refs = False
+    use_trail = file_type in ("markdown", "docx")
     while i < len(blocks):
         pack: list[_Block] = []
         tokens = 0
@@ -243,7 +448,9 @@ def _pack_blocks(blocks: list[_Block], file_type: str) -> list[ChunkDraft]:
             pack = [blocks[i]]
             i += 1
         body = "\n\n".join(b.text for b in pack).strip()
-        trail = pack[0].heading_trail if file_type == "markdown" else []
+        trail = pack[0].heading_trail if use_trail else []
+        if _pack_contains_references_heading(pack, trail):
+            after_refs = True
         header = _trail_line(trail)
         parts: list[str] = []
         if header:
@@ -261,7 +468,18 @@ def _pack_blocks(blocks: list[_Block], file_type: str) -> list[ChunkDraft]:
         pages = [b.page for b in pack if b.page is not None]
         page_start = min(pages) if pages else None
         page_end = max(pages) if pages else None
-        chunks.append(ChunkDraft(text=text, page_start=page_start, page_end=page_end))
+        role = assign_chunk_role(text, trail, after_references_heading=after_refs)
+        regions = _regions_from_pack(pack) if file_type == "pdf" else None
+        chunks.append(
+            ChunkDraft(
+                text=text,
+                page_start=page_start,
+                page_end=page_end,
+                heading_trail=list(trail),
+                role=role,
+                regions=regions,
+            )
+        )
         prev_body = body
     return chunks
 
@@ -277,24 +495,11 @@ def chunk_semantic(
     ft = (file_type or "markdown").lower()
     if ft == "pdf":
         blocks = _pdf_blocks(pages, text)
+        pack_ft = "pdf"
+    elif ft == "docx":
+        blocks = _markdown_blocks(text if t else "")
+        pack_ft = "docx"
     else:
         blocks = _markdown_blocks(text if t else "")
-    return _pack_blocks(blocks, "markdown" if ft != "pdf" else "pdf")
-
-
-def chunk_text(text: str, max_chars: int = 1800, overlap: int = 200) -> list[ChunkDraft]:
-    """Legacy char-based chunking for tests compatibility."""
-    chunks: list[ChunkDraft] = []
-    if not text.strip():
-        return chunks
-    pos = 0
-    ln = len(text)
-    while pos < ln:
-        end = min(ln, pos + max_chars)
-        piece = text[pos:end].strip()
-        if piece:
-            chunks.append(ChunkDraft(text=piece, page_start=None, page_end=None))
-        if end >= ln:
-            break
-        pos = end - overlap
-    return chunks
+        pack_ft = "markdown"
+    return _pack_blocks(blocks, pack_ft)

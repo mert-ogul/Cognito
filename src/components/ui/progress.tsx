@@ -15,10 +15,10 @@ export function Progress({ value, className, ...rest }: Props) {
       aria-valuenow={v}
       aria-valuemin={0}
       aria-valuemax={100}
-      className={cn("h-2 w-full overflow-hidden rounded-full bg-[var(--background)]", className)}
+      className={cn("h-0.5 w-full overflow-hidden bg-line", className)}
       {...rest}
     >
-      <div className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300" style={{ width: `${v}%` }} />
+      <div className="h-full bg-accent transition-[width] duration-300" style={{ width: `${v}%` }} />
     </div>
   );
 }

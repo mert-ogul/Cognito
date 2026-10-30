@@ -1,28 +1,90 @@
-"""Deterministic hybrid retrieval: vector top-k → graph ≤2 hops → grounded context."""
+"""Scoped hybrid retrieval: vector + keyword RRF → label boost → rerank → notFound."""
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 import sqlite3
+import time
+from pathlib import Path
 from typing import Any
 
-import duckdb
-
-from common.duckdb_util import ensure_schema
 import sqlite_vec
 
+from common.model_store import rerank_with_budget
+from common.ollama import embed_prefixes, embed_text
 from common.sqlite_vec_util import (
     MOCK_EMBED_DIM,
     connect_with_vec,
     mock_embed_enabled,
     table_dimension,
 )
-from common.ollama import embed_text
-from extraction.node_normalizer import normalize_name
+from common.text_norm import normalize_search_text
 
-_CITE_MARK_RE = re.compile(r"\[\d+\]")
+log = logging.getLogger("cognito.sidecar")
+
+_VECTOR_K = 30
+_KEYWORD_K = 30
+_RRF_K = 60
+_RERANK_POOL = 20
+_KEEP = 5
+# MiniLM sigmoid retune via `npm run eval -- --mock-models` on vault.sqlite (2026-10-29):
+# mock MiniLM yes-probs are sigmoid(2.0 - i*0.15); top score ≈ 0.8808 for every query.
+# expect_file rows answered (notFound=false + title/file hit): GCN hit@1=1 at thr≤0.88;
+# example.pdf never hits in this vault. At thr=0.89 GCN becomes notFound.
+# Eval averages at 0.88: hit@1=0.500 (n=2), hit@5=0.500, notFound accuracy=0.000 (n=1 Mars).
+NOT_FOUND_SCORE = 0.88
 _HISTORY_TURN_CAP = 2000
-_HISTORY_TOTAL_CAP = 6000
+_HISTORY_TOTAL_CAP = 4000
+_CITE_MARK_RE = re.compile(r"\[\d+\]")
+_FTS_WORD_RE = re.compile(r"[0-9A-Za-z]+(?:'[0-9A-Za-z]+)?")
+_FTS_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "how",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "was",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "with",
+    }
+)
+_LABEL_MENTION_RE = re.compile(
+    r"(?:"
+    r"(?:equations?|eq\.?)\s*\(?\s*(\d+)\s*\)?"
+    r"|(?:tables?)\s+(\d+)"
+    r"|(?:figures?|fig\.?)\s+(\d+)"
+    r")",
+    re.IGNORECASE,
+)
+_FRONT_SECTION_RE = re.compile(
+    r"^(?:abstract|introduction)\b",
+    re.IGNORECASE,
+)
+_MD_HEADING_RE = re.compile(r"^#{1,6}\s+\S")
+_ALL_CAPS_HEADING_RE = re.compile(r"^[A-Z][A-Z0-9 ,.\-]{1,48}$")
 
 
 class EmbeddingDimMismatch(Exception):
@@ -30,7 +92,6 @@ class EmbeddingDimMismatch(Exception):
 
 
 def _indexed_chunk_count(sqlite_path: str) -> int:
-    """Best-effort count of chunk rows (for query-time embed failure messaging)."""
     try:
         con = sqlite3.connect(sqlite_path)
         try:
@@ -42,30 +103,128 @@ def _indexed_chunk_count(sqlite_path: str) -> int:
         return 0
 
 
-def _query_embedding_failed(query: str, system: str) -> dict[str, Any]:
+def _norm_token(w: str) -> str:
+    t = (w or "").lower()
+    if t.endswith("'s"):
+        t = t[:-2]
+    return t
+
+
+def _significant_words(text: str) -> list[str]:
+    out: list[str] = []
+    for m in _FTS_WORD_RE.finditer(text or ""):
+        t = _norm_token(m.group(0))
+        if len(t) < 2 or t in _FTS_STOPWORDS:
+            continue
+        out.append(t)
+    return out
+
+
+def build_fts_query(text: str) -> str:
+    """Build an FTS5 OR-query from question words (quoted; short stopwords dropped)."""
+    parts: list[str] = []
+    for m in _FTS_WORD_RE.finditer(text or ""):
+        w = m.group(0)
+        if w.isdigit() or len(w) >= 2:
+            if w.lower() in _FTS_STOPWORDS:
+                continue
+            parts.append('"' + w.replace('"', '""') + '"')
+    return " OR ".join(parts)
+
+
+def reciprocal_rank_fusion(
+    ranked_lists: list[list[dict[str, Any]]], k: int = _RRF_K
+) -> list[dict[str, Any]]:
+    scores: dict[str, float] = {}
+    by_id: dict[str, dict[str, Any]] = {}
+    for lst in ranked_lists:
+        for rank, item in enumerate(lst, start=1):
+            cid = str(item["chunk_id"])
+            role = str(item.get("role") or "body")
+            weight = 0.5 if role == "references" else 1.0
+            scores[cid] = scores.get(cid, 0.0) + weight / (k + rank)
+            by_id[cid] = item
+    ordered = sorted(scores.keys(), key=lambda cid: (-scores[cid], cid))
+    return [by_id[cid] for cid in ordered]
+
+
+def _parse_labels(raw: Any) -> list[str]:
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if isinstance(parsed, list):
+        return [str(x) for x in parsed]
+    return []
+
+
+def _parse_regions(raw: Any) -> list[dict[str, Any]] | None:
+    if isinstance(raw, list):
+        return [x for x in raw if isinstance(x, dict)]
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if isinstance(parsed, list):
+        return [x for x in parsed if isinstance(x, dict)]
+    return None
+
+
+def _chunk_row_dict(r: tuple[Any, ...], chunk_id: str) -> dict[str, Any]:
+    did, text, ps, pe, title, dpath = r[:6]
+    role = str(r[6]) if len(r) > 6 and r[6] else "body"
+    labels = _parse_labels(r[7] if len(r) > 7 else None)
+    regions = _parse_regions(r[8] if len(r) > 8 else None)
     return {
-        "retrievalMode": "vector_only",
-        "citations": [],
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": query},
-        ],
-        "graphAugmented": False,
-        "graphNodeIds": [],
-        "queryEmbeddingFailed": True,
+        "chunk_id": chunk_id,
+        "document_id": did,
+        "text": text,
+        "page_start": ps,
+        "page_end": pe,
+        "title": title,
+        "path": dpath,
+        "role": role,
+        "labels": labels,
+        "regions": regions,
     }
 
 
-def vector_top_k(sqlite_path: str, embed_model: str, query: str, k: int) -> list[dict[str, Any]]:
+def _doc_id_clause(
+    document_ids: list[str] | None, params: list[Any]
+) -> str:
+    if not document_ids:
+        return ""
+    ph = ",".join(["?"] * len(document_ids))
+    params.extend(document_ids)
+    return f" AND c.document_id IN ({ph})"
+
+
+def vector_top_k(
+    sqlite_path: str,
+    embed_model: str,
+    query: str,
+    k: int,
+    document_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
     con = connect_with_vec(sqlite_path)
     dim = table_dimension(con)
     if dim is None:
         con.close()
         return []
 
+    q_prefix, _ = embed_prefixes(embed_model)
+    embed_input = f"{q_prefix}{query}"
     try:
         qv = list(
-            embed_text(embed_model, query) if not mock_embed_enabled() else [0.0] * MOCK_EMBED_DIM
+            embed_text(embed_model, embed_input)
+            if not mock_embed_enabled()
+            else [0.0] * MOCK_EMBED_DIM
         )
     except Exception:
         con.close()
@@ -73,6 +232,9 @@ def vector_top_k(sqlite_path: str, embed_model: str, query: str, k: int) -> list
     if len(qv) != dim:
         con.close()
         raise EmbeddingDimMismatch(f"query embedding has {len(qv)} values; index uses {dim}")
+    fetch_k = k
+    if document_ids:
+        fetch_k = max(k * 20, k)
     qblob = sqlite_vec.serialize_float32(list(qv))
     rows = con.execute(
         """
@@ -81,13 +243,15 @@ def vector_top_k(sqlite_path: str, embed_model: str, query: str, k: int) -> list
         WHERE embedding MATCH ?
         AND k = ?
         """,
-        (qblob, k),
+        (qblob, fetch_k),
     ).fetchall()
+    allow = set(document_ids) if document_ids else None
     out: list[dict[str, Any]] = []
     for chunk_id, _dist in rows:
         r = con.execute(
             """
-            SELECT c.document_id, c.text, c.page_start, c.page_end, d.title, d.path
+            SELECT c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
+                   c.role, c.labels, c.regions
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE c.id = ? AND d.status = 'indexed'
@@ -96,129 +260,460 @@ def vector_top_k(sqlite_path: str, embed_model: str, query: str, k: int) -> list
         ).fetchone()
         if not r:
             continue
-        did, text, ps, pe, title, dpath = r
-        out.append(
-            {
-                "chunk_id": chunk_id,
-                "document_id": did,
-                "text": text,
-                "page_start": ps,
-                "page_end": pe,
-                "title": title,
-                "path": dpath,
-            }
-        )
+        if allow is not None and str(r[0]) not in allow:
+            continue
+        out.append(_chunk_row_dict(r, chunk_id))
+        if len(out) >= k:
+            break
     con.close()
     return out
 
 
-def _undirected_neighbors(con: duckdb.DuckDBPyConnection, nid: str) -> set[str]:
-    rows = con.execute(
-        """
-        SELECT CASE WHEN source_node_id = ? THEN target_node_id ELSE source_node_id END
-        FROM graph_edges WHERE source_node_id = ? OR target_node_id = ?
-        """,
-        [nid, nid, nid],
-    ).fetchall()
-    return {str(r[0]) for r in rows}
-
-
-def _two_hop_subgraph(
-    con: duckdb.DuckDBPyConnection, seed_ids: list[str]
-) -> tuple[list[tuple], list[tuple], list[str]]:
-    """Returns (node_rows, edge_rows, ordered_node_ids_for_context)."""
-    if not seed_ids:
-        return [], [], []
-    hop1: set[str] = set()
-    for sid in seed_ids[:12]:
-        hop1 |= _undirected_neighbors(con, sid)
-    hop1 -= set(seed_ids)
-    hop2: set[str] = set()
-    for n in list(hop1)[:24]:
-        hop2 |= _undirected_neighbors(con, n)
-    all_ids = set(seed_ids) | hop1 | hop2
-    all_ids = {x for x in all_ids if x}
-
-    if not all_ids:
-        return [], [], []
-
-    ph = ",".join(["?"] * len(all_ids))
-    nrows = con.execute(
-        f"SELECT node_id, name, kind FROM graph_nodes WHERE node_id IN ({ph})",
-        list(all_ids),
-    ).fetchall()
-
-    ids = list(all_ids)
-    ph2 = ",".join(["?"] * len(ids))
-    erows = con.execute(
-        f"""
-        SELECT edge_id, source_node_id, target_node_id, relation, document_id, chunk_id
-        FROM graph_edges
-        WHERE source_node_id IN ({ph2}) AND target_node_id IN ({ph2})
-        """,
-        ids + ids,
-    ).fetchall()
-
-    ordered = [str(r[0]) for r in nrows][:48]
-    return nrows, erows, ordered
-
-
-def _seeds_from_chunk_edges(
-    con: duckdb.DuckDBPyConnection, chunk_ids: list[str]
-) -> list[str]:
-    if not chunk_ids:
+def keyword_top_k(
+    sqlite_path: str,
+    text: str,
+    k: int,
+    document_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    fts_q = build_fts_query(text)
+    if not fts_q or k <= 0:
         return []
-    ph = ",".join(["?"] * len(chunk_ids))
-    rows = con.execute(
-        f"""
-        SELECT DISTINCT source_node_id, target_node_id
-        FROM graph_edges
-        WHERE chunk_id IN ({ph})
-        """,
-        chunk_ids,
-    ).fetchall()
-    out: list[str] = []
-    seen: set[str] = set()
-    for s, t in rows:
-        for nid in (str(s), str(t)):
-            if nid not in seen:
-                seen.add(nid)
-                out.append(nid)
+    try:
+        con = sqlite3.connect(sqlite_path)
+    except Exception:
+        return []
+    params: list[Any] = [fts_q]
+    scope_sql = _doc_id_clause(document_ids, params)
+    params.append(k)
+    try:
+        rows = con.execute(
+            f"""
+            SELECT c.id, c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
+                   c.role, c.labels, c.regions
+            FROM chunks_fts
+            JOIN chunks c ON c.rowid = chunks_fts.rowid
+            JOIN documents d ON d.id = c.document_id
+            WHERE chunks_fts MATCH ?
+              AND d.status = 'indexed'
+              {scope_sql}
+            ORDER BY bm25(chunks_fts)
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    except Exception:
+        return []
+    finally:
+        con.close()
+    out: list[dict[str, Any]] = []
+    for chunk_id, did, body, ps, pe, title, dpath, role, labels, regions in rows:
+        out.append(
+            {
+                "chunk_id": chunk_id,
+                "document_id": did,
+                "text": body,
+                "page_start": ps,
+                "page_end": pe,
+                "title": title,
+                "path": dpath,
+                "role": role or "body",
+                "labels": _parse_labels(labels),
+                "regions": _parse_regions(regions),
+            }
+        )
     return out
 
 
-def _seeds_from_question_names(
-    con: duckdb.DuckDBPyConnection, question: str
-) -> list[str]:
-    nq = normalize_name(question)
-    if not nq:
-        return []
-    rows = con.execute(
-        "SELECT node_id, normalized_name FROM graph_nodes WHERE length(normalized_name) >= 3"
-    ).fetchall()
+def author_lines_from_front(text: str, title: str) -> list[str]:
+    """Lines between the title (or start) and Abstract / Introduction / a heading."""
+    lines = (text or "").splitlines()
+    start = 0
+    title_s = (title or "").strip()
+    if title_s:
+        title_l = title_s.lower()
+        for i, ln in enumerate(lines):
+            s = ln.strip()
+            if not s:
+                continue
+            if s.lower() == title_l or title_l in s.lower():
+                start = i + 1
+                break
     out: list[str] = []
-    for nid, nn in rows:
-        name = str(nn)
-        if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", nq):
-            out.append(str(nid))
+    for ln in lines[start:]:
+        s = ln.strip()
+        if not s:
+            continue
+        if _FRONT_SECTION_RE.match(s) or _MD_HEADING_RE.match(s):
+            break
+        if _ALL_CAPS_HEADING_RE.match(s) and " " in s:
+            break
+        out.append(s)
     return out
 
 
-def _node_ids_for_chunk(con: duckdb.DuckDBPyConnection, chunk_id: str) -> list[str]:
-    rows = con.execute(
-        """
-        SELECT DISTINCT source_node_id, target_node_id
-        FROM graph_edges WHERE chunk_id = ?
-        """,
-        [chunk_id],
-    ).fetchall()
-    out: list[str] = []
+def _parse_json_list(raw: Any) -> list[Any]:
+    if isinstance(raw, list):
+        return list(raw)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if isinstance(parsed, list):
+        return list(parsed)
+    return []
+
+
+def _person_name(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("name") or "")
+    return str(item or "")
+
+
+def _alias_tokens(alias: str) -> list[str]:
+    return [_norm_token(m.group(0)) for m in _FTS_WORD_RE.finditer(alias or "")]
+
+
+_PROFILE_PAGE1_CHARS = 1500
+_SCOPE_SCORE_MARGIN = 1.5
+
+
+def build_document_profile_text(
+    *,
+    title: str,
+    path: str,
+    people: list[Any] | None = None,
+    organizations: list[Any] | None = None,
+    aliases: list[Any] | None = None,
+    page1_text: str = "",
+) -> str:
+    parts: list[str] = []
+    if (title or "").strip():
+        parts.append(title.strip())
+    stem = Path(path or "").stem.replace("_", " ").replace("-", " ").strip()
+    if stem:
+        parts.append(stem)
+    for person in people or []:
+        name = _person_name(person).strip()
+        if name:
+            parts.append(name)
+    for org in organizations or []:
+        s = str(org or "").strip()
+        if s:
+            parts.append(s)
+    for alias in aliases or []:
+        s = str(alias or "").strip()
+        if s:
+            parts.append(s)
+    head = normalize_search_text(page1_text or "")[:_PROFILE_PAGE1_CHARS]
+    if head.strip():
+        parts.append(head)
+    return normalize_search_text("\n".join(parts))
+
+
+def rebuild_document_profile(sqlite_path: str, document_id: str) -> None:
+    """Upsert documents_profile (+ FTS triggers) for one document."""
+    try:
+        con = sqlite3.connect(sqlite_path)
+    except Exception:
+        return
+    try:
+        if not _table_exists(con, "documents_profile"):
+            return
+        row = con.execute(
+            "SELECT title, path FROM documents WHERE id = ?",
+            (document_id,),
+        ).fetchone()
+        if not row:
+            return
+        title, path = str(row[0] or ""), str(row[1] or "")
+        people: list[Any] = []
+        organizations: list[Any] = []
+        aliases: list[Any] = []
+        if _table_exists(con, "document_cards"):
+            card = con.execute(
+                "SELECT people, organizations, aliases FROM document_cards WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+            if card:
+                people = _card_people(card[0])
+                organizations = _card_string_list(card[1])
+                aliases = _card_string_list(card[2])
+        page_rows = con.execute(
+            """
+            SELECT text FROM chunks
+            WHERE document_id = ?
+              AND (page_start IS NULL OR page_start <= 1)
+            ORDER BY ordinal
+            """,
+            (document_id,),
+        ).fetchall()
+        page1 = "\n".join(str(r[0] or "") for r in page_rows)
+        profile = build_document_profile_text(
+            title=title,
+            path=path,
+            people=people,
+            organizations=organizations,
+            aliases=aliases,
+            page1_text=page1,
+        )
+        con.execute(
+            """
+            INSERT INTO documents_profile(document_id, profile) VALUES (?, ?)
+            ON CONFLICT(document_id) DO UPDATE SET profile = excluded.profile
+            """,
+            (document_id, profile),
+        )
+        con.commit()
+    except Exception:
+        return
+    finally:
+        con.close()
+
+
+def _profile_term_hits(question: str, profile: str) -> int:
+    q_terms = set(_significant_words(question))
+    if not q_terms:
+        return 0
+    p_terms = set(_significant_words(profile))
+    return len(q_terms & p_terms)
+
+
+def match_document_profiles(
+    sqlite_path: str, question: str, *, limit: int = 3
+) -> list[dict[str, Any]]:
+    """Top document profiles by BM25; each entry includes score and termHits."""
+    q = normalize_search_text(question or "")
+    fts_q = build_fts_query(q)
+    if not fts_q:
+        return []
+    try:
+        con = sqlite3.connect(sqlite_path)
+    except Exception:
+        return []
+    try:
+        if not _table_exists(con, "documents_fts"):
+            return []
+        rows = con.execute(
+            """
+            SELECT p.document_id, d.title, d.path, p.profile,
+                   bm25(documents_fts) AS score
+            FROM documents_fts
+            JOIN documents_profile p ON p.rowid = documents_fts.rowid
+            JOIN documents d ON d.id = p.document_id
+            WHERE documents_fts MATCH ?
+              AND d.status = 'indexed'
+            ORDER BY bm25(documents_fts)
+            LIMIT ?
+            """,
+            (fts_q, max(limit, 3)),
+        ).fetchall()
+    except Exception:
+        return []
+    finally:
+        con.close()
+    out: list[dict[str, Any]] = []
+    for did, title, path, profile, bm25_score in rows:
+        # FTS5 bm25: lower is better; expose positive relevance for margins.
+        relevance = -float(bm25_score)
+        out.append(
+            {
+                "documentId": str(did),
+                "title": str(title or ""),
+                "path": str(path or ""),
+                "score": relevance,
+                "termHits": _profile_term_hits(q, str(profile or "")),
+                "profile": str(profile or ""),
+            }
+        )
+    # Prefer richer question-term overlap, then BM25 relevance.
+    out.sort(key=lambda m: (-int(m["termHits"]), -float(m["score"]), m["documentId"]))
+    return out[:limit]
+
+
+def resolve_scope(
+    sqlite_path: str,
+    question: str,
+    *,
+    explicit_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Pick a document from documents_fts when the lead is clear; else none."""
+    matches = match_document_profiles(sqlite_path, question, limit=3)
+    profile_matches = [
+        {
+            "documentId": m["documentId"],
+            "title": m["title"],
+            "path": m["path"],
+            "score": m["score"],
+            "termHits": m["termHits"],
+        }
+        for m in matches
+    ]
+    if explicit_ids:
+        ids = [str(x) for x in explicit_ids if x]
+        return {
+            "scopeIds": ids,
+            "scopeTitle": None,
+            "scopeChosen": False,
+            "scopeReason": "explicit",
+            "profileMatches": profile_matches,
+        }
+    if not matches:
+        return {
+            "scopeIds": [],
+            "scopeTitle": None,
+            "scopeChosen": False,
+            "scopeReason": "no_profile_match",
+            "profileMatches": [],
+        }
+    best = matches[0]
+    runner = matches[1] if len(matches) > 1 else None
+    best_hits = int(best.get("termHits") or 0)
+    if best_hits < 2:
+        return {
+            "scopeIds": [],
+            "scopeTitle": None,
+            "scopeChosen": False,
+            "scopeReason": "ambiguous_or_weak",
+            "profileMatches": profile_matches,
+        }
+    if runner is None:
+        clear = True
+    elif best_hits > int(runner.get("termHits") or 0):
+        clear = True
+    else:
+        runner_score = float(runner.get("score") or 0.0)
+        clear = float(best["score"]) >= _SCOPE_SCORE_MARGIN * runner_score
+    if clear:
+        return {
+            "scopeIds": [best["documentId"]],
+            "scopeTitle": best["title"] or None,
+            "scopeChosen": True,
+            "scopeReason": "profile_bm25",
+            "profileMatches": profile_matches,
+        }
+    return {
+        "scopeIds": [],
+        "scopeTitle": None,
+        "scopeChosen": False,
+        "scopeReason": "ambiguous_or_weak",
+        "profileMatches": profile_matches,
+    }
+
+
+def question_label_mentions(question: str) -> list[str]:
+    found: list[str] = []
     seen: set[str] = set()
-    for s, t in rows:
-        for nid in (str(s), str(t)):
-            if nid not in seen:
-                seen.add(nid)
-                out.append(nid)
+    for m in _LABEL_MENTION_RE.finditer(question or ""):
+        if m.group(1) is not None:
+            label = f"({m.group(1)})"
+        elif m.group(2) is not None:
+            label = f"Table {m.group(2)}"
+        else:
+            label = f"Figure {m.group(3)}"
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(label)
+    return found
+
+
+def _label_norm(label: str) -> str:
+    s = re.sub(r"\s+", " ", (label or "").strip().lower())
+    s = s.replace("fig.", "figure")
+    return s
+
+
+def _chunk_has_label(chunk: dict[str, Any], wanted: list[str]) -> bool:
+    if not wanted:
+        return False
+    have = {_label_norm(x) for x in (chunk.get("labels") or [])}
+    for w in wanted:
+        wn = _label_norm(w)
+        if wn in have:
+            return True
+        # "(2)" vs "2" / "equation 2" flexibility
+        bare = wn.strip("()")
+        if any(_label_norm(h).strip("()") == bare or wn == _label_norm(h) for h in have):
+            return True
+    return False
+
+
+def apply_label_boost(
+    chunks: list[dict[str, Any]], labels: list[str]
+) -> list[dict[str, Any]]:
+    if not labels or not chunks:
+        return chunks
+    hit = [c for c in chunks if _chunk_has_label(c, labels)]
+    miss = [c for c in chunks if not _chunk_has_label(c, labels)]
+    return hit + miss
+
+
+def label_chunks_for_documents(
+    sqlite_path: str,
+    document_ids: list[str],
+    labels: list[str],
+) -> list[dict[str, Any]]:
+    """Chunks in the given documents that carry any of the question labels."""
+    if not document_ids or not labels:
+        return []
+    try:
+        con = sqlite3.connect(sqlite_path)
+    except Exception:
+        return []
+    try:
+        ph = ",".join(["?"] * len(document_ids))
+        rows = con.execute(
+            f"""
+            SELECT c.id, c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
+                   c.role, c.labels, c.regions
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.document_id IN ({ph})
+              AND d.status = 'indexed'
+              AND c.labels IS NOT NULL
+              AND c.labels != '[]'
+              AND c.labels != ''
+            ORDER BY c.ordinal
+            """,
+            list(document_ids),
+        ).fetchall()
+    except Exception:
+        return []
+    finally:
+        con.close()
+    out: list[dict[str, Any]] = []
+    for chunk_id, did, body, ps, pe, title, dpath, role, lab_raw, regions in rows:
+        chunk = {
+            "chunk_id": chunk_id,
+            "document_id": did,
+            "text": body,
+            "page_start": ps,
+            "page_end": pe,
+            "title": title,
+            "path": dpath,
+            "role": role or "body",
+            "labels": _parse_labels(lab_raw),
+            "regions": _parse_regions(regions),
+        }
+        if _chunk_has_label(chunk, labels):
+            out.append(chunk)
+    return out
+
+
+def _merge_chunks_by_id(
+    primary: list[dict[str, Any]], extra: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    seen = {str(c.get("chunk_id")) for c in primary}
+    out = list(primary)
+    for c in extra:
+        cid = str(c.get("chunk_id") or "")
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        out.append(c)
     return out
 
 
@@ -255,185 +750,800 @@ def embed_query_text(query: str, history: list[dict[str, Any]] | None) -> str:
     return query
 
 
-def prepare_chat_retrieval(
-    sqlite_path: str,
-    duck_path: str | None,
-    query: str,
-    embed_model: str,
-    top_k: int = 12,
-    max_chunks_in_prompt: int = 8,
-    max_evidence_chars: int = 9000,
-    history: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """
-    Deterministic pipeline (no routing classifier):
-    1) vector top-k chunks
-    2) graph seeds from chunk edges + question entity names
-    3) up to 2-hop subgraph when DuckDB available
-    4) grounded prompt messages for the chat model
-    """
-    hist_raw = list(history or [])
-    search_text = embed_query_text(query, hist_raw)
-    try:
-        chunks = vector_top_k(sqlite_path, embed_model, search_text, top_k)
-    except EmbeddingDimMismatch:
-        return _query_embedding_failed(
-            query,
-            "The embedding model does not match the index. Open Settings and rebuild the index.",
-        )
-    hist_msgs = prepare_history(hist_raw)
-    if not chunks:
-        if _indexed_chunk_count(sqlite_path) > 0:
-            return _query_embedding_failed(
-                query,
-                (
-                    "Indexed content exists, but query embedding failed. Ensure Ollama is running on "
-                    "127.0.0.1 and the embedding model in settings is installed (`ollama pull <model>`). "
-                    "Vector retrieval cannot run until embeddings work. Do not invent sources."
-                ),
-            )
-        return {
-            "retrievalMode": "vector_only",
-            "citations": [],
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant. There is no indexed content in the library yet.",
-                },
-                *hist_msgs,
-                {"role": "user", "content": query},
-            ],
-            "graphAugmented": False,
-            "graphNodeIds": [],
-            "embedQuery": search_text,
-        }
+def _table_exists(con: sqlite3.Connection, name: str) -> bool:
+    row = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
 
-    prompt_chunks = chunks[:max_chunks_in_prompt]
-    chunk_index = {c["chunk_id"]: i + 1 for i, c in enumerate(prompt_chunks)}
-    retrieved_ids = [c["chunk_id"] for c in prompt_chunks]
 
-    graph_block = ""
-    graph_augmented = False
-    graph_node_ids: list[str] = []
-    edge_note_lines: list[str] = []
-    name_by_id: dict[str, str] = {}
-    chunk_node_ids: dict[str, list[str]] = {cid: [] for cid in retrieved_ids}
+def _card_string_list(raw: Any) -> list[str]:
+    out: list[str] = []
+    for item in _parse_json_list(raw):
+        s = str(item).strip() if item is not None else ""
+        if s:
+            out.append(s)
+    return out
 
-    if duck_path:
-        try:
-            ensure_schema(duck_path)
-            gcon = duckdb.connect(duck_path)
-            try:
-                seeds: list[str] = []
-                seen: set[str] = set()
-                for nid in _seeds_from_chunk_edges(gcon, retrieved_ids) + _seeds_from_question_names(
-                    gcon, query
-                ):
-                    if nid not in seen:
-                        seen.add(nid)
-                        seeds.append(nid)
-                    if len(seeds) >= 12:
-                        break
-                for cid in retrieved_ids:
-                    chunk_node_ids[cid] = _node_ids_for_chunk(gcon, cid)
-                if seeds:
-                    nrows, erows, ordered = _two_hop_subgraph(gcon, seeds)
-                    name_by_id = {str(r[0]): str(r[1]) for r in nrows}
-                    graph_node_ids = ordered[:32]
-                    node_lines = [f"- {r[1]} ({r[2]})" for r in nrows[:20]]
-                    for e in erows[:30]:
-                        _eid, s, t, rel, _did, cid = e
-                        src = name_by_id.get(str(s), str(s))
-                        tgt = name_by_id.get(str(t), str(t))
-                        k = chunk_index.get(str(cid))
-                        if k is not None:
-                            edge_note_lines.append(f"- {src} —[{rel}]→ {tgt} (from [{k}])")
-                        else:
-                            edge_note_lines.append(f"- {src} —[{rel}]→ {tgt}")
-                    if nrows or erows:
-                        graph_augmented = True
-                        parts = ["GRAPH_EVIDENCE (relations supported by stored extractions):"]
-                        if node_lines:
-                            parts.append("Nodes:\n" + "\n".join(node_lines))
-                        if edge_note_lines:
-                            parts.append("Edges:\n" + "\n".join(edge_note_lines))
-                        graph_block = "\n".join(parts)
-            finally:
-                gcon.close()
-        except Exception:
-            graph_augmented = False
-            graph_block = ""
 
-    if not graph_augmented or not graph_block.strip():
-        retrieval_mode = "vector_only"
-        graph_block = (
-            "(Graph evidence is not available for this answer — using retrieved chunks only.)"
-        )
-        graph_augmented = False
-    else:
-        retrieval_mode = "hybrid"
+def _card_people(raw: Any) -> list[Any]:
+    out: list[Any] = []
+    for item in _parse_json_list(raw):
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            role = item.get("role")
+            entry: dict[str, Any] = {"name": name}
+            if role is not None and str(role).strip():
+                entry["role"] = str(role)
+            out.append(entry)
+        else:
+            s = str(item or "").strip()
+            if s:
+                out.append(s)
+    return out
 
-    evidence_parts: list[str] = []
-    citations: list[dict[str, Any]] = []
-    for i, c in enumerate(prompt_chunks):
-        n = i + 1
-        snippet = (c["text"] or "")[:1200]
-        evidence_parts.append(
-            f"[{n}] title={c['title']} document_id={c['document_id']} chunk_id={c['chunk_id']}\n{snippet}"
-        )
-        nids = chunk_node_ids.get(c["chunk_id"], []) if retrieval_mode == "hybrid" else []
-        citations.append(
-            {
-                "documentId": c["document_id"],
-                "title": c["title"],
-                "path": c["path"],
-                "pageStart": c["page_start"],
-                "pageEnd": c["page_end"],
-                "chunkId": c["chunk_id"],
-                "snippet": (c["text"] or "")[:400],
-                "nodeIds": nids[:16],
-                "index": n,
-            }
-        )
 
-    evidence_body = "\n\n".join(evidence_parts)
-    if len(evidence_body) > max_evidence_chars:
-        evidence_body = evidence_body[:max_evidence_chars] + "\n…"
-
-    sys_prompt = (
-        "You are a careful assistant. Answer using ONLY the numbered evidence [1]…[n] and GRAPH_EVIDENCE below. "
-        "Cite the numbers you use inline as [n] right after the sentence they support. "
-        "Use only listed numbers. If the evidence does not answer the question, say so briefly. "
-        "If GRAPH_EVIDENCE says it is unavailable, do not invent graph facts. "
-        "Do not fabricate citations. Keep answers concise unless the user asks for detail."
-    )
-    user_content = (
-        f"Question:\n{query}\n\n"
-        f"{evidence_body}\n\n"
-        f"{graph_block}"
-    )
-
+def _citation_from_chunk(c: dict[str, Any], index: int) -> dict[str, Any]:
     return {
-        "retrievalMode": retrieval_mode,
-        "citations": citations,
-        "messages": [
-            {"role": "system", "content": sys_prompt},
-            *hist_msgs,
-            {"role": "user", "content": user_content[:14000]},
-        ],
-        "graphAugmented": graph_augmented,
-        "graphNodeIds": graph_node_ids,
-        "embedQuery": search_text,
+        "documentId": c["document_id"],
+        "title": c["title"],
+        "path": c["path"],
+        "pageStart": c["page_start"],
+        "pageEnd": c["page_end"],
+        "chunkId": c["chunk_id"],
+        "snippet": (c["text"] or "")[:1200],
+        "nodeIds": [],
+        "index": index,
+        "regions": c.get("regions"),
     }
 
 
-def rpc_search_chunks(params: dict[str, Any]) -> dict[str, Any]:
-    sqlite_path = str(params["sqlite_path"])
-    embed_model = str(params.get("embed_model", "nomic-embed-text"))
-    query = str(params["query"])
-    k = int(params.get("k", 12))
+def _empty_result(
+    *,
+    scope_ids: list[str],
+    scope_title: str | None,
+    scope_chosen: bool,
+    not_found: bool = True,
+    query_embedding_failed: bool = False,
+    profile_matches: list[dict[str, Any]] | None = None,
+    suggestions: list[dict[str, Any]] | None = None,
+    trace: dict[str, Any] | None = None,
+    search_text: str | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "retrievalMode": "vector_only",
+        "citations": [],
+        "candidates": [],
+        "notFound": not_found,
+        "bestScore": 0.0,
+        "scopeIds": list(scope_ids),
+        "scopeTitle": scope_title,
+        "scopeChosen": scope_chosen,
+        "profileMatches": list(profile_matches or []),
+        "suggestions": list(suggestions or []),
+        "entityChunks": [],
+        "retrievalMs": 0,
+        "rerankMs": 0,
+        "rerankScored": 0,
+        "searchText": search_text or "",
+        "trace": trace or {},
+    }
+    if query_embedding_failed:
+        out["queryEmbeddingFailed"] = True
+    return out
+
+
+def _build_trace(
+    *,
+    normalised_question: str,
+    profile_matches: list[dict[str, Any]],
+    scope_ids: list[str],
+    scope_reason: str,
+    vector_n: int,
+    keyword_n: int,
+    label_n: int,
+    reranked: list[tuple[dict[str, Any], float]] | None = None,
+    second_pass: bool = False,
+) -> dict[str, Any]:
+    top10: list[dict[str, Any]] = []
+    for c, score in (reranked or [])[:10]:
+        top10.append(
+            {
+                "chunkId": c.get("chunk_id") or c.get("chunkId"),
+                "documentId": c.get("document_id") or c.get("documentId"),
+                "title": c.get("title"),
+                "pageStart": c.get("page_start") if "page_start" in c else c.get("pageStart"),
+                "score": float(score),
+            }
+        )
+    return {
+        "normalisedQuestion": normalised_question,
+        "profileMatches": profile_matches,
+        "scopeIds": list(scope_ids),
+        "scopeReason": scope_reason,
+        "candidateCounts": {
+            "vector": vector_n,
+            "keyword": keyword_n,
+            "label": label_n,
+        },
+        "topReranked": top10,
+        "secondPass": second_pass,
+    }
+
+
+def _log_trace(trace: dict[str, Any]) -> None:
+    log.debug("retrieval_trace %s", json.dumps(trace, default=str))
+
+
+def _suggestions_from_profiles(
+    matches: list[dict[str, Any]], *, n: int = 2
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for m in matches[:n]:
+        title = str(m.get("title") or "").strip() or Path(str(m.get("path") or "")).stem
+        out.append(
+            {
+                "documentId": m["documentId"],
+                "title": title,
+                "label": f"Search in {title}",
+            }
+        )
+    return out
+
+
+def _retrieve_pool(
+    sqlite_path: str,
+    embed_model: str,
+    search_text: str,
+    top_k: int,
+    scope_filter: list[str] | None,
+    labels: list[str],
+    profile_matches: list[dict[str, Any]],
+    *,
+    inject_label_from_profiles: bool,
+) -> tuple[list[dict[str, Any]], int, int, int, list[str]]:
+    entity_chunk_ids = match_entity_mention_chunks(sqlite_path, search_text)
+    entity_chunks = _chunks_by_ids(sqlite_path, entity_chunk_ids)
+    vector_chunks = vector_top_k(
+        sqlite_path, embed_model, search_text, top_k, document_ids=scope_filter
+    )
+    keyword_chunks = keyword_top_k(
+        sqlite_path, search_text, _KEYWORD_K, document_ids=scope_filter
+    )
+    label_extra: list[dict[str, Any]] = []
+    if inject_label_from_profiles and labels and not scope_filter:
+        doc_ids = [str(m["documentId"]) for m in profile_matches[:3]]
+        label_extra = label_chunks_for_documents(sqlite_path, doc_ids, labels)
+    ranked_lists: list[list[dict[str, Any]]] = [vector_chunks, keyword_chunks]
+    if entity_chunks:
+        ranked_lists.append(entity_chunks)
+    fused = reciprocal_rank_fusion(ranked_lists)
+    fused = _merge_chunks_by_id(fused, label_extra)
+    boosted = apply_label_boost(fused, labels)
+    pool = boosted[:_RERANK_POOL]
+    return (
+        pool,
+        len(vector_chunks),
+        len(keyword_chunks),
+        len(label_extra),
+        list(entity_chunk_ids),
+    )
+
+
+def _rerank_pool(
+    app_data: str | None,
+    search_text: str,
+    pool: list[dict[str, Any]],
+    thorough_reranking: bool,
+) -> tuple[list[tuple[dict[str, Any], float]], dict[str, Any]]:
+    passages = [str(c.get("text") or c.get("snippet") or "") for c in pool]
+    rr = rerank_with_budget(
+        app_data or "",
+        search_text,
+        passages,
+        thorough_reranking=thorough_reranking,
+    )
+    ranked = sorted(
+        zip(pool, rr["scores"]),
+        key=lambda pair: (
+            -pair[1],
+            str(pair[0].get("chunk_id") or pair[0].get("chunkId") or ""),
+        ),
+    )
+    return ranked, rr
+
+
+_ENTITY_DOC_CAP = 5
+
+
+def _chunks_by_ids(
+    sqlite_path: str, chunk_ids: list[str]
+) -> list[dict[str, Any]]:
+    if not chunk_ids:
+        return []
     try:
-        chunks = vector_top_k(sqlite_path, embed_model, query, k)
+        con = sqlite3.connect(sqlite_path)
+    except Exception:
+        return []
+    try:
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for cid in chunk_ids:
+            if cid in seen:
+                continue
+            seen.add(cid)
+            r = con.execute(
+                """
+                SELECT c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
+                       c.role, c.labels, c.regions
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.id = ? AND d.status = 'indexed'
+                """,
+                (cid,),
+            ).fetchone()
+            if r:
+                out.append(_chunk_row_dict(r, cid))
+        return out
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def match_entity_mention_chunks(
+    sqlite_path: str, question: str, *, doc_cap: int = _ENTITY_DOC_CAP
+) -> list[str]:
+    """Chunk ids for entities named in the question that appear in few documents."""
+    try:
+        con = sqlite3.connect(sqlite_path)
+    except Exception:
+        return []
+    try:
+        if not _table_exists(con, "entities") or not _table_exists(con, "mentions"):
+            return []
+        q_words = {_norm_token(m.group(0)) for m in _FTS_WORD_RE.finditer(question or "")}
+        if not q_words:
+            return []
+        entities = con.execute("SELECT id, name, normalized FROM entities").fetchall()
+        matched: list[str] = []
+        for eid, name, normalized in entities:
+            surfaces = [str(name or ""), str(normalized or "")]
+            if _table_exists(con, "entity_aliases"):
+                for (alias,) in con.execute(
+                    "SELECT alias FROM entity_aliases WHERE entity_id = ?",
+                    (eid,),
+                ).fetchall():
+                    surfaces.append(str(alias or ""))
+            hit = False
+            for surface in surfaces:
+                toks = _alias_tokens(surface)
+                if toks and all(t in q_words for t in toks):
+                    hit = True
+                    break
+            if not hit:
+                continue
+            docs = con.execute(
+                "SELECT COUNT(DISTINCT document_id) FROM mentions WHERE entity_id = ?",
+                (eid,),
+            ).fetchone()
+            n_docs = int(docs[0] or 0) if docs else 0
+            if n_docs <= 0 or n_docs > doc_cap:
+                continue
+            matched.append(str(eid))
+        if not matched:
+            return []
+        chunk_ids: list[str] = []
+        seen: set[str] = set()
+        for eid in matched:
+            for (cid,) in con.execute(
+                """
+                SELECT DISTINCT chunk_id FROM mentions
+                WHERE entity_id = ?
+                ORDER BY chunk_id
+                """,
+                (eid,),
+            ).fetchall():
+                s = str(cid)
+                if s in seen:
+                    continue
+                seen.add(s)
+                chunk_ids.append(s)
+        return chunk_ids
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
+def prepare_chat_retrieval(
+    sqlite_path: str,
+    query: str,
+    embed_model: str,
+    top_k: int = _VECTOR_K,
+    history: list[dict[str, Any]] | None = None,
+    scope_ids: list[str] | None = None,
+    app_data: str | None = None,
+    thorough_reranking: bool = False,
+    skip_rerank: bool = False,
+) -> dict[str, Any]:
+    """Vector + keyword RRF, profile scope, label boost, optional rerank + second pass."""
+    t0 = time.perf_counter()
+    hist_raw = list(history or [])
+    normalised_q = normalize_search_text(query or "")
+    search_text = normalize_search_text(embed_query_text(normalised_q, hist_raw))
+    explicit = [str(x) for x in (scope_ids or []) if x]
+    scope_info = resolve_scope(
+        sqlite_path, normalised_q, explicit_ids=explicit or None
+    )
+    profile_matches = list(scope_info.get("profileMatches") or [])
+    scope_chosen = bool(scope_info.get("scopeChosen"))
+    scope_title = scope_info.get("scopeTitle")
+    effective_scope: list[str] = list(scope_info.get("scopeIds") or [])
+    scope_reason = str(scope_info.get("scopeReason") or "")
+    scope_filter: list[str] | None = effective_scope or None
+    labels = question_label_mentions(normalised_q)
+
+    try:
+        pool, vector_n, keyword_n, label_n, entity_chunk_ids = _retrieve_pool(
+            sqlite_path,
+            embed_model,
+            search_text,
+            top_k,
+            scope_filter,
+            labels,
+            profile_matches,
+            inject_label_from_profiles=not bool(explicit),
+        )
     except EmbeddingDimMismatch:
-        chunks = []
-    return {"chunks": chunks}
+        trace = _build_trace(
+            normalised_question=normalised_q,
+            profile_matches=profile_matches,
+            scope_ids=effective_scope,
+            scope_reason=scope_reason,
+            vector_n=0,
+            keyword_n=0,
+            label_n=0,
+        )
+        _log_trace(trace)
+        return _empty_result(
+            scope_ids=effective_scope,
+            scope_title=scope_title,
+            scope_chosen=scope_chosen,
+            query_embedding_failed=True,
+            profile_matches=profile_matches,
+            trace=trace,
+            search_text=search_text,
+        )
+
+    if not pool:
+        trace = _build_trace(
+            normalised_question=normalised_q,
+            profile_matches=profile_matches,
+            scope_ids=effective_scope,
+            scope_reason=scope_reason,
+            vector_n=vector_n,
+            keyword_n=keyword_n,
+            label_n=label_n,
+        )
+        _log_trace(trace)
+        failed = _indexed_chunk_count(sqlite_path) > 0
+        return _empty_result(
+            scope_ids=effective_scope,
+            scope_title=scope_title,
+            scope_chosen=scope_chosen,
+            query_embedding_failed=failed,
+            profile_matches=profile_matches,
+            suggestions=_suggestions_from_profiles(profile_matches)
+            if not explicit
+            else [],
+            trace=trace,
+            search_text=search_text,
+        )
+
+    retrieval_ms = int((time.perf_counter() - t0) * 1000)
+    candidate_cites = [_citation_from_chunk(c, i + 1) for i, c in enumerate(pool)]
+
+    if skip_rerank:
+        keep = pool[:_KEEP]
+        trace = _build_trace(
+            normalised_question=normalised_q,
+            profile_matches=profile_matches,
+            scope_ids=effective_scope,
+            scope_reason=scope_reason,
+            vector_n=vector_n,
+            keyword_n=keyword_n,
+            label_n=label_n,
+        )
+        _log_trace(trace)
+        return {
+            "retrievalMode": "vector_only",
+            "citations": [_citation_from_chunk(c, i + 1) for i, c in enumerate(keep)],
+            "candidates": candidate_cites,
+            "notFound": False,
+            "bestScore": 0.0,
+            "scopeIds": list(effective_scope),
+            "scopeTitle": scope_title,
+            "scopeChosen": scope_chosen,
+            "scopeReason": scope_reason,
+            "profileMatches": profile_matches,
+            "suggestions": [],
+            "entityChunks": list(entity_chunk_ids),
+            "retrievalMs": retrieval_ms,
+            "rerankMs": 0,
+            "rerankScored": 0,
+            "searchText": search_text,
+            "trace": trace,
+            "labels": labels,
+            "normalisedQuestion": normalised_q,
+            "candidateCounts": {
+                "vector": vector_n,
+                "keyword": keyword_n,
+                "label": label_n,
+            },
+        }
+
+    ranked, rr = _rerank_pool(app_data, search_text, pool, thorough_reranking)
+    best_score = float(ranked[0][1]) if ranked else 0.0
+    log.info(
+        "retrieval %sms rerank %sms scored %s/%s",
+        retrieval_ms,
+        rr["rerankMs"],
+        rr["scored"],
+        len(pool),
+    )
+
+    second_pass = False
+    suggestions: list[dict[str, Any]] = []
+    if best_score < NOT_FOUND_SCORE and not explicit:
+        for m in profile_matches[:2]:
+            did = str(m["documentId"])
+            try:
+                pool2, _vn, _kn, _ln, _ = _retrieve_pool(
+                    sqlite_path,
+                    embed_model,
+                    search_text,
+                    top_k,
+                    [did],
+                    labels,
+                    profile_matches,
+                    inject_label_from_profiles=False,
+                )
+            except EmbeddingDimMismatch:
+                continue
+            if not pool2:
+                continue
+            ranked2, rr2 = _rerank_pool(
+                app_data, search_text, pool2, thorough_reranking
+            )
+            rr = {
+                "rerankMs": int(rr.get("rerankMs") or 0) + int(rr2.get("rerankMs") or 0),
+                "scored": int(rr.get("scored") or 0) + int(rr2.get("scored") or 0),
+            }
+            best2 = float(ranked2[0][1]) if ranked2 else 0.0
+            if best2 >= NOT_FOUND_SCORE:
+                second_pass = True
+                ranked = ranked2
+                best_score = best2
+                candidate_cites = [
+                    _citation_from_chunk(c, i + 1) for i, c in enumerate(pool2)
+                ]
+                effective_scope = [did]
+                scope_title = m.get("title") or None
+                scope_chosen = True
+                scope_reason = "second_pass"
+                break
+        else:
+            suggestions = _suggestions_from_profiles(profile_matches)
+
+    trace = _build_trace(
+        normalised_question=normalised_q,
+        profile_matches=profile_matches,
+        scope_ids=effective_scope,
+        scope_reason=scope_reason,
+        vector_n=vector_n,
+        keyword_n=keyword_n,
+        label_n=label_n,
+        reranked=ranked,
+        second_pass=second_pass,
+    )
+    _log_trace(trace)
+
+    if best_score < NOT_FOUND_SCORE:
+        keep = [c for c, _s in ranked[:3]]
+        return {
+            "retrievalMode": "vector_only",
+            "citations": [_citation_from_chunk(c, i + 1) for i, c in enumerate(keep)],
+            "candidates": candidate_cites,
+            "notFound": True,
+            "bestScore": best_score,
+            "scopeIds": list(effective_scope),
+            "scopeTitle": scope_title,
+            "scopeChosen": scope_chosen,
+            "scopeReason": scope_reason,
+            "profileMatches": profile_matches,
+            "suggestions": suggestions
+            if suggestions
+            else (_suggestions_from_profiles(profile_matches) if not explicit else []),
+            "entityChunks": list(entity_chunk_ids),
+            "retrievalMs": retrieval_ms,
+            "rerankMs": rr["rerankMs"],
+            "rerankScored": rr["scored"],
+            "searchText": search_text,
+            "trace": trace,
+        }
+
+    keep = [c for c, _s in ranked[:_KEEP]]
+    return {
+        "retrievalMode": "vector_only",
+        "citations": [_citation_from_chunk(c, i + 1) for i, c in enumerate(keep)],
+        "candidates": candidate_cites,
+        "notFound": False,
+        "bestScore": best_score,
+        "scopeIds": list(effective_scope),
+        "scopeTitle": scope_title,
+        "scopeChosen": scope_chosen,
+        "scopeReason": scope_reason,
+        "profileMatches": profile_matches,
+        "suggestions": [],
+        "entityChunks": list(entity_chunk_ids),
+        "retrievalMs": retrieval_ms,
+        "rerankMs": rr["rerankMs"],
+        "rerankScored": rr["scored"],
+        "searchText": search_text,
+        "trace": trace,
+    }
+
+
+def rerank_chat_candidates(
+    app_data: str,
+    query: str,
+    candidates: list[dict[str, Any]],
+    thorough_reranking: bool = False,
+    *,
+    sqlite_path: str | None = None,
+    embed_model: str | None = None,
+    profile_matches: list[dict[str, Any]] | None = None,
+    explicit_scope: bool = False,
+    labels: list[str] | None = None,
+    normalised_question: str | None = None,
+    scope_ids: list[str] | None = None,
+    scope_reason: str | None = None,
+    candidate_counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Rerank fused candidates; optional scoped second pass before notFound."""
+    search_text = normalize_search_text(query or "")
+    matches = list(profile_matches or [])
+    counts = candidate_counts or {}
+    if not candidates:
+        trace = _build_trace(
+            normalised_question=normalised_question or search_text,
+            profile_matches=matches,
+            scope_ids=list(scope_ids or []),
+            scope_reason=scope_reason or "empty_candidates",
+            vector_n=int(counts.get("vector") or 0),
+            keyword_n=int(counts.get("keyword") or 0),
+            label_n=int(counts.get("label") or 0),
+            second_pass=False,
+        )
+        _log_trace(trace)
+        return {
+            "citations": [],
+            "notFound": True,
+            "bestScore": 0.0,
+            "rerankMs": 0,
+            "rerankScored": 0,
+            "suggestions": _suggestions_from_profiles(matches)
+            if not explicit_scope
+            else [],
+            "scopeIds": list(scope_ids or []),
+            "scopeTitle": None,
+            "scopeChosen": False,
+            "trace": trace,
+        }
+
+    ranked, rr = _rerank_pool(app_data, search_text, candidates, thorough_reranking)
+    best_score = float(ranked[0][1]) if ranked else 0.0
+    log.info("rerank %sms scored %s/%s", rr["rerankMs"], rr["scored"], len(candidates))
+
+    second_pass = False
+    out_scope_ids = list(scope_ids or [])
+    out_scope_title: str | None = None
+    out_scope_chosen = False
+    out_scope_reason = scope_reason or ""
+    suggestions: list[dict[str, Any]] = []
+    label_list = list(labels or [])
+
+    if (
+        best_score < NOT_FOUND_SCORE
+        and not explicit_scope
+        and sqlite_path
+        and embed_model
+        and matches
+    ):
+        for m in matches[:2]:
+            did = str(m["documentId"])
+            try:
+                pool2, _vn, _kn, _ln, _ = _retrieve_pool(
+                    sqlite_path,
+                    embed_model,
+                    search_text,
+                    _VECTOR_K,
+                    [did],
+                    label_list or question_label_mentions(search_text),
+                    matches,
+                    inject_label_from_profiles=False,
+                )
+            except EmbeddingDimMismatch:
+                continue
+            if not pool2:
+                continue
+            ranked2, rr2 = _rerank_pool(
+                app_data, search_text, pool2, thorough_reranking
+            )
+            rr = {
+                "rerankMs": int(rr.get("rerankMs") or 0)
+                + int(rr2.get("rerankMs") or 0),
+                "scored": int(rr.get("scored") or 0) + int(rr2.get("scored") or 0),
+            }
+            best2 = float(ranked2[0][1]) if ranked2 else 0.0
+            if best2 >= NOT_FOUND_SCORE:
+                second_pass = True
+                ranked = [(_citation_from_chunk(c, 0), s) for c, s in ranked2]
+                best_score = best2
+                out_scope_ids = [did]
+                out_scope_title = m.get("title") or None
+                out_scope_chosen = True
+                out_scope_reason = "second_pass"
+                break
+        else:
+            suggestions = _suggestions_from_profiles(matches)
+
+    trace = _build_trace(
+        normalised_question=normalised_question or search_text,
+        profile_matches=matches,
+        scope_ids=out_scope_ids,
+        scope_reason=out_scope_reason
+        or ("not_found" if best_score < NOT_FOUND_SCORE else "rerank"),
+        vector_n=int(counts.get("vector") or 0),
+        keyword_n=int(counts.get("keyword") or 0),
+        label_n=int(counts.get("label") or 0),
+        reranked=[
+            (
+                {
+                    "chunk_id": c.get("chunkId") or c.get("chunk_id"),
+                    "document_id": c.get("documentId") or c.get("document_id"),
+                    "title": c.get("title"),
+                    "page_start": c.get("pageStart") or c.get("page_start"),
+                },
+                s,
+            )
+            for c, s in ranked
+        ],
+        second_pass=second_pass,
+    )
+    _log_trace(trace)
+
+    def _cite_row(c: dict[str, Any], index: int) -> dict[str, Any]:
+        if c.get("chunkId") is not None and "snippet" in c:
+            item = dict(c)
+            item["index"] = index
+            return item
+        return _citation_from_chunk(
+            {
+                "document_id": c.get("documentId") or c.get("document_id"),
+                "title": c.get("title") or "",
+                "path": c.get("path") or "",
+                "page_start": c.get("pageStart") or c.get("page_start"),
+                "page_end": c.get("pageEnd") or c.get("page_end"),
+                "chunk_id": c.get("chunkId") or c.get("chunk_id"),
+                "text": c.get("snippet") or c.get("text") or "",
+                "regions": c.get("regions"),
+            },
+            index,
+        )
+
+    if best_score < NOT_FOUND_SCORE:
+        cites = [_cite_row(c, i + 1) for i, (c, _s) in enumerate(ranked[:3])]
+        return {
+            "citations": cites,
+            "notFound": True,
+            "bestScore": best_score,
+            "rerankMs": rr["rerankMs"],
+            "rerankScored": rr["scored"],
+            "suggestions": suggestions
+            if suggestions
+            else (_suggestions_from_profiles(matches) if not explicit_scope else []),
+            "scopeIds": out_scope_ids,
+            "scopeTitle": out_scope_title,
+            "scopeChosen": out_scope_chosen,
+            "trace": trace,
+        }
+
+    cites = [_cite_row(c, i + 1) for i, (c, _s) in enumerate(ranked[:_KEEP])]
+    return {
+        "citations": cites,
+        "notFound": False,
+        "bestScore": best_score,
+        "rerankMs": rr["rerankMs"],
+        "rerankScored": rr["scored"],
+        "suggestions": [],
+        "scopeIds": out_scope_ids,
+        "scopeTitle": out_scope_title,
+        "scopeChosen": out_scope_chosen,
+        "trace": trace,
+    }
+
+
+def prepare_related_retrieval(
+    sqlite_path: str,
+    entity_id_a: str,
+    entity_id_b: str,
+    embed_model: str,
+    app_data: str | None = None,
+    top_k: int = _KEEP,
+) -> dict[str, Any]:
+    """Passages where both entities are mentioned, plus best for each alone."""
+    del embed_model
+    empty: dict[str, Any] = {
+        "citations": [],
+        "bothChunkIds": [],
+        "aChunkIds": [],
+        "bChunkIds": [],
+    }
+    both: list[str] = []
+    only_a: list[str] = []
+    only_b: list[str] = []
+    a_list: list[str] = []
+    b_list: list[str] = []
+    try:
+        con = sqlite3.connect(sqlite_path)
+    except Exception:
+        return empty
+    try:
+        if not _table_exists(con, "mentions"):
+            return empty
+
+        def chunk_ids_for(eid: str) -> list[str]:
+            rows = con.execute(
+                """
+                SELECT DISTINCT chunk_id FROM mentions
+                WHERE entity_id = ?
+                ORDER BY chunk_id
+                """,
+                (eid,),
+            ).fetchall()
+            return [str(r[0]) for r in rows]
+
+        a_ids = set(chunk_ids_for(entity_id_a))
+        b_ids = set(chunk_ids_for(entity_id_b))
+        both = sorted(a_ids & b_ids)
+        only_a = sorted(a_ids - b_ids)
+        only_b = sorted(b_ids - a_ids)
+        a_list = sorted(a_ids)
+        b_list = sorted(b_ids)
+    finally:
+        con.close()
+
+    ordered_ids = list(both) + list(only_a[:3]) + list(only_b[:3])
+    chunks = _chunks_by_ids(sqlite_path, ordered_ids)
+    if app_data and chunks:
+        passages = [str(c.get("text") or "") for c in chunks]
+        q = f"{entity_id_a} {entity_id_b}"
+        rr = rerank_with_budget(app_data, q, passages, thorough_reranking=False)
+        ranked = sorted(
+            zip(chunks, rr["scores"]),
+            key=lambda pair: (-pair[1], str(pair[0].get("chunk_id") or "")),
+        )
+        keep = [c for c, _s in ranked[:top_k]]
+    else:
+        keep = chunks[:top_k]
+    return {
+        "citations": [_citation_from_chunk(c, i + 1) for i, c in enumerate(keep)],
+        "bothChunkIds": both,
+        "aChunkIds": a_list,
+        "bChunkIds": b_list,
+    }

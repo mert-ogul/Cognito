@@ -1,35 +1,29 @@
 # Contributing
 
-## Principles
+## Setup
 
-- Follow **[CONSTITUTION.md](./CONSTITUTION.md)** for product scope and engineering rules (file size limits, style).
-- Prefer **small, focused PRs** with a clear motivation and test updates where behavior changes.
-- **No drive-by refactors** unrelated to the task, match existing patterns in each language.
-
-## Development setup
-
-1. Install **Node.js 20+**, **Rust** (stable), and **uv** ([https://docs.astral.sh/uv/](https://docs.astral.sh/uv/)).
-2. From the `cognito` directory: `npm install`, then `cd sidecar && uv sync && cd ..`.
-3. Run the app: `npm run tauri dev` (Ollama with pulled models is required for full chat/embed/graph behavior).
+Install Node.js 20+, Rust (stable), and [uv](https://docs.astral.sh/uv/). From the repository root run `npm install`, then `cd sidecar && uv sync && cd ..`. Start the app with `npm run tauri dev`. Full chat and indexing need Ollama with the models configured in Settings.
 
 ## Checks before submitting
 
-- `cargo test` in `src-tauri`
-- `npm run test:unit` and `npm run test:py`
-- `npm run build` (TypeScript + Vite)
-- Optional: `npm run test:e2e` after `npm run build:e2e` (see Playwright config)
+- `npm run test:unit`
+- `npm run build`
+- `cd sidecar && uv run pytest`
+- `cd src-tauri && cargo test`
+- Optional: `npm run test:e2e` after `npm run build:e2e`
 
-## Python
+## Rules
 
-- Sidecar code lives under `sidecar/` with `uv` lockfile, run format/lint via `ruff` if configured locally.
-- Use **`COGNITO_MOCK_EMBED=1`** in tests to avoid calling Ollama for embeddings (see `common/sqlite_vec_util.py`).
+Keep pull requests small and focused on one change.
 
-## Documentation
+Match the naming and error-handling style of the surrounding code in each language.
 
-- Product contract: `CONSTITUTION.md`
-- Architecture decisions: `docs/adr/`
-- VitePress skeleton: `docs-site/` (`npm run docs:dev`)
+Add or update tests when behaviour changes.
+
+Leave no unused code, files, or dependencies after a change.
+
+Do not upgrade dependencies unless the change requires it.
 
 ## Reporting issues
 
-Use GitHub issue templates when available (bug vs feature). Include OS, Cognito version or commit, and steps to reproduce.
+Use the GitHub issue templates when available. Include OS, Cognito version or commit, and steps to reproduce.

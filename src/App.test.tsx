@@ -3,26 +3,23 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import App from "./App";
 
-vi.mock("@/lib/tauri-events", () => ({
-  listen: vi.fn(async () => () => {}),
-}));
-
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (cmd: string) => {
     if (cmd === "get_app_health") {
       return {
         sqliteOk: true,
-        duckdbOk: true,
         sidecarReachable: true,
         ollamaModelReady: true,
         vaultConfigured: false,
-        chatModel: "phi4-mini",
-        embedModel: "nomic-embed-text",
+        chatModel: "qwen3.5:9b",
+        embedModel: "qwen3-embedding:0.6b",
         chatModelWarmed: true,
         warmUpPending: false,
         warmUpError: null,
         ollamaReachable: true,
         missingModels: [],
+        indexFormatUpdating: false,
+        checkingModelsReady: true,
       };
     }
     if (cmd === "list_documents") {
@@ -40,9 +37,13 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "get_settings") {
       return {
         vaultPath: null,
-        chatModel: "phi4-mini",
-        embedModel: "nomic-embed-text",
-        graphExtractionEnabled: true,
+        chatModel: "qwen3.5:9b",
+        embedModel: "qwen3-embedding:0.6b",
+        backgroundModel: "qwen3.5:4b",
+        summariseDocuments: true,
+        extractEntities: false,
+      extraEntityLabels: "",
+      thoroughReranking: false,
       };
     }
     return {};
@@ -58,8 +59,9 @@ describe("App shell", () => {
       </QueryClientProvider>,
     );
     expect(screen.getByText("Cognito")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Sources" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Chat" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Graph" })).toBeInTheDocument();
+    expect(screen.getByText("Library")).toBeInTheDocument();
+    expect(screen.getByLabelText("Chat message")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connections" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open settings" })).toBeInTheDocument();
   });
 });

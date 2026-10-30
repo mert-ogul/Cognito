@@ -1,15 +1,14 @@
-//! Tauri event name constants for future desktop integrations.
-
-#[allow(dead_code)]
-pub const HEALTH_TICK: &str = "health-tick";
+//! Tauri event name constants.
 
 pub const IMPORT_PROGRESS: &str = "import-progress";
 
-pub const GRAPH_EXTRACTION_PROGRESS: &str = "graph-extraction-progress";
+pub const BACKGROUND_PROGRESS: &str = "background-progress";
 
 pub const LIBRARY_CHANGED: &str = "library-changed";
 
+#[allow(dead_code)] // reserved; grounded chat uses CHAT_STAGE / CHAT_FINAL
 pub const CHAT_STREAM: &str = "chat-stream";
+pub const CHAT_STAGE: &str = "chat-stage";
 pub const CHAT_FINAL: &str = "chat-final";
 
-pub const MODEL_WARM_PROGRESS: &str = "model-warm-progress";
+pub const MODELS_PROGRESS: &str = "models-progress";

@@ -26,8 +26,10 @@ pub struct SidecarSession {
 fn timeout_for_method(method: &str) -> Duration {
     match method {
         "warm_model" => Duration::from_secs(600),
-        "parse_documents" | "embed_chunks" => Duration::from_secs(1800),
-        "extract_graph_chunk" => Duration::from_secs(600),
+        "parse_documents" | "embed_chunks" | "download_models" => Duration::from_secs(1800),
+        "prepare_chat_retrieval" | "prepare_related_retrieval" | "check_answer" => {
+            Duration::from_secs(300)
+        }
         _ => Duration::from_secs(120),
     }
 }

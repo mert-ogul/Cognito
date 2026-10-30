@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
-import duckdb
 
-from common.duckdb_util import ensure_schema
-from common.ollama import embed_text
+from common.ollama import embed_prefixes, embed_texts
 from common.sqlite_vec_util import (
     MOCK_EMBED_DIM,
     connect_with_vec,
@@ -18,8 +17,10 @@ from common.sqlite_vec_util import (
     mock_embed_enabled,
     table_dimension,
 )
-from ingestion.chunking import chunk_semantic, estimate_tokens, hash_chunk_text
+from ingestion.chunking import chunk_semantic, estimate_tokens, extract_chunk_labels, hash_chunk_text
 from ingestion.parsing import parse_file
+
+_EMBED_BATCH = 32
 
 
 def rpc_parse_documents(params: dict[str, Any]) -> dict[str, Any]:
@@ -48,6 +49,12 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
         drafts = chunk_semantic(str(it.get("text", "")), ftype, pages=pages)
         chunks = []
         for ord_i, ch in enumerate(drafts):
+            trail = " > ".join(t for t in ch.heading_trail if t)
+            role = ch.role if ch.role in ("body", "references") else "body"
+            labels = extract_chunk_labels(ch.text)
+            regions_json = (
+                json.dumps(ch.regions) if ch.regions else None
+            )
             chunks.append(
                 {
                     "ordinal": ord_i,
@@ -56,6 +63,10 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
                     "contentHash": hash_chunk_text(ch.text),
                     "pageStart": ch.page_start,
                     "pageEnd": ch.page_end,
+                    "headingTrail": trail or None,
+                    "role": role,
+                    "labels": json.dumps(labels),
+                    "regions": regions_json,
                 }
             )
         out.append(
@@ -68,10 +79,16 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
     return {"items": out}
 
 
-def _embed_one(model: str, text: str) -> list[float]:
-    if mock_embed_enabled():
-        return [0.0] * MOCK_EMBED_DIM
-    return embed_text(model, text[:8000])
+def _embed_document_text(
+    model: str, title: str, heading_trail: str | None, text: str
+) -> str:
+    _, doc_prefix = embed_prefixes(model)
+    parts = [doc_prefix + (title or "").strip()]
+    trail = (heading_trail or "").strip()
+    if trail:
+        parts.append(trail)
+    parts.append(text)
+    return "\n".join(parts)
 
 
 def rpc_embed_chunks(params: dict[str, Any]) -> dict[str, Any]:
@@ -81,16 +98,36 @@ def rpc_embed_chunks(params: dict[str, Any]) -> dict[str, Any]:
     con = connect_with_vec(sqlite_path)
     failed: list[dict[str, str]] = []
     try:
+        prepared: list[tuple[str, str]] = []
         for item in items:
             cid = str(item["chunkId"])
             text = str(item["text"])
+            title = str(item.get("title") or "")
+            trail = item.get("headingTrail")
+            trail_s = str(trail) if trail else None
+            embed_input = _embed_document_text(model, title, trail_s, text)[:8000]
+            prepared.append((cid, embed_input))
+
+        for start in range(0, len(prepared), _EMBED_BATCH):
+            batch = prepared[start : start + _EMBED_BATCH]
+            cids = [c for c, _ in batch]
+            texts = [t for _, t in batch]
             try:
-                vec = _embed_one(model, text)
-                if table_dimension(con) is None:
-                    ensure_chunk_embedding_table(con, len(vec))
-                insert_chunk_embedding(con, cid, vec)
+                if mock_embed_enabled():
+                    vecs = [[0.0] * MOCK_EMBED_DIM for _ in texts]
+                else:
+                    vecs = embed_texts(model, texts)
+                for cid, vec in zip(cids, vecs, strict=True):
+                    try:
+                        if table_dimension(con) is None:
+                            ensure_chunk_embedding_table(con, len(vec))
+                        insert_chunk_embedding(con, cid, vec)
+                    except Exception as exc:  # noqa: BLE001
+                        failed.append({"chunkId": cid, "error": str(exc)[:240]})
             except Exception as exc:  # noqa: BLE001
-                failed.append({"chunkId": cid, "error": str(exc)[:240]})
+                err = str(exc)[:240]
+                for cid in cids:
+                    failed.append({"chunkId": cid, "error": err})
         con.commit()
     finally:
         con.close()
@@ -115,18 +152,10 @@ def rpc_purge_chunk_embeddings(params: dict[str, Any]) -> dict[str, Any]:
 
 def rpc_reset_index(params: dict[str, Any]) -> dict[str, Any]:
     sqlite_path = str(params["sqlitePath"])
-    duck_path = str(params["duckPath"])
     con = connect_with_vec(sqlite_path)
     try:
         con.execute("DROP TABLE IF EXISTS chunk_embeddings")
         con.commit()
     finally:
         con.close()
-    ensure_schema(duck_path)
-    duck = duckdb.connect(duck_path)
-    try:
-        duck.execute("DELETE FROM graph_edges")
-        duck.execute("DELETE FROM graph_nodes")
-    finally:
-        duck.close()
     return {"ok": True}

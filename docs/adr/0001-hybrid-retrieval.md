@@ -6,16 +6,12 @@ Accepted
 
 ## Context
 
-Cognito MVP requires grounded answers with citations over a local vault, with optional graph augmentation. Adaptive routing is out of scope.
+Cognito answers questions from a local PDF and Markdown library with numbered citations. An adaptive classifier that chooses between graph and vector search would add model calls and make failures harder to explain.
 
 ## Decision
 
-1. **Vector-first**: embed the user query with the configured Ollama embedding model, score all chunk embeddings (cosine similarity), take top-k chunks.
-2. **Graph augmentation**: derive candidate terms from the query and top chunks; match `graph_nodes.normalized_name` in DuckDB; include edges touching those nodes (single-hop listing in MVP; two-hop expansion can be layered without changing the UI contract).
-3. **Fallback**: if the graph is empty or terms do not match, the prompt uses only chunk evidence (vector-only behavior).
-4. **Synthesis**: Ollama chat completes a single turn with system instructions to stay within evidence.
+Retrieval is fixed. The query is embedded and chunks are ranked by vector similarity. Graph seeds come from edges attached to those chunks and from names that appear in the question. Expansion follows at most two hops in DuckDB. If the graph is empty or unavailable, the prompt uses the retrieved chunks alone. The chat model must cite evidence with numbered markers that match the citation list.
 
 ## Consequences
 
-- Retrieval is reproducible for the same index and models.
-- DuckDB lives in the Python sidecar to avoid shipping `libduckdb` in the Rust binary; Rust delegates graph reads to JSON-RPC methods.
+The same index and models produce the same retrieval shape, which keeps tests and debugging straightforward. Graph failures do not block chat when embeddings exist.

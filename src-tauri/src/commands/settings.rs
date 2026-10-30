@@ -3,7 +3,6 @@ use crate::db::sqlite;
 use crate::models::SettingsPayload;
 use crate::services::model_warm;
 use std::path::PathBuf;
-use tauri::AppHandle;
 
 use super::run_blocking;
 
@@ -16,7 +15,6 @@ pub async fn get_settings(
 
 #[tauri::command]
 pub async fn update_settings(
-    app: AppHandle,
     state: tauri::State<'_, SharedState>,
     payload: SettingsPayload,
 ) -> Result<(), String> {
@@ -36,8 +34,8 @@ pub async fn update_settings(
         }
     }
     let chat_changed = payload.chat_model != prev.chat_model;
-    let graph_turned_on =
-        payload.graph_extraction_enabled && !prev.graph_extraction_enabled;
+    let wake_background = (payload.extract_entities && !prev.extract_entities)
+        || (payload.summarise_documents && !prev.summarise_documents);
     run_blocking(state, move |st| {
         st.with_sqlite(|c| {
             if let Some(ref v) = payload.vault_path {
@@ -45,12 +43,26 @@ pub async fn update_settings(
             }
             sqlite::upsert_setting(c, "chat_model", &payload.chat_model)?;
             sqlite::upsert_setting(c, "embed_model", &payload.embed_model)?;
-            let graph = if payload.graph_extraction_enabled {
+            sqlite::upsert_setting(c, "background_model", &payload.background_model)?;
+            let summarise = if payload.summarise_documents {
                 "true"
             } else {
                 "false"
             };
-            sqlite::upsert_setting(c, "graph_extraction_enabled", graph)?;
+            sqlite::upsert_setting(c, "summarise_documents", summarise)?;
+            let extract = if payload.extract_entities {
+                "true"
+            } else {
+                "false"
+            };
+            sqlite::upsert_setting(c, "extract_entities", extract)?;
+            sqlite::upsert_setting(c, "extra_entity_labels", &payload.extra_entity_labels)?;
+            let thorough = if payload.thorough_reranking {
+                "true"
+            } else {
+                "false"
+            };
+            sqlite::upsert_setting(c, "thorough_reranking", thorough)?;
             Ok(())
         })?;
         if let Some(ref v) = payload.vault_path {
@@ -59,12 +71,12 @@ pub async fn update_settings(
         Ok(())
     })
     .await?;
-    if graph_turned_on {
-        st.notify_graph_worker();
+    if wake_background {
+        st.notify_background_worker();
     }
     if chat_changed {
         st.clear_chat_warm();
-        model_warm::spawn_warm_chat_model(st, app);
+        model_warm::spawn_warm_chat_model(st);
     }
     Ok(())
 }

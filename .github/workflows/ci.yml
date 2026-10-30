@@ -86,7 +86,7 @@ jobs:
       - run: npm run package:sidecar
       - name: Bundled Python imports with empty environment
         run: |
-          env -i src-tauri/resources/sidecar/python/bin/python3 -c "import duckdb, fitz, sqlite_vec, lightrag"
+          env -i src-tauri/resources/sidecar/python/bin/python3 -c "import fitz, sqlite_vec, httpx, numpy, rapidfuzz, docx, transformers"
       - name: Bundled sidecar ping with empty environment
         working-directory: src-tauri/resources/sidecar
         run: |

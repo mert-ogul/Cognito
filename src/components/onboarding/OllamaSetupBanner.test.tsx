@@ -5,17 +5,18 @@ import type { AppHealth } from "@/lib/tauri";
 
 const base: AppHealth = {
   sqliteOk: true,
-  duckdbOk: true,
   sidecarReachable: true,
   ollamaModelReady: false,
   vaultConfigured: true,
-  chatModel: "phi4-mini",
-  embedModel: "nomic-embed-text",
+  chatModel: "qwen3.5:9b",
+  embedModel: "qwen3-embedding:0.6b",
   chatModelWarmed: false,
   warmUpPending: false,
   warmUpError: null,
   ollamaReachable: false,
-  missingModels: ["phi4-mini", "nomic-embed-text"],
+  missingModels: ["qwen3.5:9b", "qwen3-embedding:0.6b"],
+  indexFormatUpdating: false,
+  checkingModelsReady: true,
 };
 
 describe("OllamaSetupBanner", () => {
@@ -31,12 +32,12 @@ describe("OllamaSetupBanner", () => {
         health={{
           ...base,
           ollamaReachable: true,
-          missingModels: ["phi4-mini", "nomic-embed-text"],
+          missingModels: ["qwen3.5:9b", "qwen3-embedding:0.6b"],
         }}
       />,
     );
-    expect(screen.getByText("Required Ollama models are missing.")).toBeInTheDocument();
-    expect(screen.getByText("ollama pull phi4-mini")).toBeInTheDocument();
-    expect(screen.getByText("ollama pull nomic-embed-text")).toBeInTheDocument();
+    expect(screen.getByText("Required Ollama models are missing")).toBeInTheDocument();
+    expect(screen.getByText("ollama pull qwen3.5:9b")).toBeInTheDocument();
+    expect(screen.getByText("ollama pull qwen3-embedding:0.6b")).toBeInTheDocument();
   });
 });

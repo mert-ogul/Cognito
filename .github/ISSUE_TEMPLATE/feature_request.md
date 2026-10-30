@@ -9,6 +9,6 @@ labels: enhancement
 
 ## Proposed behavior (optional)
 
-## Out of scope note
+## Notes
 
-Cognito MVP scope is defined in `CONSTITUTION.md`. Requests outside scope may be deferred.
+Requests far outside the current product surface may be deferred.

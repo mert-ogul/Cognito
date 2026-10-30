@@ -1,11 +1,11 @@
-//! Small orchestration units for commands (no vague "manager" types).
+//! Small orchestration units for commands.
 
+pub mod background_worker;
 pub mod chat_query;
+pub mod document_cards;
 pub mod file_watcher;
 pub mod health_snapshot;
-pub mod graph_index_service;
-pub mod graph_worker;
-pub mod index_rebuild;
+pub mod library;
 pub mod ollama_stream;
 pub mod import_job;
 pub mod ingest;
