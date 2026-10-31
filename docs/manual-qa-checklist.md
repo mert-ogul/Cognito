@@ -4,7 +4,7 @@ Use this list before tagging a release candidate or public alpha.
 
 ## Environment
 
-- [ ] First launch: the app opens; the toolbar status reflects sidecar and Ollama health.
+- [ ] First launch: the app opens; the toolbar status reflects health. Checking and names models download on first launch (~2.1 GB).
 - [ ] Missing Ollama: with Ollama stopped, the banner and chat stay blocked with a clear message.
 - [ ] Missing model: a wrong or unpulled model name surfaces a readable error; Retry after pull works.
 
@@ -15,31 +15,31 @@ Use this list before tagging a release candidate or public alpha.
 - [ ] At 100 active documents, further import is refused with the documented message.
 - [ ] Empty library: chat explains there is no indexed content (no invented citations).
 
-## Index and graph
+## Index and connections
 
-- [ ] After import, the graph pane loads nodes and edges for extracted content.
+- [ ] After import, document cards fill in and Connections Index lists extracted names when find-names is on.
 - [ ] Embedding failures mark documents failed; the rest of the app stays usable.
-- [ ] Graph extraction failure does not corrupt the vault; chat still works with vector-only retrieval.
+- [ ] Entity extraction failure does not corrupt the vault; chat still works.
 
 ## Chat and citations
 
 - [ ] Asking a question returns a grounded answer when Ollama and models are available.
 - [ ] Answers include numbered citations when evidence is returned.
-- [ ] Clicking a citation opens the passage pane with the source text.
-- [ ] Selecting a graph node shows detail consistent with stored extraction.
+- [ ] Clicking a citation opens the passage pane with the source text and page image when regions exist.
+- [ ] Related documents on a document page open the other document; Ask about both scopes chat to both.
 
 ## Library controls
 
-- [ ] Switch folder: old index and graph are cleared; new folder indexes cleanly.
+- [ ] Switch folder: old index is cleared; new folder indexes cleanly.
 - [ ] Rebuild index: validates the folder before wiping; reindexes successfully.
 - [ ] Remove library: Cognito forgets the folder; files remain on disk.
 
 ## Reliability
 
 - [ ] With Ollama off after an index exists, missing query embeddings produce an explicit message.
-- [ ] Restarting or killing the sidecar recovers without reinstalling; vault data stays intact.
+- [ ] Restarting the app recovers without reinstalling; vault data stays intact.
 - [ ] Removing a vault file is handled without crashing the shell.
 
 ## Packaged build
 
-- [ ] Built app or installer launches, finds sidecar resources, completes one import and one chat turn.
+- [ ] Built app or installer launches, finds bundled resources, completes one import and one chat turn.

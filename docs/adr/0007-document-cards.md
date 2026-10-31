@@ -10,8 +10,8 @@ A scannable library needs more than filenames. Users want type, date, people, a 
 
 ## Decision
 
-After a document is indexed, a background worker makes one checked model call with the configured background model and stores a document card (type, title, date, people, organisations, summary sentences, key facts, typed fields, aliases, suggested questions). Every summary sentence, fact, and field carries quotes that are verified against retrieved passages. The library list shows card metadata; opening a row loads the card. Suggested questions for empty chat come from cards. Graph extraction stays optional and off by default.
+After a document is indexed, a background worker makes one checked model call with the configured model for document cards and stores a document card (type, title, date, people, organisations, summary sentences, key facts, typed fields, aliases, suggested questions). Every summary sentence, fact, and field carries quotes that are verified against retrieved passages. The library list shows card metadata; opening a row loads the card and related documents. Suggested questions for empty chat come from cards. Name extraction for connections is a separate toggle (on by default).
 
 ## Consequences
 
-Cards finish in the background without blocking chat. Failed cards leave the document indexed and searchable. Changing the background model or turning summarise off or on is a Settings change; turning summarise on again requeues pending cards.
+Cards finish in the background without blocking chat. Failed cards leave the document indexed and searchable. Changing the document-card model or turning summarise off or on is a Settings change; turning summarise on again requeues pending cards.

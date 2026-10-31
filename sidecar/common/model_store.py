@@ -94,11 +94,7 @@ _MOCK_DATE_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-_MOCK_CORA_RE = re.compile(r"\bCora(?:\s+dataset)?\b", re.IGNORECASE)
-_MOCK_GCN_RE = re.compile(
-    r"\bGraph Convolutional Networks\b|\bGCN\b",
-    re.IGNORECASE,
-)
+_MOCK_CAPITALISED_RE = re.compile(r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b")
 
 
 def models_dir(app_data: str) -> Path:
@@ -427,36 +423,6 @@ def rerank_with_budget(
     return {"scores": out, "scored": scored, "budgetHit": budget_hit, "rerankMs": ms}
 
 
-def hhem_scores(
-    app_data: str,
-    pairs: list[tuple[str, str]],
-) -> list[float | None]:
-    """Return per-pair scores; None means the pair was not scored within budget."""
-    if not pairs:
-        return []
-    if mock_models_enabled():
-        return [0.9] * len(pairs)
-
-    model = _load_hhem(app_data)
-    started = time.perf_counter()
-    try:
-        raw = model.predict(list(pairs))
-    except Exception:
-        return [None] * len(pairs)
-
-    elapsed = time.perf_counter() - started
-    try:
-        values = [float(x) for x in raw]
-    except TypeError:
-        values = [float(raw)]
-
-    if elapsed <= _HHEM_BUDGET_S:
-        return values
-
-    log.info("hhem budget hit: 0 of %s scored", len(pairs))
-    return [None] * len(pairs)
-
-
 def hhem_scores_bounded(
     app_data: str,
     pairs: list[tuple[str, str]],
@@ -547,49 +513,26 @@ def unload_gliner() -> None:
         pass
 
 
-def _pick_mock_label(labels: list[str], preferred: list[str]) -> str:
-    lower = {str(x).lower(): str(x) for x in labels}
-    for p in preferred:
-        if p.lower() in lower:
-            return lower[p.lower()]
-    return str(labels[0]) if labels else "entity"
-
-
 def _mock_extract_spans(text: str, labels: list[str]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    if not text:
+    if not text or not labels:
         return out
-    for m in _MOCK_CORA_RE.finditer(text):
-        span = m.group(0)
-        label = _pick_mock_label(
-            labels, ["dataset", "organization", "model", "algorithm"]
-        )
+    label = next(
+        (str(x) for x in labels if str(x).lower() != "date"),
+        str(labels[0]),
+    )
+    for m in _MOCK_CAPITALISED_RE.finditer(text):
         out.append(
             {
                 "label": label,
-                "text": span,
+                "text": m.group(0),
                 "start": m.start(),
                 "end": m.end(),
                 "score": 0.99,
             }
         )
-    for m in _MOCK_GCN_RE.finditer(text):
-        span = m.group(0)
-        label = _pick_mock_label(
-            labels, ["model", "algorithm", "method", "organization"]
-        )
-        out.append(
-            {
-                "label": label,
-                "text": span,
-                "start": m.start(),
-                "end": m.end(),
-                "score": 0.98,
-            }
-        )
     if any(str(x).lower() == "date" for x in labels):
         for m in _MOCK_DATE_RE.finditer(text):
-            span = m.group(0)
             if any(
                 s["start"] <= m.start() and s["end"] >= m.end() and s["label"] == "date"
                 for s in out
@@ -598,7 +541,7 @@ def _mock_extract_spans(text: str, labels: list[str]) -> list[dict[str, Any]]:
             out.append(
                 {
                     "label": "date",
-                    "text": span,
+                    "text": m.group(0),
                     "start": m.start(),
                     "end": m.end(),
                     "score": 0.95,
@@ -624,21 +567,6 @@ def _normalize_span_item(item: Any) -> dict[str, Any]:
         "end": int(getattr(item, "end", 0) or 0),
         "score": float(getattr(item, "score", 0.0) or 0.0),
     }
-
-
-def extract_spans(
-    app_data: str,
-    text: str,
-    labels: list[str],
-    threshold: float = 0.5,
-) -> list[dict[str, Any]]:
-    if not text or not labels:
-        return []
-    if mock_models_enabled():
-        return _mock_extract_spans(text, labels)
-
-    batched = extract_spans_batch(app_data, [text], labels, threshold=threshold)
-    return batched[0] if batched else []
 
 
 def extract_spans_batch(

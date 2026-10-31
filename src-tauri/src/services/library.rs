@@ -5,11 +5,8 @@ use crate::db::sqlite;
 use crate::errors::{CognitoError, CognitoResult};
 use crate::vault;
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-fn sp(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
 
 pub fn reset(state: &SharedState) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
@@ -17,7 +14,7 @@ pub fn reset(state: &SharedState) -> CognitoResult<()> {
         s.request(
             "reset_index",
             json!({
-                "sqlitePath": sp(&sqlite_path),
+                "sqlitePath": vault::path_string(&sqlite_path),
             }),
         )?;
         Ok(())
@@ -36,13 +33,12 @@ pub fn switch_vault(state: &SharedState, folder: &str) -> CognitoResult<Vec<Path
     let vault = vault::ensure_vault_path(folder)?;
     let paths = vault::collect_import_paths_bounded(&vault, vault::slots_remaining(0))?;
     let doc_n: i64 = state.with_sqlite(|c| {
-        c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
-            .map_err(|e| CognitoError::Database(e.to_string()))
+        Ok(c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?)
     })?;
     if doc_n > 0 {
         reset(state)?;
     }
-    let stored = sp(&vault);
+    let stored = vault::path_string(&vault);
     state.with_sqlite(|c| sqlite::upsert_setting(c, "vault_path", &stored))?;
     Ok(paths)
 }

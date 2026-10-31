@@ -803,12 +803,6 @@ def _mock_similar_links(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
     sqlite_path = str(_param(params, "sqlitePath", "sqlite_path"))
-    _app_data = str(_param(params, "app_data", "appData") or "")
-    del _app_data  # reserved for future local models
-    _embed_model = str(
-        _param(params, "embed_model", "embedModel") or "qwen3-embedding:0.6b"
-    )
-    del _embed_model
 
     con = sqlite3.connect(sqlite_path)
     try:

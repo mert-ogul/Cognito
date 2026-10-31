@@ -158,24 +158,23 @@ mod tests {
 
     #[test]
     fn missing_models_matches_latest_tag() {
-        let available = vec!["phi4-mini:latest".into(), "nomic-embed-text:latest".into()];
+        let available = vec![
+            "qwen3.5:9b".into(),
+            "qwen3-embedding:0.6b".into(),
+        ];
         assert!(missing_configured_models(
-            &["phi4-mini".into(), "nomic-embed-text".into()],
+            &["qwen3.5:9b".into(), "qwen3-embedding:0.6b".into()],
             &available
         )
         .is_empty());
         assert_eq!(
-            missing_configured_models(&["phi4-mini".into(), "other".into()], &available),
+            missing_configured_models(&["qwen3.5:9b".into(), "other".into()], &available),
             vec!["other".to_string()]
         );
         assert_eq!(
-            missing_configured_models(&["phi4-mini:v2".into()], &available),
-            vec!["phi4-mini:v2".to_string()]
+            missing_configured_models(&["qwen3.5:9b-v2".into()], &available),
+            vec!["qwen3.5:9b-v2".to_string()]
         );
-        assert!(missing_configured_models(
-            &["phi4-mini:latest".into()],
-            &available
-        )
-        .is_empty());
+        assert!(missing_configured_models(&["qwen3.5:9b".into()], &available).is_empty());
     }
 }

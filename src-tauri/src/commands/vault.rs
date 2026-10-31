@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
-use super::documents::{release_import, spawn_import_thread, try_lock_import};
+use super::documents::{spawn_import_thread, try_lock_import};
 
 #[tauri::command]
 pub async fn select_vault_folder(app: AppHandle) -> Result<Option<String>, String> {
@@ -36,31 +36,20 @@ pub async fn set_vault(
     state: tauri::State<'_, SharedState>,
     path: String,
 ) -> Result<Option<String>, String> {
-    try_lock_import(&*state)?;
-    let paths = match library::switch_vault(&*state, &path) {
-        Ok(p) => p,
-        Err(e) => {
-            release_import(&*state);
-            return Err(e.to_string());
-        }
-    };
+    let guard = try_lock_import(&*state)?;
+    let paths = library::switch_vault(&*state, &path).map_err(|e| e.to_string())?;
     state.notify_watcher(PathBuf::from(&path));
     let _ = app.emit(LIBRARY_CHANGED, &());
     if paths.is_empty() {
-        release_import(&*state);
         return Ok(None);
     }
-    let settings = match state.with_sqlite(|c| sqlite::load_settings(c)) {
-        Ok(s) => s,
-        Err(e) => {
-            release_import(&*state);
-            return Err(e.to_string());
-        }
-    };
+    let settings = state
+        .with_sqlite(|c| sqlite::load_settings(c))
+        .map_err(|e| e.to_string())?;
     let job_id = Uuid::new_v4().to_string();
     spawn_import_thread(
         app,
-        &*state,
+        guard,
         job_id.clone(),
         PathBuf::from(&path),
         paths,
@@ -75,13 +64,9 @@ pub async fn clear_library(
     app: AppHandle,
     state: tauri::State<'_, SharedState>,
 ) -> Result<(), String> {
-    try_lock_import(&*state)?;
-    if let Err(e) = library::forget(&*state) {
-        release_import(&*state);
-        return Err(e.to_string());
-    }
+    let _guard = try_lock_import(&*state)?;
+    library::forget(&*state).map_err(|e| e.to_string())?;
     state.stop_watcher();
-    release_import(&*state);
     let _ = app.emit(LIBRARY_CHANGED, &());
     Ok(())
 }

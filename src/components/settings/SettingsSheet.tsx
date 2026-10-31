@@ -235,7 +235,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
             <Input id="chat-model" value={chat} onChange={(e) => setChat(e.target.value)} autoComplete="off" />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="background-model">Background model</Label>
+            <Label htmlFor="background-model">Model for document cards</Label>
             <Input
               id="background-model"
               value={background}

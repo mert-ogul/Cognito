@@ -372,7 +372,7 @@ function IndexView({
               onOpenDocument={onOpenDocument}
             />
           ) : (
-            <p className="px-2 text-muted">Entity not found.</p>
+            <p className="px-2 text-muted">This name is no longer in your documents.</p>
           )}
         </div>
       ) : null}

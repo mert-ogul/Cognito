@@ -6,16 +6,13 @@ use crate::errors::{CognitoError, CognitoResult};
 use crate::events::IMPORT_PROGRESS;
 use crate::models::ImportProgress;
 use crate::services::import_job;
-use crate::vault::IMPORT_BATCH;
+use crate::vault::{self, IMPORT_BATCH};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 use tauri::Emitter;
 use uuid::Uuid;
 
-fn sp(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
 
 fn emit_job(
     app: Option<&AppHandle>,
@@ -53,7 +50,7 @@ fn sidecar_purge(state: &SharedState, sqlite_path: &Path, ids: &[String]) -> Cog
     state.sidecar.with_session(|s| {
         s.request(
             "purge_chunk_embeddings",
-            json!({ "sqlitePath": sp(sqlite_path), "chunkIds": ids }),
+            json!({ "sqlitePath": vault::path_string(sqlite_path), "chunkIds": ids }),
         )?;
         Ok(())
     })
@@ -80,11 +77,11 @@ fn parse_documents_rpc(
     vault: &Path,
     paths: &[PathBuf],
 ) -> CognitoResult<Value> {
-    let path_strs: Vec<String> = paths.iter().map(|p| sp(p)).collect();
+    let path_strs: Vec<String> = paths.iter().map(|p| vault::path_string(p)).collect();
     state.sidecar.with_session(|s| {
         s.request(
             "parse_documents",
-            json!({ "vaultRoot": sp(vault), "paths": path_strs }),
+            json!({ "vaultRoot": vault::path_string(vault), "paths": path_strs }),
         )
     })
 }
@@ -95,7 +92,7 @@ fn parse_batch(state: &SharedState, vault: &Path, batch: &[PathBuf]) -> CognitoR
     match parse_documents_rpc(state, vault, batch) {
         Ok(v) => Ok(v),
         Err(e) if batch.len() == 1 => {
-            let path = sp(&batch[0]);
+            let path = vault::path_string(&batch[0]);
             Ok(json!({
                 "items": [],
                 "errors": [{ "path": path, "error": e.to_string() }],
@@ -115,7 +112,7 @@ fn parse_batch(state: &SharedState, vault: &Path, batch: &[PathBuf]) -> CognitoR
                         }
                     }
                     Err(e) => {
-                        errors.push(json!({ "path": sp(path), "error": e.to_string() }));
+                        errors.push(json!({ "path": vault::path_string(path), "error": e.to_string() }));
                     }
                 }
             }
@@ -143,7 +140,7 @@ fn embed_items_rpc(
         s.request(
             "embed_chunks",
             json!({
-                "sqlitePath": sp(sqlite_path),
+                "sqlitePath": vault::path_string(sqlite_path),
                 "embedModel": embed,
                 "chatModel": chat,
                 "documentId": document_id,
@@ -242,8 +239,7 @@ fn process_one_parsed(
     let doc_id = Uuid::new_v4().to_string();
     let embed_payload = state.with_sqlite(|conn| {
         let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
+            .unchecked_transaction()?;
         let scan_status = parsed
             .get("scanStatus")
             .and_then(|x| x.as_str())
@@ -328,8 +324,7 @@ fn process_one_parsed(
             }
             embed_payload.push(item);
         }
-        tx.commit()
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        tx.commit()?;
         Ok(embed_payload)
     })?;
     if embed_payload.is_empty() {
@@ -508,7 +503,7 @@ pub fn run_single_file(
         0,
         0,
         "index",
-        Some(&sp(file_path)),
+        Some(&vault::path_string(file_path)),
         None,
     );
     let parsed = parse_batch(state, vault_root, &[file_path.to_path_buf()])?;
@@ -539,7 +534,7 @@ pub fn run_single_file(
         1,
         0,
         "done",
-        Some(&sp(file_path)),
+        Some(&vault::path_string(file_path)),
         None,
     );
     state.notify_background_worker();
@@ -598,7 +593,7 @@ mod tests {
         let vault_root = vault.path().to_path_buf();
         state
             .with_sqlite(|c| {
-                sqlite::upsert_setting(c, "vault_path", &sp(&vault_root))?;
+                sqlite::upsert_setting(c, "vault_path", &vault::path_string(&vault_root))?;
                 sqlite::upsert_setting(c, "extract_entities", "true")?;
                 sqlite::upsert_setting(c, "summarise_documents", "false")?;
                 Ok(())
@@ -626,8 +621,8 @@ mod tests {
             .expect("import timed out after 180s");
         res.expect("first import");
 
-        let note_s = sp(&note_abs);
-        let broken_s = sp(&broken_abs);
+        let note_s = vault::path_string(&note_abs);
+        let broken_s = vault::path_string(&broken_abs);
         state
             .with_sqlite(|conn| {
                 let note_status: String = conn
@@ -635,32 +630,28 @@ mod tests {
                         "SELECT status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(note_status, "indexed");
                 let entities_status: String = conn
                     .query_row(
                         "SELECT entities_status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(entities_status, "pending");
                 let chunk_n: i64 = conn
                     .query_row(
                         "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.path = ?1",
                         [&note_s],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert!(chunk_n >= 1, "expected at least one chunk");
                 let broken_status: String = conn
                     .query_row(
                         "SELECT status FROM documents WHERE path = ?1",
                         [&broken_s],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(broken_status, "failed");
                 Ok(())
             })
@@ -678,8 +669,7 @@ mod tests {
                         "SELECT entities_status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(entities_status, "ok");
                 Ok(())
             })
@@ -695,16 +685,14 @@ mod tests {
         state
             .with_sqlite(|conn| {
                 let n: i64 = conn
-                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(n, 0);
                 let vec_n: i64 = conn
                     .query_row(
                         "SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_embeddings'",
                         [],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(vec_n, 0);
                 assert!(sqlite::get_setting(conn, "index_embed_model")?.is_none());
                 Ok(())
@@ -737,8 +725,7 @@ mod tests {
                         "SELECT status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(note_status, "indexed");
                 Ok(())
             })
@@ -758,7 +745,7 @@ mod tests {
             "phi4-mini",
         )
         .expect("index skip-me");
-        let removed_s = sp(&removed_abs);
+        let removed_s = vault::path_string(&removed_abs);
         state
             .with_sqlite(|c| {
                 sqlite::mark_document_removed(c, &removed_s)?;
@@ -800,15 +787,13 @@ mod tests {
                         "SELECT COUNT(*) FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 let broken_n: i64 = conn
                     .query_row(
                         "SELECT COUNT(*) FROM documents WHERE path = ?1",
                         [&broken_s],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(note_n, 1);
                 assert_eq!(broken_n, 1);
                 let note_status: String = conn
@@ -816,8 +801,7 @@ mod tests {
                         "SELECT status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(note_status, "indexed");
                 Ok(())
             })
@@ -846,8 +830,7 @@ mod tests {
                         "SELECT status, entities_status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(status, "indexed");
                 assert_eq!(estat, "pending");
                 Ok(())
@@ -861,8 +844,7 @@ mod tests {
                         "SELECT entities_status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(estat, "ok");
                 Ok(())
             })
@@ -877,8 +859,7 @@ mod tests {
                         "SELECT status FROM documents WHERE path = ?1",
                         [&note_s],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(status, "removed");
                 Ok(())
             })
@@ -899,8 +880,7 @@ mod tests {
         state
             .with_sqlite(|conn| {
                 let n: i64 = conn
-                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(n, 0, "switch_vault must clear documents");
                 let vp = sqlite::get_setting(conn, "vault_path")?
                     .expect("vault_path after switch");
@@ -939,13 +919,11 @@ mod tests {
         state
             .with_sqlite(|conn| {
                 let n: i64 = conn
-                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(n, 1);
                 let path: String = conn
-                    .query_row("SELECT path FROM documents", [], |r| r.get(0))
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
-                assert_eq!(path, sp(&b_abs));
+                    .query_row("SELECT path FROM documents", [], |r| r.get(0))?;
+                assert_eq!(path, vault::path_string(&b_abs));
                 Ok(())
             })
             .expect("only B indexed");
@@ -961,8 +939,7 @@ mod tests {
         state
             .with_sqlite(|conn| {
                 let n: i64 = conn
-                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(n, 1, "failed rebuild must leave documents");
                 Ok(())
             })
@@ -972,8 +949,7 @@ mod tests {
         state
             .with_sqlite(|conn| {
                 let n: i64 = conn
-                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(n, 0);
                 assert!(sqlite::get_setting(conn, "vault_path")?.is_none());
                 Ok(())

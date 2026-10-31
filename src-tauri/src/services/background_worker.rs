@@ -8,16 +8,13 @@ use crate::models::BackgroundProgress;
 use crate::services::document_cards;
 use crate::services::ollama_stream;
 use serde_json::json;
-use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+use crate::vault;
 
-fn sp(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
 
 pub(crate) fn emit_progress(
     app: Option<&AppHandle>,
@@ -139,7 +136,7 @@ fn process_one_entities(
         return Ok(DocOutcome::Finished);
     }
     let sqlite_path = state.sqlite_path();
-    let app_data = sp(&state.data_dir);
+    let app_data = vault::path_string(&state.data_dir);
     let labels: Vec<String> = settings
         .extra_entity_labels
         .split(',')
@@ -156,7 +153,7 @@ fn process_one_entities(
             s.request(
                 "extract_entities",
                 json!({
-                    "sqlitePath": sp(&sqlite_path),
+                    "sqlitePath": vault::path_string(&sqlite_path),
                     "documentId": document_id,
                     "app_data": app_data,
                     "labels": labels,
@@ -294,7 +291,7 @@ fn recompute_links(state: &SharedState) {
     let _ = state.sidecar.with_session(|s| {
         s.request(
             "recompute_links",
-            json!({ "sqlitePath": sp(&sqlite_path) }),
+            json!({ "sqlitePath": vault::path_string(&sqlite_path) }),
         )
     });
 }
@@ -444,7 +441,6 @@ fn worker_loop(state: SharedState, app: AppHandle, rx: Receiver<()>) {
 mod tests {
     use super::*;
     use crate::app::state::AppState;
-    use crate::errors::CognitoError;
     use crate::sidecar::SidecarPool;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -497,8 +493,7 @@ mod tests {
                         "SELECT COUNT(*) FROM document_cards WHERE document_id = ?1",
                         [doc_id],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(n, 1);
                 sqlite::delete_document_by_id(c, doc_id)?;
                 let n2: i64 = c
@@ -506,8 +501,7 @@ mod tests {
                         "SELECT COUNT(*) FROM document_cards WHERE document_id = ?1",
                         [doc_id],
                         |r| r.get(0),
-                    )
-                    .map_err(|e| CognitoError::Database(e.to_string()))?;
+                    )?;
                 assert_eq!(n2, 0);
                 Ok(())
             })
@@ -557,8 +551,7 @@ mod tests {
                 c.execute(
                     "UPDATE documents SET entities_status = 'pending', card_status = 'pending' WHERE id = 'doc-ent'",
                     [],
-                )
-                .map_err(|e| CognitoError::Database(e.to_string()))?;
+                )?;
                 Ok(())
             })
             .expect("seed");
@@ -568,12 +561,11 @@ mod tests {
         assert!(!outcome.paused);
         let (status, err): (String, Option<String>) = state
             .with_sqlite(|c| {
-                c.query_row(
+                Ok(c.query_row(
                     "SELECT entities_status, entities_error FROM documents WHERE id = 'doc-ent'",
                     [],
                     |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .map_err(|e| CognitoError::Database(e.to_string()))
+                )?)
             })
             .expect("status");
         assert_eq!(status, "ok", "entities_error={err:?}");
@@ -614,8 +606,7 @@ mod tests {
                 c.execute(
                     "UPDATE documents SET card_status = 'running' WHERE id = 'doc-unload'",
                     [],
-                )
-                .map_err(|e| CognitoError::Database(e.to_string()))?;
+                )?;
                 Ok(())
             })
             .expect("seed");
@@ -710,8 +701,7 @@ mod tests {
                 c.execute(
                     "UPDATE documents SET card_status = 'pending' WHERE id = 'doc-pause'",
                     [],
-                )
-                .map_err(|e| CognitoError::Database(e.to_string()))?;
+                )?;
                 Ok(())
             })
             .expect("seed");

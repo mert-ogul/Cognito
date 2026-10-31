@@ -1,205 +1,51 @@
 //! SQLite vault access and migrations.
 
-use crate::errors::{CognitoError, CognitoResult};
+use crate::errors::CognitoResult;
 use crate::models::{DocumentCardPayload, DocumentRow, SettingsPayload, SuggestedQuestion};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::path::Path;
 
-const MIGRATION_001: &str = include_str!("../../../migrations/001_initial.sql");
-const MIGRATION_002: &str = include_str!("../../../migrations/002_sqlite_vec_prep.sql");
-const MIGRATION_003: &str = include_str!("../../../migrations/003_graph_stage.sql");
-const MIGRATION_004: &str = include_str!("../../../migrations/004_requeue_graph.sql");
-const MIGRATION_005: &str = include_str!("../../../migrations/005_chunk_search.sql");
-const MIGRATION_006: &str = include_str!("../../../migrations/006_chunk_role.sql");
-const MIGRATION_007: &str = include_str!("../../../migrations/007_requeue_graph_v2.sql");
-const MIGRATION_008: &str = include_str!("../../../migrations/008_default_models.sql");
-const MIGRATION_009: &str = include_str!("../../../migrations/009_chunk_labels.sql");
-const MIGRATION_010: &str = include_str!("../../../migrations/010_document_cards.sql");
-const MIGRATION_011: &str = include_str!("../../../migrations/011_entities_connections.sql");
-const MIGRATION_012: &str = include_str!("../../../migrations/012_chunk_regions.sql");
-const MIGRATION_013: &str = include_str!("../../../migrations/013_documents_fts.sql");
-const MIGRATION_014: &str = include_str!("../../../migrations/014_background_model_default.sql");
-const MIGRATION_015: &str = include_str!("../../../migrations/015_drop_map_tables.sql");
+const MIGRATIONS: &[(i32, &str)] = &[
+    (1, include_str!("../../../migrations/001_initial.sql")),
+    (2, include_str!("../../../migrations/002_sqlite_vec_prep.sql")),
+    (3, include_str!("../../../migrations/003_graph_stage.sql")),
+    (4, include_str!("../../../migrations/004_requeue_graph.sql")),
+    (5, include_str!("../../../migrations/005_chunk_search.sql")),
+    (6, include_str!("../../../migrations/006_chunk_role.sql")),
+    (7, include_str!("../../../migrations/007_requeue_graph_v2.sql")),
+    (8, include_str!("../../../migrations/008_default_models.sql")),
+    (9, include_str!("../../../migrations/009_chunk_labels.sql")),
+    (10, include_str!("../../../migrations/010_document_cards.sql")),
+    (11, include_str!("../../../migrations/011_entities_connections.sql")),
+    (12, include_str!("../../../migrations/012_chunk_regions.sql")),
+    (13, include_str!("../../../migrations/013_documents_fts.sql")),
+    (14, include_str!("../../../migrations/014_background_model_default.sql")),
+    (15, include_str!("../../../migrations/015_drop_map_tables.sql")),
+    (16, include_str!("../../../migrations/016_drop_schema_migrations.sql")),
+];
 
 /// Bump when embedding text format or retrieval index layout changes.
 pub const INDEX_FORMAT_VERSION: i32 = 5;
 
 pub fn open_sqlite(path: &Path) -> CognitoResult<Connection> {
-    let conn = Connection::open(path).map_err(|e| CognitoError::Database(e.to_string()))?;
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    let conn = Connection::open(path)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
     migrate(&conn)?;
     Ok(conn)
 }
 
 fn migrate(conn: &Connection) -> CognitoResult<()> {
-    let mut v: i32 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
-    if v < 1 {
-        conn.execute_batch(MIGRATION_001)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 1", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (1, datetime('now'))",
-            [],
-        );
-        v = 1;
-    }
-    if v < 2 {
-        conn.execute_batch(MIGRATION_002)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 2", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (2, datetime('now'))",
-            [],
-        );
-        v = 2;
-    }
-    if v < 3 {
-        conn.execute_batch(MIGRATION_003)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 3", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (3, datetime('now'))",
-            [],
-        );
-        v = 3;
-    }
-    if v < 4 {
-        conn.execute_batch(MIGRATION_004)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 4", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (4, datetime('now'))",
-            [],
-        );
-        v = 4;
-    }
-    if v < 5 {
-        conn.execute_batch(MIGRATION_005)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 5", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (5, datetime('now'))",
-            [],
-        );
-        v = 5;
-    }
-    if v < 6 {
-        conn.execute_batch(MIGRATION_006)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 6", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (6, datetime('now'))",
-            [],
-        );
-        v = 6;
-    }
-    if v < 7 {
-        conn.execute_batch(MIGRATION_007)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 7", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (7, datetime('now'))",
-            [],
-        );
-        v = 7;
-    }
-    if v < 8 {
-        conn.execute_batch(MIGRATION_008)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 8", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (8, datetime('now'))",
-            [],
-        );
-        v = 8;
-    }
-    if v < 9 {
-        conn.execute_batch(MIGRATION_009)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 9", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (9, datetime('now'))",
-            [],
-        );
-        v = 9;
-    }
-    if v < 10 {
-        conn.execute_batch(MIGRATION_010)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 10", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (10, datetime('now'))",
-            [],
-        );
-        v = 10;
-    }
-    if v < 11 {
-        conn.execute_batch(MIGRATION_011)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 11", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (11, datetime('now'))",
-            [],
-        );
-        v = 11;
-    }
-    if v < 12 {
-        conn.execute_batch(MIGRATION_012)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 12", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (12, datetime('now'))",
-            [],
-        );
-        v = 12;
-    }
-    if v < 13 {
-        conn.execute_batch(MIGRATION_013)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 13", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (13, datetime('now'))",
-            [],
-        );
-        v = 13;
-    }
-    if v < 14 {
-        conn.execute_batch(MIGRATION_014)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 14", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (14, datetime('now'))",
-            [],
-        );
-        v = 14;
-    }
-    if v < 15 {
-        conn.execute_batch(MIGRATION_015)
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        conn.execute("PRAGMA user_version = 15", [])
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
-        let _ = conn.execute(
-            "INSERT INTO schema_migrations(version, applied_at) VALUES (15, datetime('now'))",
-            [],
-        );
+    let mut current: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    for &(version, sql) in MIGRATIONS {
+        if current >= version {
+            continue;
+        }
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(sql)?;
+        tx.execute(&format!("PRAGMA user_version = {version}"), [])?;
+        tx.commit()?;
+        current = version;
     }
     Ok(())
 }
@@ -210,8 +56,7 @@ pub fn upsert_setting(conn: &Connection, key: &str, value: &str) -> CognitoResul
         "INSERT INTO settings(key, value, updated_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
         params![key, value, now],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -222,20 +67,17 @@ pub fn get_setting(conn: &Connection, key: &str) -> CognitoResult<Option<String>
             [key],
             |r| r.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row)
 }
 
 pub fn clear_setting(conn: &Connection, key: &str) -> CognitoResult<()> {
-    conn.execute("DELETE FROM settings WHERE key = ?1", [key])
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
     Ok(())
 }
 
 pub fn delete_all_documents(conn: &Connection) -> CognitoResult<()> {
-    conn.execute("DELETE FROM documents", [])
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    conn.execute("DELETE FROM documents", [])?;
     Ok(())
 }
 
@@ -295,8 +137,7 @@ pub fn count_active_documents(conn: &Connection) -> CognitoResult<i64> {
             "SELECT COUNT(*) FROM documents WHERE status != 'removed'",
             [],
             |r| r.get(0),
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     Ok(n)
 }
 
@@ -311,8 +152,7 @@ pub fn list_documents(conn: &Connection) -> CognitoResult<Vec<DocumentRow>> {
              LEFT JOIN document_cards c ON c.document_id = d.id
              WHERE d.status != 'removed'
              ORDER BY d.imported_at DESC",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let rows = stmt
         .query_map([], |r| {
             let people_raw: Option<String> = r.get(16)?;
@@ -344,11 +184,10 @@ pub fn list_documents(conn: &Connection) -> CognitoResult<Vec<DocumentRow>> {
                     .unwrap_or_default(),
                 scan_status: r.get(18)?,
             })
-        })
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        })?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| CognitoError::Database(e.to_string()))?);
+        out.push(row?);
     }
     Ok(out)
 }
@@ -360,8 +199,7 @@ pub fn document_id_by_path(conn: &Connection, path: &str) -> CognitoResult<Optio
             [path],
             |r| r.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row)
 }
 
@@ -372,8 +210,7 @@ pub fn content_hash_by_path(conn: &Connection, path: &str) -> CognitoResult<Opti
             [path],
             |r| r.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row)
 }
 
@@ -399,16 +236,14 @@ pub fn record_failed_document(
            entities_error = NULL,
            modified_at = excluded.modified_at",
         params![id, path, title, file_type, clip, now],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
 pub fn document_id_including_removed(conn: &Connection, path: &str) -> CognitoResult<Option<String>> {
     let row = conn
         .query_row("SELECT id FROM documents WHERE path = ?1", [path], |r| r.get::<_, String>(0))
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row)
 }
 
@@ -420,15 +255,13 @@ pub fn mark_document_removed(conn: &Connection, path: &str) -> CognitoResult<Opt
     conn.execute(
         "DELETE FROM chunks WHERE document_id = ?1",
         [&id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     delete_document_card(conn, &id)?;
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "UPDATE documents SET status = 'removed', modified_at = ?1, error_message = NULL WHERE id = ?2",
         params![now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(Some(id))
 }
 
@@ -436,14 +269,12 @@ pub fn document_preview_text(conn: &Connection, doc_id: &str) -> CognitoResult<O
     let mut stmt = conn
         .prepare(
             "SELECT text FROM chunks WHERE document_id = ?1 ORDER BY ordinal ASC LIMIT 3",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let mut parts = Vec::new();
     let rows = stmt
-        .query_map(params![doc_id], |r| r.get::<_, String>(0))
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .query_map(params![doc_id], |r| r.get::<_, String>(0))?;
     for r in rows {
-        parts.push(r.map_err(|e| CognitoError::Database(e.to_string()))?);
+        parts.push(r?);
     }
     if parts.is_empty() {
         return Ok(None);
@@ -478,8 +309,7 @@ pub fn chunk_window(
             params![chunk_id, document_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     let Some((ordinal, cited, page_start, page_end, regions)) = row else {
         return Ok(None);
     };
@@ -489,16 +319,14 @@ pub fn chunk_window(
             params![document_id, ordinal - 1],
             |r| r.get(0),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     let next: Option<String> = conn
         .query_row(
             "SELECT text FROM chunks WHERE document_id = ?1 AND ordinal = ?2",
             params![document_id, ordinal + 1],
             |r| r.get(0),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     let mut parts = Vec::new();
     if let Some(p) = prev {
         parts.push(p);
@@ -523,8 +351,7 @@ pub fn document_path_by_id(conn: &Connection, id: &str) -> CognitoResult<Option<
             [id],
             |r| r.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row)
 }
 
@@ -538,8 +365,7 @@ pub fn document_path_and_hash_by_id(
             [id],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row)
 }
 
@@ -550,21 +376,18 @@ pub fn document_scan_status(conn: &Connection, id: &str) -> CognitoResult<Option
             [id],
             |r| r.get::<_, Option<String>>(0),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row.flatten())
 }
 
 pub fn failed_document_paths(conn: &Connection, limit: i64) -> CognitoResult<Vec<String>> {
     let mut stmt = conn
-        .prepare("SELECT path FROM documents WHERE status = 'failed' ORDER BY imported_at LIMIT ?1")
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .prepare("SELECT path FROM documents WHERE status = 'failed' ORDER BY imported_at LIMIT ?1")?;
     let rows = stmt
-        .query_map(params![limit], |r| r.get(0))
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .query_map(params![limit], |r| r.get(0))?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| CognitoError::Database(e.to_string()))?);
+        out.push(row?);
     }
     Ok(out)
 }
@@ -575,8 +398,7 @@ pub fn insert_import_job(conn: &Connection, id: &str, total: i64) -> CognitoResu
         "INSERT INTO import_jobs (id, status, total_files, completed_files, failed_files, started_at)
          VALUES (?1, 'running', ?2, 0, 0, ?3)",
         params![id, total, now],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -589,8 +411,7 @@ pub fn update_import_job_counts(
     conn.execute(
         "UPDATE import_jobs SET completed_files = ?1, failed_files = ?2 WHERE id = ?3",
         params![completed, failed, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -604,21 +425,18 @@ pub fn finish_import_job(
     conn.execute(
         "UPDATE import_jobs SET status = ?1, finished_at = ?2, error_message = ?3 WHERE id = ?4",
         params![status, now, err, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
 pub fn list_chunk_ids_for_document(conn: &Connection, doc_id: &str) -> CognitoResult<Vec<String>> {
     let mut stmt = conn
-        .prepare("SELECT id FROM chunks WHERE document_id = ?1 ORDER BY ordinal ASC")
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .prepare("SELECT id FROM chunks WHERE document_id = ?1 ORDER BY ordinal ASC")?;
     let rows = stmt
-        .query_map(params![doc_id], |r| r.get(0))
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .query_map(params![doc_id], |r| r.get(0))?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| CognitoError::Database(e.to_string()))?);
+        out.push(row?);
     }
     Ok(out)
 }
@@ -632,8 +450,7 @@ pub fn next_pending_entities_document(conn: &Connection) -> CognitoResult<Option
             [],
             |r| r.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row)
 }
 
@@ -642,8 +459,7 @@ pub fn mark_document_entities_running(conn: &Connection, id: &str) -> CognitoRes
     conn.execute(
         "UPDATE documents SET entities_status = 'running', entities_error = NULL, modified_at = ?1 WHERE id = ?2",
         params![now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -652,8 +468,7 @@ pub fn reset_running_entities_jobs(conn: &Connection) -> CognitoResult<()> {
     conn.execute(
         "UPDATE documents SET entities_status = 'pending', modified_at = ?1 WHERE entities_status = 'running'",
         params![now],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -664,8 +479,7 @@ pub fn document_entities_still_running(conn: &Connection, id: &str) -> CognitoRe
             [id],
             |_| Ok(()),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row.is_some())
 }
 
@@ -676,8 +490,7 @@ pub fn requeue_failed_entities(conn: &Connection) -> CognitoResult<usize> {
             "UPDATE documents SET entities_status = 'pending', entities_error = NULL, modified_at = ?1
              WHERE status = 'indexed' AND entities_status = 'failed'",
             params![now],
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     Ok(n)
 }
 
@@ -688,8 +501,7 @@ pub fn requeue_all_entities(conn: &Connection) -> CognitoResult<usize> {
             "UPDATE documents SET entities_status = 'pending', entities_error = NULL, modified_at = ?1
              WHERE status = 'indexed'",
             params![now],
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     Ok(n)
 }
 
@@ -698,8 +510,7 @@ pub fn mark_document_entities_pending(conn: &Connection, id: &str) -> CognitoRes
     conn.execute(
         "UPDATE documents SET entities_status = 'pending', entities_error = NULL, modified_at = ?1 WHERE id = ?2",
         params![now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -712,8 +523,7 @@ pub fn mark_document_entities_ok(
     conn.execute(
         "UPDATE documents SET entities_status = 'ok', entities_error = ?1, modified_at = ?2 WHERE id = ?3",
         params![note, now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -722,19 +532,16 @@ pub fn mark_document_entities_failed(conn: &Connection, id: &str, msg: &str) -> 
     conn.execute(
         "UPDATE documents SET entities_status = 'failed', entities_error = ?1, modified_at = ?2 WHERE id = ?3",
         params![msg, now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
 pub fn clear_document_entity_rows(conn: &Connection, document_id: &str) -> CognitoResult<()> {
-    conn.execute("DELETE FROM mentions WHERE document_id = ?1", [document_id])
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    conn.execute("DELETE FROM mentions WHERE document_id = ?1", [document_id])?;
     conn.execute(
         "DELETE FROM document_links WHERE source_id = ?1 OR target_id = ?1",
         [document_id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -743,8 +550,7 @@ pub fn list_entities_index(conn: &Connection) -> CognitoResult<Vec<Value>> {
         .prepare(
             "SELECT id, name, normalized, label, mention_count, doc_count
              FROM entities ORDER BY mention_count DESC, name ASC LIMIT 500",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let rows = stmt
         .query_map([], |r| {
             Ok(serde_json::json!({
@@ -755,11 +561,10 @@ pub fn list_entities_index(conn: &Connection) -> CognitoResult<Vec<Value>> {
                 "mentionCount": r.get::<_, i64>(4)?,
                 "docCount": r.get::<_, i64>(5)?,
             }))
-        })
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        })?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| CognitoError::Database(e.to_string()))?);
+        out.push(row?);
     }
     Ok(out)
 }
@@ -780,20 +585,16 @@ pub fn entity_detail(conn: &Connection, entity_id: &str) -> CognitoResult<Option
                 ))
             },
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     let Some((id, name, normalized, label, mention_count, doc_count)) = base else {
         return Ok(None);
     };
 
     let mut alias_stmt = conn
-        .prepare("SELECT alias FROM entity_aliases WHERE entity_id = ?1 ORDER BY alias")
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .prepare("SELECT alias FROM entity_aliases WHERE entity_id = ?1 ORDER BY alias")?;
     let aliases: Vec<String> = alias_stmt
-        .query_map([entity_id], |r| r.get(0))
-        .map_err(|e| CognitoError::Database(e.to_string()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .query_map([entity_id], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut doc_stmt = conn
         .prepare(
@@ -802,15 +603,12 @@ pub fn entity_detail(conn: &Connection, entity_id: &str) -> CognitoResult<Option
              JOIN documents d ON d.id = m.document_id
              WHERE m.entity_id = ?1
              ORDER BY d.title COLLATE NOCASE, d.id",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let doc_rows: Vec<(String, String, String)> = doc_stmt
         .query_map([entity_id], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })
-        .map_err(|e| CognitoError::Database(e.to_string()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut passage_stmt = conn
         .prepare(
@@ -820,8 +618,7 @@ pub fn entity_detail(conn: &Connection, entity_id: &str) -> CognitoResult<Option
              WHERE m.entity_id = ?1 AND m.document_id = ?2
              ORDER BY c.ordinal, m.start
              LIMIT 40",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
 
     let mut documents = Vec::new();
     for (document_id, title, path) in doc_rows {
@@ -839,10 +636,8 @@ pub fn entity_detail(conn: &Connection, entity_id: &str) -> CognitoResult<Option
                     "pageStart": page_start,
                     "pageEnd": page_end,
                 }))
-            })
-            .map_err(|e| CognitoError::Database(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| CognitoError::Database(e.to_string()))?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         documents.push(serde_json::json!({
             "documentId": document_id,
             "title": title,
@@ -862,8 +657,7 @@ pub fn entity_detail(conn: &Connection, entity_id: &str) -> CognitoResult<Option
              GROUP BY e.id
              ORDER BY cnt DESC, e.name COLLATE NOCASE ASC
              LIMIT 12",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let co_mentions: Vec<Value> = co_stmt
         .query_map([entity_id], |r| {
             Ok(serde_json::json!({
@@ -872,10 +666,8 @@ pub fn entity_detail(conn: &Connection, entity_id: &str) -> CognitoResult<Option
                 "label": r.get::<_, String>(2)?,
                 "count": r.get::<_, i64>(3)?,
             }))
-        })
-        .map_err(|e| CognitoError::Database(e.to_string()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Some(serde_json::json!({
         "id": id,
@@ -953,8 +745,7 @@ pub fn list_related_documents(conn: &Connection, document_id: &str) -> CognitoRe
                AND lower(e.label) != 'date'
                AND d.status = 'indexed'
              GROUP BY d.id, e.id",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let share_rows = share_stmt
         .query_map([document_id], |r| {
             Ok((
@@ -964,11 +755,10 @@ pub fn list_related_documents(conn: &Connection, document_id: &str) -> CognitoRe
                 r.get::<_, String>(3)?,
                 r.get::<_, i64>(4)?,
             ))
-        })
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        })?;
     for row in share_rows {
         let (oid, title, name, label, doc_count) =
-            row.map_err(|e| CognitoError::Database(e.to_string()))?;
+            row?;
         let rarity = if doc_count > 0 {
             1.0 / (doc_count as f64)
         } else {
@@ -988,15 +778,13 @@ pub fn list_related_documents(conn: &Connection, document_id: &str) -> CognitoRe
              FROM document_links l
              JOIN documents d ON d.id = l.source_id
              WHERE l.kind = 'mentions' AND l.target_id = ?1 AND d.status = 'indexed'",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let mention_rows = mention_stmt
         .query_map([document_id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        })?;
     for row in mention_rows {
-        let (oid, title) = row.map_err(|e| CognitoError::Database(e.to_string()))?;
+        let (oid, title) = row?;
         let entry = by_id.entry(oid).or_default();
         if entry.title.is_empty() {
             entry.title = title;
@@ -1016,15 +804,13 @@ pub fn list_related_documents(conn: &Connection, document_id: &str) -> CognitoRe
              WHERE l.kind = 'similar'
                AND (l.source_id = ?1 OR l.target_id = ?1)
                AND d.status = 'indexed'",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let similar_rows = similar_stmt
         .query_map([document_id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        })?;
     for row in similar_rows {
-        let (oid, title) = row.map_err(|e| CognitoError::Database(e.to_string()))?;
+        let (oid, title) = row?;
         if oid == document_id {
             continue;
         }
@@ -1092,8 +878,7 @@ pub fn connections_timeline(conn: &Connection) -> CognitoResult<Value> {
              WHERE c.date IS NOT NULL AND TRIM(c.date) != ''
              ORDER BY c.date ASC, c.title COLLATE NOCASE ASC
              LIMIT 500",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let card_rows = card_stmt
         .query_map([], |r| {
             Ok((
@@ -1101,11 +886,10 @@ pub fn connections_timeline(conn: &Connection) -> CognitoResult<Value> {
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
             ))
-        })
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        })?;
     for row in card_rows {
         let (document_id, title, date) =
-            row.map_err(|e| CognitoError::Database(e.to_string()))?;
+            row?;
         items.push(serde_json::json!({
             "kind": "document",
             "id": document_id,
@@ -1123,8 +907,7 @@ pub fn connections_timeline(conn: &Connection) -> CognitoResult<Value> {
                AND normalized IS NOT NULL AND TRIM(normalized) != ''
              ORDER BY normalized ASC, name COLLATE NOCASE ASC
              LIMIT 500",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let date_rows = date_stmt
         .query_map([], |r| {
             Ok((
@@ -1132,11 +915,10 @@ pub fn connections_timeline(conn: &Connection) -> CognitoResult<Value> {
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
             ))
-        })
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        })?;
     for row in date_rows {
         let (entity_id, name, date) =
-            row.map_err(|e| CognitoError::Database(e.to_string()))?;
+            row?;
         items.push(serde_json::json!({
             "kind": "entity",
             "id": entity_id,
@@ -1151,8 +933,7 @@ pub fn connections_timeline(conn: &Connection) -> CognitoResult<Value> {
 
 pub fn entity_names(conn: &Connection, a: &str, b: &str) -> CognitoResult<(String, String)> {
     let name_of = |id: &str| -> CognitoResult<String> {
-        conn.query_row("SELECT name FROM entities WHERE id = ?1", [id], |r| r.get(0))
-            .map_err(|e| CognitoError::Database(e.to_string()))
+        Ok(conn.query_row("SELECT name FROM entities WHERE id = ?1", [id], |r| r.get(0))?)
     };
     Ok((name_of(a)?, name_of(b)?))
 }
@@ -1166,14 +947,12 @@ pub fn pending_entities_or_cards_remain(conn: &Connection) -> CognitoResult<bool
              )",
             [],
             |r| r.get(0),
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     Ok(n > 0)
 }
 
 pub fn delete_document_by_id(conn: &Connection, id: &str) -> CognitoResult<()> {
-    conn.execute("DELETE FROM documents WHERE id = ?1", [id])
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    conn.execute("DELETE FROM documents WHERE id = ?1", [id])?;
     Ok(())
 }
 
@@ -1205,8 +984,7 @@ pub fn insert_document_row(
             now,
             scan_status
         ],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -1247,8 +1025,7 @@ pub fn insert_chunk_row(
             labels,
             regions
         ],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -1259,8 +1036,7 @@ pub fn mark_document_indexed(conn: &Connection, id: &str) -> CognitoResult<()> {
          entities_status = 'pending', entities_error = NULL,
          card_status = 'pending', card_error = NULL WHERE id = ?2",
         params![now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     rebuild_document_profile(conn, id)?;
     Ok(())
 }
@@ -1272,14 +1048,12 @@ fn page1_head_text(conn: &Connection, document_id: &str) -> CognitoResult<String
              WHERE document_id = ?1
                AND (page_start IS NULL OR page_start <= 1)
              ORDER BY ordinal",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let mut out = String::new();
     let rows = stmt
-        .query_map([document_id], |r| r.get::<_, String>(0))
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .query_map([document_id], |r| r.get::<_, String>(0))?;
     for row in rows {
-        let t = row.map_err(|e| CognitoError::Database(e.to_string()))?;
+        let t = row?;
         if !out.is_empty() {
             out.push('\n');
         }
@@ -1325,8 +1099,7 @@ pub fn rebuild_document_profile(conn: &Connection, document_id: &str) -> Cognito
             [document_id],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     let Some((title, path)) = row else {
         return Ok(());
     };
@@ -1342,8 +1115,7 @@ pub fn rebuild_document_profile(conn: &Connection, document_id: &str) -> Cognito
                 ))
             },
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?
+        .optional()?
         .unwrap_or_else(|| ("[]".into(), "[]".into(), "[]".into()));
 
     let stem = Path::new(&path)
@@ -1377,8 +1149,7 @@ pub fn rebuild_document_profile(conn: &Connection, document_id: &str) -> Cognito
         "INSERT INTO documents_profile(document_id, profile) VALUES (?1, ?2)
          ON CONFLICT(document_id) DO UPDATE SET profile = excluded.profile",
         params![document_id, profile],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -1431,8 +1202,7 @@ pub fn upsert_document_card(
             model,
             now
         ],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     rebuild_document_profile(conn, document_id)?;
     Ok(())
 }
@@ -1472,8 +1242,7 @@ pub fn get_document_card(
                 })
             },
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row)
 }
 
@@ -1481,8 +1250,7 @@ pub fn delete_document_card(conn: &Connection, document_id: &str) -> CognitoResu
     conn.execute(
         "DELETE FROM document_cards WHERE document_id = ?1",
         [document_id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -1496,8 +1264,7 @@ pub fn next_pending_card_document(conn: &Connection) -> CognitoResult<Option<Str
             [],
             |r| r.get::<_, String>(0),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row)
 }
 
@@ -1506,8 +1273,7 @@ pub fn mark_document_card_pending(conn: &Connection, id: &str) -> CognitoResult<
     conn.execute(
         "UPDATE documents SET card_status = 'pending', card_error = NULL, modified_at = ?1 WHERE id = ?2",
         params![now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -1516,8 +1282,7 @@ pub fn mark_document_card_running(conn: &Connection, id: &str) -> CognitoResult<
     conn.execute(
         "UPDATE documents SET card_status = 'running', card_error = NULL, modified_at = ?1 WHERE id = ?2",
         params![now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -1526,8 +1291,7 @@ pub fn mark_document_card_ok(conn: &Connection, id: &str) -> CognitoResult<()> {
     conn.execute(
         "UPDATE documents SET card_status = 'ok', card_error = NULL, modified_at = ?1 WHERE id = ?2",
         params![now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -1536,8 +1300,7 @@ pub fn mark_document_card_failed(conn: &Connection, id: &str, msg: &str) -> Cogn
     conn.execute(
         "UPDATE documents SET card_status = 'failed', card_error = ?1, modified_at = ?2 WHERE id = ?3",
         params![msg, now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -1546,8 +1309,7 @@ pub fn reset_running_card_jobs(conn: &Connection) -> CognitoResult<()> {
     conn.execute(
         "UPDATE documents SET card_status = 'pending', modified_at = ?1 WHERE card_status = 'running'",
         params![now],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -1558,8 +1320,7 @@ pub fn document_card_still_running(conn: &Connection, id: &str) -> CognitoResult
             [id],
             |_| Ok(()),
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row.is_some())
 }
 
@@ -1568,8 +1329,7 @@ pub fn update_document_title(conn: &Connection, id: &str, title: &str) -> Cognit
     conn.execute(
         "UPDATE documents SET title = ?1, modified_at = ?2 WHERE id = ?3",
         params![title, now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -1589,21 +1349,18 @@ pub fn document_meta_for_card(
                 ))
             },
         )
-        .optional()
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .optional()?;
     Ok(row)
 }
 
 pub fn list_chunk_texts_ordered(conn: &Connection, doc_id: &str) -> CognitoResult<Vec<String>> {
     let mut stmt = conn
-        .prepare("SELECT text FROM chunks WHERE document_id = ?1 ORDER BY ordinal ASC")
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .prepare("SELECT text FROM chunks WHERE document_id = ?1 ORDER BY ordinal ASC")?;
     let rows = stmt
-        .query_map(params![doc_id], |r| r.get(0))
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        .query_map(params![doc_id], |r| r.get(0))?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| CognitoError::Database(e.to_string()))?);
+        out.push(row?);
     }
     Ok(out)
 }
@@ -1616,8 +1373,7 @@ pub fn get_suggested_questions(conn: &Connection) -> CognitoResult<Vec<Suggested
              INNER JOIN documents d ON d.id = c.document_id
              WHERE d.status = 'indexed' AND d.card_status = 'ok'
              ORDER BY d.indexed_at DESC",
-        )
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        )?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
@@ -1628,8 +1384,7 @@ pub fn get_suggested_questions(conn: &Connection) -> CognitoResult<Vec<Suggested
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
             ))
-        })
-        .map_err(|e| CognitoError::Database(e.to_string()))?;
+        })?;
 
     let mut from_cards = Vec::new();
     // entity_key (lower) -> (display name, docs: (doc_id, file_name) in recent-first order)
@@ -1638,7 +1393,7 @@ pub fn get_suggested_questions(conn: &Connection) -> CognitoResult<Vec<Suggested
 
     for row in rows {
         let (doc_id, questions_raw, title, people_raw, orgs_raw, path) =
-            row.map_err(|e| CognitoError::Database(e.to_string()))?;
+            row?;
         for q in parse_json_string_array(&questions_raw) {
             if q.trim().is_empty() {
                 continue;
@@ -1709,8 +1464,7 @@ pub fn mark_document_failed(conn: &Connection, id: &str, msg: &str) -> CognitoRe
     conn.execute(
         "UPDATE documents SET status = 'failed', error_message = ?1, modified_at = ?2, entities_status = 'none', entities_error = NULL WHERE id = ?3",
         params![msg, now, id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
+    )?;
     Ok(())
 }
 
@@ -1728,7 +1482,7 @@ mod tests {
             let v: i32 = c
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .expect("uv");
-            assert_eq!(v, 15);
+            assert_eq!(v, 16);
             assert_eq!(INDEX_FORMAT_VERSION, 5);
             let has_topics: i32 = c
                 .query_row(
@@ -1746,6 +1500,14 @@ mod tests {
                 )
                 .expect("document_points");
             assert_eq!(has_points, 0);
+            let has_schema_migrations: i32 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("schema_migrations");
+            assert_eq!(has_schema_migrations, 0);
             let has_profile: i32 = c
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='documents_profile'",

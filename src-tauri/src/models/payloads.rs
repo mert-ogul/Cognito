@@ -278,6 +278,24 @@ pub struct ChatFinalResult {
     pub trace: Option<serde_json::Value>,
 }
 
+impl ChatFinalResult {
+    pub fn failure(message_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            message_id: message_id.into(),
+            citations: Vec::new(),
+            retrieval_mode: "error".into(),
+            error: Some(error.into()),
+            not_found: false,
+            sentences: Vec::new(),
+            scope_title: None,
+            scope_ids: Vec::new(),
+            timings: None,
+            suggestions: Vec::new(),
+            trace: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPresence {

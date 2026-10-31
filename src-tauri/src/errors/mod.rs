@@ -16,4 +16,10 @@ pub enum CognitoError {
     InterruptedByChat,
 }
 
+impl From<rusqlite::Error> for CognitoError {
+    fn from(value: rusqlite::Error) -> Self {
+        CognitoError::Database(value.to_string())
+    }
+}
+
 pub type CognitoResult<T> = Result<T, CognitoError>;

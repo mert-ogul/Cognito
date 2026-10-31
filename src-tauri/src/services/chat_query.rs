@@ -9,14 +9,11 @@ use crate::models::{
     ScopeSuggestion,
 };
 use crate::services::ollama_stream;
+use crate::vault;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
-
-fn sp(path: &std::path::Path) -> String {
-    path.to_string_lossy().into_owned()
-}
 
 const SYSTEM_PROMPT: &str = "Answer only from the numbered passages. First copy up to four short, exact sentences you rely on. Then answer the question in plain, natural sentences built only from those quotes, and list the quotes each sentence uses. Write formulas in LaTeX between $ or $$. If the passages don't answer the question, set answerable to false and leave both lists empty.";
 
@@ -79,7 +76,8 @@ pub struct GroundedDraft {
 }
 
 /// Stages emitted before `CHAT_FINAL` for a given early exit.
-pub fn chat_stage_sequence(early_not_found: bool) -> Vec<&'static str> {
+#[cfg(test)]
+fn chat_stage_sequence(early_not_found: bool) -> Vec<&'static str> {
     if early_not_found {
         vec!["passages", "ranking"]
     } else {
@@ -227,7 +225,7 @@ pub async fn run_chat_query(
     scope_ids: Vec<String>,
 ) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
-    let app_data = sp(&state.data_dir);
+    let app_data = vault::path_string(&state.data_dir);
     let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
     let hist_for_retrieval = reduce_history(&history, 2);
 
@@ -235,7 +233,7 @@ pub async fn run_chat_query(
         &state,
         "prepare_chat_retrieval",
         json!({
-            "sqlite_path": sp(&sqlite_path),
+            "sqlite_path": vault::path_string(&sqlite_path),
             "query": query,
             "embed_model": settings.embed_model,
             "history": hist_for_retrieval,
@@ -250,19 +248,7 @@ pub async fn run_chat_query(
         Err(e) => {
             emit_final(
                 &app,
-                &ChatFinalResult {
-                    message_id: message_id.clone(),
-                    citations: vec![],
-                    retrieval_mode: "error".into(),
-                    error: Some(e.to_string()),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title: None,
-                    scope_ids: vec![],
-                    timings: None,
-                    suggestions: vec![],
-                    trace: None,
-                },
+                &ChatFinalResult::failure(message_id.clone(), e.to_string()),
             );
             return Ok(());
         }
@@ -369,7 +355,7 @@ pub async fn run_chat_query(
                 "app_data": app_data,
                 "query": search_text,
                 "candidates": candidates,
-                "sqlite_path": sp(&sqlite_path),
+                "sqlite_path": vault::path_string(&sqlite_path),
                 "embed_model": settings.embed_model,
                 "profile_matches": profile_matches,
                 "explicit_scope": explicit_scope,
@@ -386,22 +372,15 @@ pub async fn run_chat_query(
             Err(e) => {
                 emit_final(
                     &app,
-                    &ChatFinalResult {
-                        message_id: message_id.clone(),
-                        citations: vec![],
-                        retrieval_mode: "error".into(),
-                        error: Some(e.to_string()),
-                        not_found: false,
-                        sentences: vec![],
-                        scope_title: None,
-                        scope_ids: result_scope_ids,
-                        timings: Some(ChatTimings {
-                            retrieval_ms,
-                            ..ChatTimings::default()
-                        }),
-                        suggestions: vec![],
-                        trace: None,
-                    },
+                    &{
+                    let mut r = ChatFinalResult::failure(message_id.clone(), e.to_string());
+                    r.scope_ids = result_scope_ids;
+                    r.timings = Some(ChatTimings {
+                        retrieval_ms,
+                        ..ChatTimings::default()
+                    });
+                    r
+                },
                 );
                 return Ok(());
             }
@@ -500,7 +479,7 @@ pub async fn run_related_query(
     message_id: String,
 ) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
-    let app_data = sp(&state.data_dir);
+    let app_data = vault::path_string(&state.data_dir);
     let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
     let (name_a, name_b) = state.with_sqlite(|c| sqlite::entity_names(c, &entity_id_a, &entity_id_b))?;
     let query = format!("How are {name_a} and {name_b} related?");
@@ -509,7 +488,7 @@ pub async fn run_related_query(
         &state,
         "prepare_related_retrieval",
         json!({
-            "sqlite_path": sp(&sqlite_path),
+            "sqlite_path": vault::path_string(&sqlite_path),
             "entity_id_a": entity_id_a,
             "entity_id_b": entity_id_b,
             "embed_model": settings.embed_model,
@@ -522,19 +501,7 @@ pub async fn run_related_query(
         Err(e) => {
             emit_final(
                 &app,
-                &ChatFinalResult {
-                    message_id: message_id.clone(),
-                    citations: vec![],
-                    retrieval_mode: "error".into(),
-                    error: Some(e.to_string()),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title: None,
-                    scope_ids: vec![],
-                    timings: None,
-                    suggestions: vec![],
-                    trace: None,
-                },
+                &ChatFinalResult::failure(message_id.clone(), e.to_string()),
             );
             return Ok(());
         }
@@ -663,18 +630,13 @@ async fn finish_grounded_answer(
         Err(e) => {
             emit_final(
                 &app,
-                &ChatFinalResult {
-                    message_id,
-                    citations,
-                    retrieval_mode: "error".into(),
-                    error: Some(e),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title,
-                    scope_ids: result_scope_ids,
-                    timings: Some(timings),
-                    suggestions: vec![],
-                    trace: None,
+                &{
+                    let mut r = ChatFinalResult::failure(message_id, e);
+                    r.citations = citations;
+                    r.scope_title = scope_title;
+                    r.scope_ids = result_scope_ids;
+                    r.timings = Some(timings);
+                    r
                 },
             );
             return Ok(());
@@ -687,18 +649,13 @@ async fn finish_grounded_answer(
         Err(e) => {
             emit_final(
                 &app,
-                &ChatFinalResult {
-                    message_id,
-                    citations,
-                    retrieval_mode: "error".into(),
-                    error: Some(e),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title,
-                    scope_ids: result_scope_ids,
-                    timings: Some(timings),
-                    suggestions: vec![],
-                    trace: None,
+                &{
+                    let mut r = ChatFinalResult::failure(message_id, e);
+                    r.citations = citations;
+                    r.scope_title = scope_title;
+                    r.scope_ids = result_scope_ids;
+                    r.timings = Some(timings);
+                    r
                 },
             );
             return Ok(());
@@ -751,18 +708,13 @@ async fn finish_grounded_answer(
         Err(e) => {
             emit_final(
                 &app,
-                &ChatFinalResult {
-                    message_id,
-                    citations,
-                    retrieval_mode: "error".into(),
-                    error: Some(e.to_string()),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title,
-                    scope_ids: result_scope_ids,
-                    timings: Some(timings),
-                    suggestions: vec![],
-                    trace: None,
+                &{
+                    let mut r = ChatFinalResult::failure(message_id, e.to_string());
+                    r.citations = citations;
+                    r.scope_title = scope_title;
+                    r.scope_ids = result_scope_ids;
+                    r.timings = Some(timings);
+                    r
                 },
             );
             return Ok(());

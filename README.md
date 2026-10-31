@@ -11,10 +11,10 @@ Cognito is a desktop app for asking questions about a folder of PDF, Word and Ma
 - Stores page regions for PDF chunks and shows cropped page images under answer sources and card facts
 - Opens the Passage pane on the full page with the cited region outlined
 - Summarises each indexed document in the background into a checked document card (type, people, summary, facts)
-- Optionally finds names, places and dates so documents can be linked (connections in SQLite)
+- Optionally finds names, places and dates so documents can be linked
 - Builds embeddings in SQLite
 - Answers with numbered citations tied to retrieved passages
-- Shows a Connections pane (Index, Map, Timeline) for names and linked documents
+- Shows a Connections pane (Index and Timeline) for names and linked documents
 - Lets you switch folders, rebuild the index, or remove the library without deleting your files
 
 ## Requirements
@@ -26,11 +26,10 @@ Cognito is a desktop app for asking questions about a folder of PDF, Word and Ma
 
 ## Setup
 
-Pull the default models (or set others in Settings):
+Pull the chat and embedding models (or set others in Settings):
 
 ```bash
 ollama pull qwen3.5:9b
-ollama pull qwen3.5:4b
 ollama pull qwen3-embedding:0.6b
 ```
 
@@ -42,11 +41,27 @@ cd sidecar && uv sync && cd ..
 npm run tauri dev
 ```
 
+On macOS, also install the OCR extra so scanned PDFs can be read:
+
+```bash
+cd sidecar && uv sync --extra ocr && cd ..
+```
+
 Ollama should be reachable on the host the app uses (usually `127.0.0.1:11434`). Packaged builds ship a standalone CPython under `resources/sidecar/python`; development uses `sidecar/.venv`. Override with `COGNITO_PYTHON` or `COGNITO_SIDECAR_ROOT` if needed.
+
+First launch downloads about 2.1 GB of checking and names models. You pick which Ollama models to use from Settings.
 
 ## Using it
 
-Choose a folder from Library or Settings. Cognito indexes PDF, Word and Markdown files there, then summarises them in the background with the background model into document cards. Scanned PDFs on macOS are OCR’d and labelled in the library. With “Find names, places and dates” on (default), it also extracts names for connections. The Library is a scannable list (type, date, people); open a row for the full card and scroll its Pages section. Ask questions in the chat column once the sidecar and answer model are ready. Suggested questions appear when the chat is empty. Sources under answers show the page crop when regions exist; opening one shows the full page in the Passage pane. Settings cover switching the folder, rebuilding the index, removing the library, answer / background / embedding models, summarise and find-names toggles, and Rebuild connections. Sidecar logs live under the app data `logs` folder (on macOS: `~/Library/Application Support/com.mertogul.cognito/logs`). Use Open logs folder in Settings.
+Choose a folder from Library or Settings. Cognito indexes PDF, Word and Markdown files there (up to 100 on first import). Scanned PDFs on macOS are OCR’d and labelled in the library.
+
+Ask questions in the chat column once the answer model is ready. Suggested questions appear when the chat is empty.
+
+Sources under answers show the page crop when regions exist. Opening one shows the full page in the Passage pane with the cited region outlined.
+
+Open a document for its card. Related documents appear under the card: shared names, mentions, or similar content. You can ask about both from there.
+
+Settings cover switching the folder, rebuilding the index, removing the library, answer / document-card / embedding models, summarise and find-names toggles, and Rebuild connections. Logs live under the app data `logs` folder (on macOS: `~/Library/Application Support/com.mertogul.cognito/logs`). Use Open logs folder in Settings.
 
 ## Building an installer
 

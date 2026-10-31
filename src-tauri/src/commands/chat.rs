@@ -1,6 +1,6 @@
 use crate::app::state::SharedState;
 use crate::events::CHAT_FINAL;
-use crate::models::{ChatFinalResult, ChatTurn, CitationItem};
+use crate::models::{ChatFinalResult, ChatTurn};
 use crate::services::chat_query;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter};
@@ -43,22 +43,7 @@ pub async fn send_chat_query(
         )
         .await
         {
-            let _ = app_c.emit(
-                CHAT_FINAL,
-                &ChatFinalResult {
-                    message_id: mid,
-                    citations: Vec::<CitationItem>::new(),
-                    retrieval_mode: "error".into(),
-                    error: Some(e.to_string()),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title: None,
-                    scope_ids: vec![],
-                    timings: None,
-                    suggestions: vec![],
-                    trace: None,
-                },
-            );
+            let _ = app_c.emit(CHAT_FINAL, &ChatFinalResult::failure(mid, e.to_string()));
         }
     });
     Ok(message_id)
@@ -93,22 +78,7 @@ pub async fn send_related_query(
         )
         .await
         {
-            let _ = app_c.emit(
-                CHAT_FINAL,
-                &ChatFinalResult {
-                    message_id: mid,
-                    citations: Vec::<CitationItem>::new(),
-                    retrieval_mode: "error".into(),
-                    error: Some(e.to_string()),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title: None,
-                    scope_ids: vec![],
-                    timings: None,
-                    suggestions: vec![],
-                    trace: None,
-                },
-            );
+            let _ = app_c.emit(CHAT_FINAL, &ChatFinalResult::failure(mid, e.to_string()));
         }
     });
     Ok(message_id)
