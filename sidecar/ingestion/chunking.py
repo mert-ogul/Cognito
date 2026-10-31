@@ -12,9 +12,7 @@ _REGION_GAP = 4.0
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
-_REF_SECTION_KEYS = frozenset(
-    {"references", "bibliography", "acknowledgments", "acknowledgements"}
-)
+_REF_SECTION_KEYS = frozenset({"references", "bibliography", "acknowledgments", "acknowledgements"})
 _CITATION_LINE_RE = re.compile(
     r"^\s*(?:\[\d+\]|\d+\.)\s+.*\b(?:19|20)\d{2}\b",
     re.IGNORECASE,

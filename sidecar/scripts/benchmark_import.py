@@ -93,7 +93,9 @@ def main() -> int:
         default=True,
         help="Use COGNITO_MOCK_EMBED=1 (default: true)",
     )
-    parser.add_argument("--skip-query", action="store_true", help="Skip prepare_chat_retrieval timing")
+    parser.add_argument(
+        "--skip-query", action="store_true", help="Skip prepare_chat_retrieval timing"
+    )
     parser.add_argument(
         "--embed-model",
         default=os.environ.get("COGNITO_BENCH_EMBED_MODEL", "nomic-embed-text"),

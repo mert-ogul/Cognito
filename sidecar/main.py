@@ -165,9 +165,7 @@ def dispatch(method: str, params: dict) -> Any:
             if params.get("embed_model") is not None
             else None,
             profile_matches=profile_matches,
-            explicit_scope=bool(
-                params.get("explicit_scope") or params.get("explicitScope")
-            ),
+            explicit_scope=bool(params.get("explicit_scope") or params.get("explicitScope")),
             labels=[str(x) for x in labels],
             normalised_question=str(params["normalised_question"])
             if params.get("normalised_question") is not None
@@ -177,8 +175,7 @@ def dispatch(method: str, params: dict) -> Any:
                 else None
             ),
             scope_ids=[str(x) for x in scope_ids],
-            scope_reason=str(params.get("scope_reason") or params.get("scopeReason") or "")
-            or None,
+            scope_reason=str(params.get("scope_reason") or params.get("scopeReason") or "") or None,
             candidate_counts={str(k): int(v) for k, v in counts.items()},
         )
     if method == "prepare_related_retrieval":

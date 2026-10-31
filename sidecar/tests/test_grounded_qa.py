@@ -221,7 +221,9 @@ def test_quote_in_passage_one_stray_token() -> None:
 def test_quote_in_passage_rejects_invented_added_not_swapped_dropped() -> None:
     passage = "The model reaches 81.5 percent accuracy on Cora."
     assert quote_in_passage("invented phrase nowhere present", passage) is False
-    assert quote_in_passage("The model does not reach 81.5 percent accuracy on Cora", passage) is False
+    assert (
+        quote_in_passage("The model does not reach 81.5 percent accuracy on Cora", passage) is False
+    )
     assert quote_in_passage("The model reaches accuracy percent 81.5 on Cora", passage) is False
     assert quote_in_passage("The model on Cora", passage) is False
 
@@ -464,13 +466,17 @@ def test_low_best_score_returns_not_found(monkeypatch: pytest.MonkeyPatch) -> No
             "rerankMs": 1,
         },
     )
-    monkeypatch.setattr(cp, "resolve_scope", lambda *a, **k: {
-        "scopeIds": [],
-        "scopeTitle": None,
-        "scopeChosen": False,
-        "scopeReason": "no_profile_match",
-        "profileMatches": [],
-    })
+    monkeypatch.setattr(
+        cp,
+        "resolve_scope",
+        lambda *a, **k: {
+            "scopeIds": [],
+            "scopeTitle": None,
+            "scopeChosen": False,
+            "scopeReason": "no_profile_match",
+            "profileMatches": [],
+        },
+    )
     d = tempfile.mkdtemp()
     out = prepare_chat_retrieval(
         str(Path(d) / "v.sqlite"),

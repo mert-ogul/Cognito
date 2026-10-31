@@ -58,11 +58,7 @@ def clean_title(raw: str) -> str:
                 out.append(low)
             else:
                 parts = w.split("-")
-                out.append(
-                    "-".join(
-                        (p[:1].upper() + p[1:].lower()) if p else p for p in parts
-                    )
-                )
+                out.append("-".join((p[:1].upper() + p[1:].lower()) if p else p for p in parts))
         text = " ".join(out)
     return text
 

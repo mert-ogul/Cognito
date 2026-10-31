@@ -195,9 +195,7 @@ def _chunk_row_dict(r: tuple[Any, ...], chunk_id: str) -> dict[str, Any]:
     return out
 
 
-def _doc_id_clause(
-    document_ids: list[str] | None, params: list[Any]
-) -> str:
+def _doc_id_clause(document_ids: list[str] | None, params: list[Any]) -> str:
     if not document_ids:
         return ""
     ph = ",".join(["?"] * len(document_ids))
@@ -642,9 +640,7 @@ def _chunk_has_label(chunk: dict[str, Any], wanted: list[str]) -> bool:
     return False
 
 
-def apply_label_boost(
-    chunks: list[dict[str, Any]], labels: list[str]
-) -> list[dict[str, Any]]:
+def apply_label_boost(chunks: list[dict[str, Any]], labels: list[str]) -> list[dict[str, Any]]:
     if not labels or not chunks:
         return chunks
     hit = [c for c in chunks if _chunk_has_label(c, labels)]
@@ -921,9 +917,7 @@ def _retrieve_pool(
     vector_chunks = vector_top_k(
         sqlite_path, embed_model, search_text, top_k, document_ids=scope_filter
     )
-    keyword_chunks = keyword_top_k(
-        sqlite_path, search_text, _KEYWORD_K, document_ids=scope_filter
-    )
+    keyword_chunks = keyword_top_k(sqlite_path, search_text, _KEYWORD_K, document_ids=scope_filter)
     label_extra: list[dict[str, Any]] = []
     if labels:
         if scope_filter:
@@ -974,9 +968,7 @@ def _rerank_pool(
 _ENTITY_DOC_CAP = 5
 
 
-def _chunks_by_ids(
-    sqlite_path: str, chunk_ids: list[str]
-) -> list[dict[str, Any]]:
+def _chunks_by_ids(sqlite_path: str, chunk_ids: list[str]) -> list[dict[str, Any]]:
     if not chunk_ids:
         return []
     try:
@@ -1039,9 +1031,7 @@ def _ordinal_of(c: dict[str, Any], sqlite_path: str | None) -> int | None:
     except Exception:
         return None
     try:
-        row = con.execute(
-            "SELECT ordinal FROM chunks WHERE id = ?", (cid,)
-        ).fetchone()
+        row = con.execute("SELECT ordinal FROM chunks WHERE id = ?", (cid,)).fetchone()
         if row is None or row[0] is None:
             return None
         return int(row[0])
@@ -1051,9 +1041,7 @@ def _ordinal_of(c: dict[str, Any], sqlite_path: str | None) -> int | None:
         con.close()
 
 
-def _chunk_after_ordinal(
-    sqlite_path: str, document_id: str, ordinal: int
-) -> dict[str, Any] | None:
+def _chunk_after_ordinal(sqlite_path: str, document_id: str, ordinal: int) -> dict[str, Any] | None:
     try:
         con = sqlite3.connect(sqlite_path)
     except Exception:
@@ -1221,9 +1209,7 @@ def prepare_chat_retrieval(
     normalised_q = normalize_search_text(query or "")
     search_text = normalize_search_text(embed_query_text(normalised_q, hist_raw))
     explicit = [str(x) for x in (scope_ids or []) if x]
-    scope_info = resolve_scope(
-        sqlite_path, normalised_q, explicit_ids=explicit or None
-    )
+    scope_info = resolve_scope(sqlite_path, normalised_q, explicit_ids=explicit or None)
     profile_matches = list(scope_info.get("profileMatches") or [])
     scope_chosen = bool(scope_info.get("scopeChosen"))
     scope_title = scope_info.get("scopeTitle")
@@ -1282,9 +1268,7 @@ def prepare_chat_retrieval(
             scope_chosen=scope_chosen,
             query_embedding_failed=failed,
             profile_matches=profile_matches,
-            suggestions=_suggestions_from_profiles(profile_matches)
-            if not explicit
-            else [],
+            suggestions=_suggestions_from_profiles(profile_matches) if not explicit else [],
             trace=trace,
             search_text=search_text,
         )
@@ -1361,9 +1345,7 @@ def prepare_chat_retrieval(
                 continue
             if not pool2:
                 continue
-            ranked2, rr2 = _rerank_pool(
-                app_data, search_text, pool2
-            )
+            ranked2, rr2 = _rerank_pool(app_data, search_text, pool2)
             rr = {
                 "rerankMs": int(rr.get("rerankMs") or 0) + int(rr2.get("rerankMs") or 0),
                 "scored": int(rr.get("scored") or 0) + int(rr2.get("scored") or 0),
@@ -1373,9 +1355,7 @@ def prepare_chat_retrieval(
                 second_pass = True
                 ranked = ranked2
                 best_score = best2
-                candidate_cites = [
-                    _citation_from_chunk(c, i + 1) for i, c in enumerate(pool2)
-                ]
+                candidate_cites = [_citation_from_chunk(c, i + 1) for i, c in enumerate(pool2)]
                 effective_scope = [did]
                 scope_title = m.get("title") or None
                 scope_chosen = True
@@ -1480,9 +1460,7 @@ def rerank_chat_candidates(
             "bestScore": 0.0,
             "rerankMs": 0,
             "rerankScored": 0,
-            "suggestions": _suggestions_from_profiles(matches)
-            if not explicit_scope
-            else [],
+            "suggestions": _suggestions_from_profiles(matches) if not explicit_scope else [],
             "scopeIds": list(scope_ids or []),
             "scopeTitle": None,
             "scopeChosen": False,
@@ -1499,9 +1477,7 @@ def rerank_chat_candidates(
     out_scope_chosen = False
     out_scope_reason = scope_reason or ""
     suggestions: list[dict[str, Any]] = []
-    label_list = list(labels or []) or question_label_mentions(
-        normalised_question or search_text
-    )
+    label_list = list(labels or []) or question_label_mentions(normalised_question or search_text)
 
     if (
         best_score < NOT_FOUND_SCORE
@@ -1527,12 +1503,9 @@ def rerank_chat_candidates(
                 continue
             if not pool2:
                 continue
-            ranked2, rr2 = _rerank_pool(
-                app_data, search_text, pool2
-            )
+            ranked2, rr2 = _rerank_pool(app_data, search_text, pool2)
             rr = {
-                "rerankMs": int(rr.get("rerankMs") or 0)
-                + int(rr2.get("rerankMs") or 0),
+                "rerankMs": int(rr.get("rerankMs") or 0) + int(rr2.get("rerankMs") or 0),
                 "scored": int(rr.get("scored") or 0) + int(rr2.get("scored") or 0),
             }
             best2 = float(ranked2[0][1]) if ranked2 else 0.0
@@ -1548,9 +1521,7 @@ def rerank_chat_candidates(
         else:
             suggestions = _suggestions_from_profiles(matches)
 
-    matched_doc_ids = {
-        str(m["documentId"]) for m in matches if m.get("documentId")
-    }
+    matched_doc_ids = {str(m["documentId"]) for m in matches if m.get("documentId")}
     matched_doc_ids.update(str(x) for x in out_scope_ids if x)
     ranked, label_covers = _pin_label_chunks(
         ranked,
@@ -1565,8 +1536,7 @@ def rerank_chat_candidates(
         normalised_question=normalised_question or search_text,
         profile_matches=matches,
         scope_ids=out_scope_ids,
-        scope_reason=out_scope_reason
-        or ("not_found" if not found else "rerank"),
+        scope_reason=out_scope_reason or ("not_found" if not found else "rerank"),
         vector_n=int(counts.get("vector") or 0),
         keyword_n=int(counts.get("keyword") or 0),
         label_n=int(counts.get("label") or 0),
