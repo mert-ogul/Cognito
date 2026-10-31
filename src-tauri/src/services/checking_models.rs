@@ -93,6 +93,8 @@ mod tests {
 
     #[test]
     fn missing_complete_means_absent() {
+        let prev = std::env::var("COGNITO_MOCK_MODELS").ok();
+        std::env::remove_var("COGNITO_MOCK_MODELS");
         let dir = tempfile::tempdir().expect("tmpdir");
         let folder = dir
             .path()
@@ -118,5 +120,9 @@ mod tests {
             .expect("minilm");
         assert!(mini2.present);
         assert!(!status2.ready);
+        match prev {
+            Some(v) => std::env::set_var("COGNITO_MOCK_MODELS", v),
+            None => std::env::remove_var("COGNITO_MOCK_MODELS"),
+        }
     }
 }
