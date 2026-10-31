@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("shell renders toolbar and panes", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByText("Cognito", { exact: true })).toBeVisible();
+  await expect(page.getByRole("img", { name: "Cognito" })).toBeVisible();
   await expect(page.getByText("Library", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Chat message")).toBeVisible();
   await expect(page.getByRole("button", { name: "Connections" }).first()).toBeVisible();

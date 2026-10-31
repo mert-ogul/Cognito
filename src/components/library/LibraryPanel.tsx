@@ -19,6 +19,8 @@ import { useChatIntentStore } from "@/stores/chatIntentStore";
 import { useMainViewStore } from "@/stores/mainViewStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import engravedDark from "@/assets/branding/cognito-engraved-dark.svg";
+import engravedLight from "@/assets/branding/cognito-engraved-light.svg";
 
 type SortKey = "title" | "type" | "date" | "pages";
 
@@ -325,6 +327,17 @@ export function LibraryPanel() {
 
       {!vaultSet ? (
         <div className="flex flex-1 flex-col gap-3 p-3">
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcSet={engravedDark} />
+            <img
+              src={engravedLight}
+              alt=""
+              aria-hidden
+              width={96}
+              className="select-none"
+              draggable={false}
+            />
+          </picture>
           <p className="text-muted">
             Pick a folder of PDF, Word and Markdown files. Cognito indexes it on this computer.
           </p>

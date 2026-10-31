@@ -2,6 +2,8 @@ import { Button } from "@/components/ui/button";
 import { describeStatus } from "@/lib/status";
 import type { AppHealth, ImportProgress } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import toolbarDark from "@/assets/branding/cognito-toolbar-dark.svg";
+import toolbarLight from "@/assets/branding/cognito-toolbar-light.svg";
 
 type Props = {
   health: AppHealth | undefined;
@@ -24,7 +26,17 @@ export function Toolbar({
 
   return (
     <header className="flex h-10 shrink-0 items-center gap-3 border-b border-line bg-bg px-3">
-      <span className="shrink-0 font-medium text-text">Cognito</span>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcSet={toolbarDark} />
+        <img
+          src={toolbarLight}
+          alt="Cognito"
+          height={24}
+          width="auto"
+          className="shrink-0 select-none"
+          draggable={false}
+        />
+      </picture>
       <div className="min-w-0 flex-1 truncate text-center">
         {status ? (
           <p

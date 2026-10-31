@@ -19,6 +19,8 @@ import { useMainViewStore } from "@/stores/mainViewStore";
 import { getVersion } from "@tauri-apps/api/app";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
+import mark64Dark from "@/assets/branding/cognito-mark-64-dark.svg";
+import mark64Light from "@/assets/branding/cognito-mark-64-light.svg";
 
 type Props = {
   open: boolean;
@@ -319,8 +321,23 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
         </section>
 
         <section className="space-y-2">
-          <h3 className="font-medium text-text">About</h3>
-          <p className="text-muted">Version {ver ?? "…"}</p>
+          <div className="flex items-start gap-3">
+            <picture>
+              <source media="(prefers-color-scheme: dark)" srcSet={mark64Dark} />
+              <img
+                src={mark64Light}
+                alt=""
+                width={40}
+                height={40}
+                className="shrink-0 select-none"
+                draggable={false}
+              />
+            </picture>
+            <div className="min-w-0 space-y-1">
+              <h3 className="font-medium text-text">About</h3>
+              <p className="text-muted">Version {ver ?? "…"}</p>
+            </div>
+          </div>
           <Button
             type="button"
             variant="secondary"

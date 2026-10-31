@@ -1,4 +1,10 @@
-# Cognito
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/branding/readme/cognito-readme-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/branding/readme/cognito-readme-light.svg">
+    <img alt="Cognito" src="assets/branding/readme/cognito-readme-light.svg" width="520">
+  </picture>
+</p>
 
 ## What Cognito is
 

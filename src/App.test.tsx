@@ -57,7 +57,7 @@ describe("App shell", () => {
         <App />
       </QueryClientProvider>,
     );
-    expect(screen.getByText("Cognito")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Cognito" })).toBeInTheDocument();
     expect(screen.getByText("Library")).toBeInTheDocument();
     expect(screen.getByLabelText("Chat message")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connections" })).toBeInTheDocument();
