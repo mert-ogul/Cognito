@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""
-Retrieval eval against a Cognito vault.sqlite.
+"""Score retrieval against a Cognito vault.sqlite.
 
 Runs prepare_chat_retrieval (skip_rerank) then rerank_chat_candidates the same
-way chat_query.rs does, and reports bestScore, notFound, and top title/page.
+way chat_query.rs does. Prints bestScore, notFound, and top title/page.
 
-Usage (from repo root):
+From the repo root:
   npm run eval
   cd sidecar && uv run python scripts/eval_retrieval.py [--sqlite PATH] [--questions PATH]
       [--embed-model M] [--app-data PATH]

@@ -15,20 +15,20 @@ export function OllamaSetupBanner({ health }: Props) {
     >
       {unreachable ? (
         <>
-          <p className="font-medium">Ollama is not running</p>
+          <p className="font-medium">Ollama isn't running</p>
           <ol className="mt-1 list-inside list-decimal space-y-1 text-muted">
             <li>
-              Install: <code className="font-mono text-text">brew install ollama</code> (macOS)
-              or see <span className="select-all font-mono text-text">ollama.com/download</span>
+              Install with <code className="font-mono text-text">brew install ollama</code> on
+              macOS, or see <span className="select-all font-mono text-text">ollama.com/download</span>
             </li>
             <li>
-              Start the daemon: <code className="font-mono text-text">ollama serve</code>
+              Start it: <code className="font-mono text-text">ollama serve</code>
             </li>
           </ol>
         </>
       ) : (
         <>
-          <p className="font-medium">Required Ollama models are missing</p>
+          <p className="font-medium">These Ollama models are missing</p>
           <ol className="mt-1 list-inside list-decimal space-y-1 text-muted">
             {health.missingModels.map((name) => (
               <li key={name}>

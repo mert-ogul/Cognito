@@ -9,7 +9,7 @@ type Props = {
 export function ModelsDownloadBanner({ preparing, progress, onDownload }: Props) {
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
-      <p className="text-muted">Cognito needs checking models, downloaded once.</p>
+      <p className="text-muted">Checking models download once (~2.1 GB), then you can ask questions.</p>
       <Button type="button" variant="secondary" disabled={preparing} onClick={onDownload}>
         {preparing ? "Downloading…" : "Download"}
       </Button>

@@ -449,7 +449,7 @@ describe("ChatPanel", () => {
     );
     expect(
       screen.getByText(
-        "Cognito needs checking models, downloaded once.",
+        "Checking models download once (~2.1 GB), then you can ask questions.",
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Download" })).toBeInTheDocument();

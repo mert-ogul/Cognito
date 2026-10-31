@@ -505,7 +505,7 @@ export function ChatPanel({
   const placeholder = !health?.vaultConfigured
     ? "Choose a folder first"
     : needsModels
-      ? "Download checking models to ask questions"
+      ? "Download checking models first"
       : health?.warmUpPending
         ? `Loading ${health.chatModel}`
         : anyBusy
@@ -514,7 +514,7 @@ export function ChatPanel({
             : "Ask about your library"
           : ready
             ? "Ask about your library"
-            : "Chat unavailable until the model is ready.";
+            : "Chat waits until the model is ready.";
 
   return (
     <div className="flex h-full min-h-0 flex-col">

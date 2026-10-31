@@ -7,7 +7,7 @@ export type StatusLine = {
   tone: StatusTone;
 };
 
-/** Single most important status line for the toolbar, or null when all is well. */
+/** Toolbar status when something needs attention; null when all is well. */
 export function describeStatus(
   health: AppHealth | undefined,
   importProgress: ImportProgress | null | undefined,

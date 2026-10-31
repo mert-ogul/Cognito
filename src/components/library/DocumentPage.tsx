@@ -251,7 +251,7 @@ export function DocumentPage({ documentId, onBackToConversation, onAskAboutDocum
           <p className="mt-2 text-muted">People: {people.join(", ")}</p>
         ) : null}
         {organizations.length > 0 ? (
-          <p className="mt-0.5 text-muted">Organizations: {organizations.join(", ")}</p>
+          <p className="mt-0.5 text-muted">Organisations: {organizations.join(", ")}</p>
         ) : null}
 
         {cardQ.isLoading ? <p className="mt-4 text-muted">Loading summary…</p> : null}

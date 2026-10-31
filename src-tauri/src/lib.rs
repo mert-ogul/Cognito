@@ -1,4 +1,4 @@
-//! Cognito desktop shell: Tauri commands, local databases, Python sidecar bridge.
+//! Tauri commands, SQLite, and the Python sidecar bridge.
 
 mod app;
 mod commands;

@@ -71,7 +71,7 @@ pub fn plan_rebuild(state: &SharedState) -> CognitoResult<(PathBuf, Vec<PathBuf>
     let settings = state.with_sqlite(sqlite::load_settings)?;
     let vault_str = settings
         .vault_path
-        .ok_or_else(|| CognitoError::Vault("Configure a vault folder first.".into()))?;
+        .ok_or_else(|| CognitoError::Vault("Choose a library folder first.".into()))?;
     let vault = vault::ensure_vault_path(&vault_str)?;
     let paths = vault::collect_import_paths_bounded(&vault, vault::slots_remaining(0))?;
     if paths.is_empty() {

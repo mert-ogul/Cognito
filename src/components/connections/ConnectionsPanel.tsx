@@ -23,7 +23,7 @@ type Tab = "index" | "timeline";
 const PRIMARY_FILTERS: { key: string; label: string }[] = [
   { key: "all", label: "All" },
   { key: "person", label: "People" },
-  { key: "organization", label: "Organizations" },
+  { key: "organization", label: "Organisations" },
   { key: "place", label: "Places" },
   { key: "date", label: "Dates" },
 ];
@@ -32,7 +32,7 @@ const PRIMARY_KEYS = new Set(PRIMARY_FILTERS.map((f) => f.key).filter((k) => k !
 
 const LABEL_DISPLAY: Record<string, string> = {
   person: "People",
-  organization: "Organizations",
+  organization: "Organisations",
   place: "Places",
   date: "Dates",
 };

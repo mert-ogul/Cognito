@@ -114,7 +114,7 @@ describe("SettingsSheet", () => {
     fireEvent.click(screen.getByRole("button", { name: "Change folder" }));
     expect(
       await screen.findByText(
-        /Switching to \/vault-b removes the 1 documents from \/vault from Cognito\. Your files stay where they are\./,
+        /Switching to \/vault-b clears Cognito's index of the 1 documents in \/vault\. Your files stay where they are\./,
       ),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));

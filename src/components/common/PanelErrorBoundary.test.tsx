@@ -28,7 +28,7 @@ describe("PanelErrorBoundary", () => {
   it("shows fallback and Try again re-renders the child", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     render(<Harness />);
-    expect(screen.getByText("This panel hit an error")).toBeInTheDocument();
+    expect(screen.getByText("Something went wrong in this panel")).toBeInTheDocument();
     expect(screen.getByText("boom panel")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "heal" }));
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));

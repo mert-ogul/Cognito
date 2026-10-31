@@ -1,4 +1,4 @@
-//! Small orchestration units for commands.
+//! Import, chat, health, and background work used by Tauri commands.
 
 pub mod background_worker;
 pub mod chat_query;

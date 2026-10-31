@@ -391,7 +391,7 @@ pub async fn import_documents(
     let vault_str = settings
         .vault_path
         .clone()
-        .ok_or_else(|| "Configure a vault folder first.".to_string())?;
+        .ok_or_else(|| "Choose a library folder first.".to_string())?;
     let vault = PathBuf::from(&vault_str);
     let import_root = if let Some(ref f) = folder {
         let fp = PathBuf::from(f);
@@ -436,7 +436,7 @@ pub async fn retry_failed_import(
     let vault_str = settings
         .vault_path
         .clone()
-        .ok_or_else(|| "Configure a vault folder first.".to_string())?;
+        .ok_or_else(|| "Choose a library folder first.".to_string())?;
     let vault = PathBuf::from(&vault_str);
     let entities_n = state
         .with_sqlite(sqlite::requeue_failed_entities)

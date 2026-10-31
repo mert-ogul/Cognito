@@ -70,7 +70,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
   }, [data]);
 
   const docCount = docs.data?.length ?? 0;
-  const folderLabel = data?.vaultPath ?? "Not configured";
+  const folderLabel = data?.vaultPath ?? "No folder chosen";
   const embedChanged = !!data && embed.trim() !== data.embedModel;
   const needsRebuildSave = embedChanged && docCount > 0;
   const confirmModel = confirm === "save-rebuild" ? embed.trim() : (data?.embedModel ?? embed);
@@ -78,7 +78,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
   const confirmText = useMemo(() => {
     if (!confirm) return null;
     if (confirm === "change-folder" && pendingFolder) {
-      return `Switching to ${pendingFolder} removes the ${docCount} documents from ${folderLabel} from Cognito. Your files stay where they are.`;
+      return `Switching to ${pendingFolder} clears Cognito's index of the ${docCount} documents in ${folderLabel}. Your files stay where they are.`;
     }
     if (confirm === "rebuild") {
       return `Every document in ${folderLabel} is indexed again and connections are rebuilt.`;
@@ -272,7 +272,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
             <div>
               <p className="text-text">Summarise documents in the background</p>
               <p className="text-muted">
-                Builds a checked card per document with the background model.
+                Each document gets a checked card from the background model.
               </p>
             </div>
             <Switch
@@ -289,7 +289,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
             <div>
               <p className="text-text">Find names, places and dates</p>
               <p className="text-muted">
-                Extracts people, places and dates so documents can be linked.
+                People, places and dates used to link documents in Connections.
               </p>
             </div>
             <Switch
