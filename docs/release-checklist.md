@@ -1,6 +1,6 @@
 # Release checklist
 
-Use this for manual GitHub Releases and QA before publishing binaries.
+Use this for manual GitHub Releases and the QA you do before publishing binaries. Signing steps are optional until certificates are wired.
 
 ## Pre-release
 
@@ -21,7 +21,7 @@ Use this for manual GitHub Releases and QA before publishing binaries.
 
 ## Signing and notarization (optional, macOS)
 
-Do not commit certificates or passwords. Configure GitHub Actions secrets or run locally in a trusted environment.
+Do not commit certificates or passwords. Configure GitHub Actions secrets, or run locally in a trusted environment.
 
 - [ ] Apple Developer Program membership and a Developer ID Application certificate.
 - [ ] Create a `.p12` or use Xcode / `codesign` with the identity in Keychain CI.

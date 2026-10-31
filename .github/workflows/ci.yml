@@ -1,4 +1,4 @@
-# CI: PR and main — lint, tests, compile (no full OS-specific bundle on Ubuntu).
+# PR and main: typecheck, lint, tests, compile. No full OS-specific installer on Ubuntu.
 name: CI
 
 on:

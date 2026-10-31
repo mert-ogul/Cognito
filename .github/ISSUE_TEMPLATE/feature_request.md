@@ -7,7 +7,7 @@ labels: enhancement
 
 ## Problem / goal
 
-## Proposed behavior (optional)
+## Proposed behaviour (optional)
 
 ## Notes
 

@@ -9,4 +9,4 @@
 | [0005](0005-connections.md) | Connections |
 | [0007](0007-document-cards.md) | Document cards |
 
-ADR 0006 (graph / DuckDB storage, later superseded by connections in SQLite) was withdrawn when the map view and leftover graph tables were removed.
+ADR 0006 covered graph / DuckDB storage (later replaced by connections in SQLite). It was withdrawn when the map view and leftover graph tables were removed.

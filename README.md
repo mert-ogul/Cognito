@@ -8,17 +8,16 @@
 
 ## What Cognito is
 
-Cognito is a desktop app for asking questions about a folder of PDF, Word and Markdown files. Indexing and chat run on your machine with a local Ollama install.
+Cognito is a desktop app for asking questions about PDF, Word and Markdown files in a folder you choose. Indexing and chat run on your machine with a local Ollama install.
 
 ## What it does
 
-- Indexes PDF, Word (`.docx`) and Markdown from one chosen folder (up to 100 documents on first import)
+- Indexes PDF, Word (`.docx`) and Markdown from one folder (up to 100 documents on first import)
 - On macOS, recognises text in scanned PDF pages with Apple Vision; other platforms skip image-only pages
-- Stores page regions for PDF chunks and shows cropped page images under answer sources and card facts
+- Shows cropped page images under answer sources and card facts when PDF page regions were stored
 - Opens the Passage pane on the full page with the cited region outlined
 - Summarises each indexed document in the background into a checked document card (type, people, summary, facts)
 - Optionally finds names, places and dates so documents can be linked
-- Builds embeddings in SQLite
 - Answers with numbered citations tied to retrieved passages
 - Shows a Connections pane (Index and Timeline) for names and linked documents
 - Lets you switch folders, rebuild the index, or remove the library without deleting your files
@@ -59,7 +58,7 @@ First launch downloads about 2.1 GB of checking and names models. You pick which
 
 ## Using it
 
-Choose a folder from Library or Settings. Cognito indexes PDF, Word and Markdown files there (up to 100 on first import). Scanned PDFs on macOS are OCR’d and labelled in the library.
+Choose a folder from Library or Settings. Cognito indexes PDF, Word and Markdown files there (up to 100 on first import). Scanned PDFs on macOS are OCR'd and labelled in the library.
 
 Ask questions in the chat column once the answer model is ready. Suggested questions appear when the chat is empty.
 
@@ -93,7 +92,7 @@ See [docs/packaging-local.md](docs/packaging-local.md) and [docs/release-checkli
 
 | Layer | Role |
 |-------|------|
-| Tauri / Rust | Window, vault paths, SQLite, import jobs, sidecar lifecycle |
+| Tauri / Rust | Window, library folder paths, SQLite, import jobs, sidecar lifecycle |
 | React | Shell UI, chat, library, passage / connections |
 | Python sidecar | Parse, chunk, embed, retrieval prep |
 | SQLite | Documents, chunks, embeddings, cards, entities and links |
@@ -103,7 +102,7 @@ Decisions: [docs/adr/](docs/adr/).
 
 ## Privacy
 
-Vault files stay on disk. Chat and embeddings go only to the Ollama host you configure. There is no telemetry. Details are in [ADR 004](docs/adr/0004-security-privacy.md).
+Your files stay on disk. Chat and embeddings go only to the Ollama host you configure. There is no telemetry. Details are in [ADR 004](docs/adr/0004-security-privacy.md).
 
 ## Licence
 
