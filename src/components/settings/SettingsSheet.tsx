@@ -33,7 +33,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
   const [background, setBackground] = useState("qwen3.5:4b");
   const [embed, setEmbed] = useState("qwen3-embedding:0.6b");
   const [summariseOn, setSummariseOn] = useState(true);
-  const [thoroughOn, setThoroughOn] = useState(false);
   const [findNamesOn, setFindNamesOn] = useState(true);
   const [alsoFind, setAlsoFind] = useState("");
   const [ver, setVer] = useState<string | null>(null);
@@ -59,7 +58,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     setBackground(data.backgroundModel);
     setEmbed(data.embedModel);
     setSummariseOn(data.summariseDocuments);
-    setThoroughOn(data.thoroughReranking ?? false);
     setFindNamesOn(data.extractEntities);
     setAlsoFind(data.extraEntityLabels ?? "");
     setConfirm(null);
@@ -101,7 +99,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     summariseDocuments: summariseOn,
     extractEntities: findNamesOn,
     extraEntityLabels: alsoFind,
-    thoroughReranking: thoroughOn,
   });
 
   const savePlain = useMutation({
@@ -166,7 +163,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
           summariseDocuments: summariseOn,
           extractEntities: findNamesOn,
           extraEntityLabels: alsoFind,
-          thoroughReranking: thoroughOn,
         });
         await rebuildIndex(embed.trim());
       } else if (confirm === "rebuild") {
@@ -262,19 +258,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
               checked={summariseOn}
               onCheckedChange={setSummariseOn}
               aria-label="Summarise documents in the background"
-            />
-          </div>
-          <div className="flex items-center justify-between gap-3 border border-line px-3 py-2">
-            <div>
-              <p className="text-text">Thorough reranking (slower)</p>
-              <p className="text-muted">
-                Optional Qwen3-Reranker on Apple GPU when available; off by default.
-              </p>
-            </div>
-            <Switch
-              checked={thoroughOn}
-              onCheckedChange={setThoroughOn}
-              aria-label="Thorough reranking (slower)"
             />
           </div>
         </section>

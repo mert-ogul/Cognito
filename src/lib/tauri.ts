@@ -96,7 +96,6 @@ export type SettingsPayload = {
   summariseDocuments: boolean;
   extractEntities: boolean;
   extraEntityLabels: string;
-  thoroughReranking: boolean;
 };
 
 export async function getAppHealth(): Promise<AppHealth> {
@@ -381,7 +380,6 @@ export async function getSettings(): Promise<SettingsPayload> {
       summariseDocuments: true,
       extractEntities: true,
       extraEntityLabels: "",
-      thoroughReranking: false,
     };
   }
   return invoke("get_settings");
@@ -395,7 +393,6 @@ export async function updateSettings(payload: {
   summariseDocuments: boolean;
   extractEntities: boolean;
   extraEntityLabels: string;
-  thoroughReranking: boolean;
 }): Promise<void> {
   if (e2e) {
     return;

@@ -121,10 +121,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_false() -> bool {
-    false
-}
-
 fn default_background_model() -> String {
     "qwen3.5:4b".to_string()
 }
@@ -143,8 +139,6 @@ pub struct SettingsPayload {
     pub extract_entities: bool,
     #[serde(default)]
     pub extra_entity_labels: String,
-    #[serde(default = "default_false")]
-    pub thorough_reranking: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -297,7 +291,8 @@ pub struct ModelsStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsProgressEvent {
-    pub line: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
 }
 
 #[cfg(test)]

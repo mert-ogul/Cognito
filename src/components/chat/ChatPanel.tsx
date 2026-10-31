@@ -76,6 +76,14 @@ export function normalizeAnswerMath(text: string): string {
     .join("");
 }
 
+function formatModelBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 MB";
+  const gb = n / (1024 * 1024 * 1024);
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  const mb = n / (1024 * 1024);
+  return `${Math.max(1, Math.round(mb))} MB`;
+}
+
 function fileName(path: string): string {
   const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   return i >= 0 ? path.slice(i + 1) : path;
@@ -366,8 +374,11 @@ export function ChatPanel({ health }: Props) {
     );
   });
 
-  useTauriEvent<{ line: string }>("models-progress", (ev) => {
-    setModelsProgress(ev.payload.line);
+  useTauriEvent<{ downloadedBytes: number; totalBytes: number }>("models-progress", (ev) => {
+    const { downloadedBytes, totalBytes } = ev.payload;
+    setModelsProgress(
+      `Downloading models, ${formatModelBytes(downloadedBytes)} of ${formatModelBytes(totalBytes)}`,
+    );
   });
 
   const openCitation = useCallback(
@@ -555,7 +566,7 @@ export function ChatPanel({ health }: Props) {
       {needsModels ? (
         <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
           <p className="text-muted">
-            Cognito needs two checking models, about 1 GB, downloaded once.
+            Cognito needs checking models, downloaded once.
           </p>
           <Button
             type="button"

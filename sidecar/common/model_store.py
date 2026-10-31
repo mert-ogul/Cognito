@@ -13,11 +13,18 @@ from typing import Any, Callable
 log = logging.getLogger("cognito.sidecar")
 
 MINILM_RERANKER_REPO = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
-QWEN_RERANKER_REPO = "Qwen/Qwen3-Reranker-0.6B"
+MINILM_RERANKER_REVISION = "1427fd652930e4ba29e8149678df786c240d8825"
 # Back-compat alias used by older call sites / eval scripts.
 RERANKER_REPO = MINILM_RERANKER_REPO
 HHEM_REPO = "vectara/hallucination_evaluation_model"
+HHEM_REVISION = "de9a5e6ba9ba49531a022dba17e35ffeb2a6fad8"
 GLINER_REPO = "urchade/gliner_multi-v2.1"
+GLINER_REVISION = "443d26d654e0324125a96bebd8e796c14ff2efe6"
+
+FLAN_T5_REPO = "google/flan-t5-base"
+MDEBERTA_REPO = "microsoft/mdeberta-v3-base"
+
+_COMPLETE_NAME = ".complete"
 
 _MOCK_MODELS_ENV = "COGNITO_MOCK_MODELS"
 
@@ -28,22 +35,51 @@ _RERANK_PASSAGE_TOKENS = 300
 _HHEM_BUDGET_S = 4.0
 _TORCH_THREADS = 4
 
-_RERANK_SYSTEM = (
-    'Judge whether the Document meets the requirements based on the Query and '
-    'the Instruct provided. Note that the answer can only be "yes" or "no".'
+MINILM_ALLOW = (
+    "config.json",
+    "model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "sentencepiece.bpe.model",
 )
-_RERANK_INSTRUCT = "Given a question, find passages in the user's documents that answer it"
-_RERANK_PREFIX = (
-    "<|im_start|>system\n"
-    f"{_RERANK_SYSTEM}"
-    "<|im_end|>\n"
-    "<|im_start|>user\n"
+HHEM_ALLOW = (
+    "config.json",
+    "model.safetensors",
+    "configuration_hhem_v2.py",
+    "modeling_hhem_v2.py",
 )
-_RERANK_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+GLINER_ALLOW = (
+    "gliner_config.json",
+    "model.safetensors",
+)
+FLAN_T5_ALLOW = (
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "spiece.model",
+)
+MDEBERTA_ALLOW = (
+    "config.json",
+    "tokenizer_config.json",
+    "spm.model",
+)
+
+# Local snapshots under models/<org--name>, each pinned.
+_LOCAL_MODELS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (MINILM_RERANKER_REPO, MINILM_RERANKER_REVISION, MINILM_ALLOW),
+    (HHEM_REPO, HHEM_REVISION, HHEM_ALLOW),
+    (GLINER_REPO, GLINER_REVISION, GLINER_ALLOW),
+)
+# Tokenizer / config deps in HF_HOME (float on main).
+_CACHE_DEPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (FLAN_T5_REPO, FLAN_T5_ALLOW),
+    (MDEBERTA_REPO, MDEBERTA_ALLOW),
+)
 
 # Lazy caches keyed by resolved app_data path.
 _minilm_cache: dict[str, Any] = {}
-_qwen_cache: dict[str, tuple[Any, Any, int, int, Any]] = {}
 _hhem_cache: dict[str, Any] = {}
 _gliner_cache: dict[str, Any] = {}
 _torch_threads_set = False
@@ -69,6 +105,10 @@ def models_dir(app_data: str) -> Path:
     return Path(app_data) / "models"
 
 
+def hf_home(app_data: str) -> Path:
+    return models_dir(app_data) / "hf"
+
+
 def mock_models_enabled() -> bool:
     return os.environ.get(_MOCK_MODELS_ENV) == "1"
 
@@ -79,6 +119,10 @@ def _repo_folder(repo_id: str) -> str:
 
 def _snapshot_path(app_data: str, repo_id: str) -> Path:
     return models_dir(app_data) / _repo_folder(repo_id)
+
+
+def _complete_path(app_data: str, repo_id: str) -> Path:
+    return _snapshot_path(app_data, repo_id) / _COMPLETE_NAME
 
 
 def _dir_size_bytes(path: Path) -> int:
@@ -95,29 +139,17 @@ def _dir_size_bytes(path: Path) -> int:
 
 
 def _model_present(path: Path) -> bool:
-    # GLiNER ships gliner_config.json instead of Hugging Face config.json.
-    markers = ("config.json", "gliner_config.json")
-    if any((path / name).is_file() for name in markers):
-        return True
-    if not path.is_dir():
-        return False
-    for root, _dirs, files in os.walk(path):
-        if any(name in files for name in markers):
-            return True
-    return False
+    return (path / _COMPLETE_NAME).is_file()
 
 
-def _required_repos(thorough_reranking: bool) -> tuple[str, ...]:
-    repos = [MINILM_RERANKER_REPO, HHEM_REPO]
-    if thorough_reranking:
-        repos.append(QWEN_RERANKER_REPO)
-    return tuple(repos)
+def _required_repos() -> tuple[str, ...]:
+    return tuple(repo for repo, _rev, _allow in _LOCAL_MODELS)
 
 
-def models_status(app_data: str, thorough_reranking: bool = False) -> dict:
+def models_status(app_data: str) -> dict:
     models: list[dict] = []
     total = 0
-    for repo in _required_repos(thorough_reranking):
+    for repo in _required_repos():
         path = _snapshot_path(app_data, repo)
         present = _model_present(path)
         size = _dir_size_bytes(path) if present else 0
@@ -130,25 +162,131 @@ def models_status(app_data: str, thorough_reranking: bool = False) -> dict:
     }
 
 
-def download_models(
+def _require_complete(app_data: str, repo_id: str, label: str) -> Path:
+    path = _snapshot_path(app_data, repo_id)
+    if not _model_present(path):
+        raise FileNotFoundError(
+            f"{label} not downloaded (missing {_COMPLETE_NAME} at {path})"
+        )
+    return path
+
+
+def _write_complete(app_data: str, repo_id: str) -> None:
+    path = _snapshot_path(app_data, repo_id)
+    path.mkdir(parents=True, exist_ok=True)
+    (_complete_path(app_data, repo_id)).write_text("", encoding="utf-8")
+
+
+def _clear_complete(app_data: str, repo_id: str) -> None:
+    complete = _complete_path(app_data, repo_id)
+    if complete.is_file():
+        complete.unlink()
+
+
+def _estimate_repo_bytes(repo_id: str, allow: tuple[str, ...], revision: str | None) -> int:
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    info = api.model_info(repo_id, revision=revision, files_metadata=True)
+    allow_set = set(allow)
+    total = 0
+    for sib in info.siblings or []:
+        name = getattr(sib, "rfilename", None) or ""
+        if name not in allow_set:
+            continue
+        size = getattr(sib, "size", None)
+        if size is not None:
+            total += int(size)
+    return total
+
+
+def estimate_download_bytes() -> int:
+    total = 0
+    for repo, rev, allow in _LOCAL_MODELS:
+        total += _estimate_repo_bytes(repo, allow, rev)
+    for repo, allow in _CACHE_DEPS:
+        total += _estimate_repo_bytes(repo, allow, None)
+    return total
+
+
+def _download_local(
     app_data: str,
-    progress_cb: Callable[[str], None] | None = None,
-    thorough_reranking: bool = False,
-) -> dict:
+    repo_id: str,
+    revision: str,
+    allow: tuple[str, ...],
+) -> None:
     from huggingface_hub import snapshot_download
 
-    def log_line(msg: str) -> None:
-        if progress_cb is not None:
-            progress_cb(msg)
+    dest = _snapshot_path(app_data, repo_id)
+    dest.mkdir(parents=True, exist_ok=True)
+    complete = dest / _COMPLETE_NAME
+    if complete.is_file():
+        complete.unlink()
+    snapshot_download(
+        repo_id=repo_id,
+        revision=revision,
+        local_dir=str(dest),
+        allow_patterns=list(allow),
+    )
 
+
+def _download_cache_dep(repo_id: str, allow: tuple[str, ...]) -> None:
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id=repo_id,
+        revision="main",
+        allow_patterns=list(allow),
+    )
+
+
+def download_models(
+    app_data: str,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
+) -> dict:
+    """Download pinned local models and HF cache deps; load each and write .complete."""
+    os.environ["HF_HOME"] = str(hf_home(app_data))
     root = models_dir(app_data)
     root.mkdir(parents=True, exist_ok=True)
-    for repo in _required_repos(thorough_reranking):
-        dest = _snapshot_path(app_data, repo)
-        log_line(f"Downloading {repo}...")
-        snapshot_download(repo_id=repo, local_dir=str(dest))
-        log_line(f"Ready {repo}")
-    return models_status(app_data, thorough_reranking=thorough_reranking)
+    hf_home(app_data).mkdir(parents=True, exist_ok=True)
+
+    total = estimate_download_bytes()
+    if progress_cb is not None:
+        progress_cb({"totalBytes": total})
+
+    for repo, rev, allow in _LOCAL_MODELS:
+        _download_local(app_data, repo, rev, allow)
+        if progress_cb is not None:
+            progress_cb({"repo": repo})
+
+    for repo, allow in _CACHE_DEPS:
+        _download_cache_dep(repo, allow)
+        if progress_cb is not None:
+            progress_cb({"repo": repo})
+
+    key = str(Path(app_data).resolve())
+    _minilm_cache.pop(key, None)
+    _hhem_cache.pop(key, None)
+    _gliner_cache.pop(key, None)
+
+    for repo, _rev, _allow in _LOCAL_MODELS:
+        _clear_complete(app_data, repo)
+
+    minilm = _load_minilm(app_data, verify_files=True)
+    _ = _score_minilm_batch(minilm, "warm", ["warm passage"])
+    _write_complete(app_data, MINILM_RERANKER_REPO)
+
+    hhem = _load_hhem(app_data, verify_files=True)
+    try:
+        _ = hhem.predict([("warm premise", "warm hypothesis")])
+    except Exception:
+        pass
+    _write_complete(app_data, HHEM_REPO)
+
+    _ = load_gliner(app_data, verify_files=True)
+    _write_complete(app_data, GLINER_REPO)
+
+    return models_status(app_data)
 
 
 def _ensure_torch_threads() -> None:
@@ -176,7 +314,7 @@ def _clip_passage(text: str, max_tokens: int = _RERANK_PASSAGE_TOKENS) -> str:
     return " ".join(words[:max_tokens])
 
 
-def _load_minilm(app_data: str) -> Any:
+def _load_minilm(app_data: str, *, verify_files: bool = False) -> Any:
     key = str(Path(app_data).resolve())
     cached = _minilm_cache.get(key)
     if cached is not None:
@@ -185,75 +323,16 @@ def _load_minilm(app_data: str) -> Any:
     _ensure_torch_threads()
     from sentence_transformers import CrossEncoder
 
-    path = _snapshot_path(app_data, MINILM_RERANKER_REPO)
-    if not _model_present(path):
-        raise FileNotFoundError(f"MiniLM reranker missing at {path}")
-
+    if verify_files:
+        path = _snapshot_path(app_data, MINILM_RERANKER_REPO)
+    else:
+        path = _require_complete(app_data, MINILM_RERANKER_REPO, "MiniLM reranker")
     model = CrossEncoder(str(path), device="cpu", max_length=_RERANK_MAX_LENGTH)
     _minilm_cache[key] = model
     return model
 
 
-def _mps_available() -> bool:
-    import torch
-
-    return bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
-
-
-def _load_qwen_reranker(app_data: str) -> tuple[Any, Any, int, int, Any]:
-    """Load Qwen3-Reranker on MPS only. Raises if MPS is unavailable or warm-up fails."""
-    if not _mps_available():
-        raise RuntimeError("Qwen reranker requires Apple MPS; refusing CPU")
-
-    key = str(Path(app_data).resolve())
-    cached = _qwen_cache.get(key)
-    if cached is not None:
-        return cached
-
-    _ensure_torch_threads()
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    path = _snapshot_path(app_data, QWEN_RERANKER_REPO)
-    if not _model_present(path):
-        raise FileNotFoundError(f"Qwen reranker missing at {path}")
-
-    device = torch.device("mps")
-    tokenizer = AutoTokenizer.from_pretrained(
-        str(path), trust_remote_code=True, padding_side="left"
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        str(path),
-        trust_remote_code=True,
-        torch_dtype=torch.float16,
-    )
-    model.eval()
-    model.to(device)
-    yes_id = tokenizer.convert_tokens_to_ids("yes")
-    no_id = tokenizer.convert_tokens_to_ids("no")
-
-    # Warm-up must succeed on MPS before we keep the model.
-    try:
-        warm = tokenizer(
-            ["warm"],
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=32,
-        )
-        warm = {k: v.to(device) for k, v in warm.items()}
-        with torch.no_grad():
-            _ = model(**warm).logits
-    except Exception as e:
-        del model
-        raise RuntimeError(f"Qwen MPS warm-up failed: {e}") from e
-
-    packed = (tokenizer, model, yes_id, no_id, device)
-    _qwen_cache[key] = packed
-    return packed
-
-
-def _load_hhem(app_data: str) -> Any:
+def _load_hhem(app_data: str, *, verify_files: bool = False) -> Any:
     key = str(Path(app_data).resolve())
     cached = _hhem_cache.get(key)
     if cached is not None:
@@ -263,27 +342,20 @@ def _load_hhem(app_data: str) -> Any:
     import torch
     from transformers import AutoModelForSequenceClassification
 
-    path = _snapshot_path(app_data, HHEM_REPO)
-    if not _model_present(path):
-        raise FileNotFoundError(f"HHEM model missing at {path}")
-
+    if verify_files:
+        path = _snapshot_path(app_data, HHEM_REPO)
+    else:
+        path = _require_complete(app_data, HHEM_REPO, "HHEM model")
     model = AutoModelForSequenceClassification.from_pretrained(
         str(path),
         trust_remote_code=True,
         torch_dtype=torch.float32,
+        local_files_only=not verify_files,
     )
     model.eval()
     model.to(torch.device("cpu"))
     _hhem_cache[key] = model
     return model
-
-
-def _format_qwen_pair(query: str, doc: str) -> str:
-    return (
-        f"<Instruct>: {_RERANK_INSTRUCT}\n"
-        f"<Query>: {query}\n"
-        f"<Document>: {doc}"
-    )
 
 
 def _score_minilm_batch(model: Any, query: str, docs: list[str]) -> list[float]:
@@ -299,55 +371,13 @@ def _score_minilm_batch(model: Any, query: str, docs: list[str]) -> list[float]:
     return out
 
 
-def _score_qwen_batch(
-    packed: tuple[Any, Any, int, int, Any],
-    query: str,
-    docs: list[str],
-) -> list[float]:
-    import torch
-
-    tokenizer, model, yes_id, no_id, device = packed
-    prefix_tokens = tokenizer.encode(_RERANK_PREFIX, add_special_tokens=False)
-    suffix_tokens = tokenizer.encode(_RERANK_SUFFIX, add_special_tokens=False)
-    pairs = [_format_qwen_pair(query, _clip_passage(d)) for d in docs]
-    budget = _RERANK_MAX_LENGTH - len(prefix_tokens) - len(suffix_tokens)
-    tokenized = tokenizer(
-        pairs,
-        padding=False,
-        truncation="longest_first",
-        return_attention_mask=False,
-        max_length=max(1, budget),
-    )
-    for i, ids in enumerate(tokenized["input_ids"]):
-        tokenized["input_ids"][i] = prefix_tokens + ids + suffix_tokens
-    inputs = tokenizer.pad(
-        tokenized,
-        padding=True,
-        return_tensors="pt",
-        max_length=_RERANK_MAX_LENGTH,
-    )
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    with torch.no_grad():
-        logits = model(**inputs).logits[:, -1, :]
-        stacked = torch.stack([logits[:, no_id], logits[:, yes_id]], dim=1)
-        probs = torch.nn.functional.softmax(stacked, dim=1)
-        return probs[:, 1].detach().cpu().tolist()
-
-
 def rerank_scores(
     app_data: str,
     query: str,
     documents: list[str],
-    *,
-    thorough_reranking: bool = False,
 ) -> list[float]:
     """Score documents; returns one score per input, preserving fused order for unscored."""
-    result = rerank_with_budget(
-        app_data,
-        query,
-        documents,
-        thorough_reranking=thorough_reranking,
-    )
+    result = rerank_with_budget(app_data, query, documents)
     return result["scores"]
 
 
@@ -355,8 +385,6 @@ def rerank_with_budget(
     app_data: str,
     query: str,
     documents: list[str],
-    *,
-    thorough_reranking: bool = False,
 ) -> dict[str, Any]:
     n = len(documents)
     if n == 0:
@@ -366,18 +394,7 @@ def rerank_with_budget(
         scores = [max(0.0, min(1.0, sigmoid(2.0 - i * 0.15))) for i in range(n)]
         return {"scores": scores, "scored": n, "budgetHit": False, "rerankMs": 0}
 
-    use_qwen = False
-    qwen_packed = None
-    minilm = None
-    if thorough_reranking:
-        try:
-            qwen_packed = _load_qwen_reranker(app_data)
-            use_qwen = True
-        except Exception as e:
-            log.warning("Thorough reranker unavailable (%s); using MiniLM", e)
-
-    if not use_qwen:
-        minilm = _load_minilm(app_data)
+    minilm = _load_minilm(app_data)
 
     scores: list[float | None] = [None] * n
     started = time.perf_counter()
@@ -389,11 +406,7 @@ def rerank_with_budget(
             budget_hit = True
             break
         batch = documents[start : start + _RERANK_BATCH]
-        if use_qwen and qwen_packed is not None:
-            batch_scores = _score_qwen_batch(qwen_packed, query, batch)
-        else:
-            assert minilm is not None
-            batch_scores = _score_minilm_batch(minilm, query, batch)
+        batch_scores = _score_minilm_batch(minilm, query, batch)
         for i, s in enumerate(batch_scores):
             scores[start + i] = float(s)
             scored += 1
@@ -404,7 +417,6 @@ def rerank_with_budget(
     if budget_hit:
         log.info("rerank budget hit: %s of %s scored", scored, n)
 
-    # Unscored keep fused order after scored ones via a descending floor.
     out: list[float] = []
     for i, s in enumerate(scores):
         if s is not None:
@@ -430,7 +442,6 @@ def hhem_scores(
     try:
         raw = model.predict(list(pairs))
     except Exception:
-        # Older HHEM builds may not expose predict; fall back to one-shot if fast enough.
         return [None] * len(pairs)
 
     elapsed = time.perf_counter() - started
@@ -442,7 +453,6 @@ def hhem_scores(
     if elapsed <= _HHEM_BUDGET_S:
         return values
 
-    # Whole-batch overran: mark all unchecked (cannot partially stop native predict).
     log.info("hhem budget hit: 0 of %s scored", len(pairs))
     return [None] * len(pairs)
 
@@ -461,7 +471,6 @@ def hhem_scores_bounded(
     out: list[float | None] = [None] * len(pairs)
     started = time.perf_counter()
     scored = 0
-    # Score one-by-one so we can stop at the budget (HHEM predict is otherwise all-or-nothing).
     for i, pair in enumerate(pairs):
         if time.perf_counter() - started >= _HHEM_BUDGET_S:
             log.info("hhem budget hit: %s of %s scored", scored, len(pairs))
@@ -479,11 +488,8 @@ def hhem_scores_bounded(
     return out
 
 
-def warm_checking_models(
-    app_data: str,
-    thorough_reranking: bool = False,
-) -> dict[str, Any]:
-    """Load MiniLM + HHEM (and Qwen if thorough) and run a tiny warm-up pair each."""
+def warm_checking_models(app_data: str) -> dict[str, Any]:
+    """Load MiniLM + HHEM and run a tiny warm-up pair each."""
     if mock_models_enabled():
         return {"warmed": True, "loadMs": 0, "warmupMs": 0}
 
@@ -491,13 +497,6 @@ def warm_checking_models(
     _ensure_torch_threads()
     minilm = _load_minilm(app_data)
     hhem = _load_hhem(app_data)
-    qwen_ok = False
-    if thorough_reranking:
-        try:
-            _load_qwen_reranker(app_data)
-            qwen_ok = True
-        except Exception as e:
-            log.warning("Thorough reranker warm skipped: %s", e)
     load_ms = int((time.perf_counter() - t0) * 1000)
 
     t1 = time.perf_counter()
@@ -506,33 +505,28 @@ def warm_checking_models(
         _ = hhem.predict([("warm premise", "warm hypothesis")])
     except Exception:
         pass
-    if qwen_ok:
-        pass  # warm already done inside _load_qwen_reranker
     warm_ms = int((time.perf_counter() - t1) * 1000)
-    log.info(
-        "checking models load %sms warm-up %sms (thorough=%s)",
-        load_ms,
-        warm_ms,
-        thorough_reranking and qwen_ok,
-    )
+    log.info("checking models load %sms warm-up %sms", load_ms, warm_ms)
     return {"warmed": True, "loadMs": load_ms, "warmupMs": warm_ms}
 
 
-def load_gliner(app_data: str) -> Any:
+def load_gliner(app_data: str, *, verify_files: bool = False) -> Any:
     key = str(Path(app_data).resolve())
     cached = _gliner_cache.get(key)
     if cached is not None:
         return cached
 
     from gliner import GLiNER
-    from huggingface_hub import snapshot_download
 
-    path = _snapshot_path(app_data, GLINER_REPO)
-    if not _model_present(path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        snapshot_download(repo_id=GLINER_REPO, local_dir=str(path))
-
-    model = GLiNER.from_pretrained(str(path))
+    if verify_files:
+        path = _snapshot_path(app_data, GLINER_REPO)
+    else:
+        path = _require_complete(app_data, GLINER_REPO, "GLiNER model")
+    # GLiNER.from_pretrained forwards kwargs to transformers; prefer offline when not verifying.
+    try:
+        model = GLiNER.from_pretrained(str(path), local_files_only=not verify_files)
+    except TypeError:
+        model = GLiNER.from_pretrained(str(path))
     _gliner_cache[key] = model
     return model
 
@@ -614,6 +608,24 @@ def _mock_extract_spans(text: str, labels: list[str]) -> list[dict[str, Any]]:
     return out
 
 
+def _normalize_span_item(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return {
+            "label": str(item.get("label") or ""),
+            "text": str(item.get("text") or ""),
+            "start": int(item.get("start") or 0),
+            "end": int(item.get("end") or 0),
+            "score": float(item.get("score") or 0.0),
+        }
+    return {
+        "label": str(getattr(item, "label", "") or ""),
+        "text": str(getattr(item, "text", "") or ""),
+        "start": int(getattr(item, "start", 0) or 0),
+        "end": int(getattr(item, "end", 0) or 0),
+        "score": float(getattr(item, "score", 0.0) or 0.0),
+    }
+
+
 def extract_spans(
     app_data: str,
     text: str,
@@ -625,28 +637,34 @@ def extract_spans(
     if mock_models_enabled():
         return _mock_extract_spans(text, labels)
 
+    batched = extract_spans_batch(app_data, [text], labels, threshold=threshold)
+    return batched[0] if batched else []
+
+
+def extract_spans_batch(
+    app_data: str,
+    texts: list[str],
+    labels: list[str],
+    threshold: float = 0.5,
+) -> list[list[dict[str, Any]]]:
+    if not texts or not labels:
+        return [[] for _ in texts]
+    if mock_models_enabled():
+        return [_mock_extract_spans(t, labels) for t in texts]
+
     model = load_gliner(app_data)
-    raw = model.predict_entities(text, labels, threshold=threshold)
-    out: list[dict[str, Any]] = []
-    for item in raw or []:
-        if isinstance(item, dict):
-            out.append(
-                {
-                    "label": str(item.get("label") or ""),
-                    "text": str(item.get("text") or ""),
-                    "start": int(item.get("start") or 0),
-                    "end": int(item.get("end") or 0),
-                    "score": float(item.get("score") or 0.0),
-                }
-            )
-        else:
-            out.append(
-                {
-                    "label": str(getattr(item, "label", "") or ""),
-                    "text": str(getattr(item, "text", "") or ""),
-                    "start": int(getattr(item, "start", 0) or 0),
-                    "end": int(getattr(item, "end", 0) or 0),
-                    "score": float(getattr(item, "score", 0.0) or 0.0),
-                }
-            )
-    return out
+    raw_batches = model.inference(
+        texts,
+        labels,
+        threshold=threshold,
+        batch_size=8,
+    )
+    out: list[list[dict[str, Any]]] = []
+    for raw in raw_batches or []:
+        spans: list[dict[str, Any]] = []
+        for item in raw or []:
+            spans.append(_normalize_span_item(item))
+        out.append(spans)
+    while len(out) < len(texts):
+        out.append([])
+    return out[: len(texts)]

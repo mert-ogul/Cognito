@@ -57,12 +57,6 @@ pub async fn update_settings(
             };
             sqlite::upsert_setting(c, "extract_entities", extract)?;
             sqlite::upsert_setting(c, "extra_entity_labels", &payload.extra_entity_labels)?;
-            let thorough = if payload.thorough_reranking {
-                "true"
-            } else {
-                "false"
-            };
-            sqlite::upsert_setting(c, "thorough_reranking", thorough)?;
             Ok(())
         })?;
         if let Some(ref v) = payload.vault_path {

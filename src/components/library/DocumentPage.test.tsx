@@ -109,7 +109,6 @@ describe("DocumentPage", () => {
       summariseDocuments: true,
       extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
     });
   });
 
@@ -173,7 +172,6 @@ describe("DocumentPage", () => {
       summariseDocuments: false,
       extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
     });
     vi.mocked(listDocuments).mockResolvedValue([
       {

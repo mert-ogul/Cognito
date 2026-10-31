@@ -235,8 +235,6 @@ pub fn load_settings(conn: &Connection) -> CognitoResult<SettingsPayload> {
         get_setting(conn, "extract_entities")?.unwrap_or_else(|| "true".to_string());
     let extra_labels =
         get_setting(conn, "extra_entity_labels")?.unwrap_or_else(|| String::new());
-    let thorough =
-        get_setting(conn, "thorough_reranking")?.unwrap_or_else(|| "false".to_string());
     Ok(SettingsPayload {
         vault_path: vault,
         chat_model: chat,
@@ -245,7 +243,6 @@ pub fn load_settings(conn: &Connection) -> CognitoResult<SettingsPayload> {
         summarise_documents: summarise != "false",
         extract_entities: extract != "false",
         extra_entity_labels: extra_labels,
-        thorough_reranking: thorough == "true",
     })
 }
 

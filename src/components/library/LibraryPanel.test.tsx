@@ -71,7 +71,6 @@ describe("LibraryPanel", () => {
           summariseDocuments: true,
           extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
         };
       }
       return {};
@@ -125,7 +124,6 @@ describe("LibraryPanel", () => {
           summariseDocuments: true,
           extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
         };
       }
       return {};
@@ -215,7 +213,6 @@ describe("LibraryPanel", () => {
           summariseDocuments: true,
           extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
         };
       }
       return {};
@@ -254,7 +251,6 @@ describe("LibraryPanel", () => {
           summariseDocuments: false,
           extractEntities: false,
           extraEntityLabels: "",
-      thoroughReranking: false,
         };
       }
       return {};
@@ -282,7 +278,6 @@ describe("LibraryPanel", () => {
           summariseDocuments: true,
           extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
         };
       }
       return {};
@@ -313,7 +308,6 @@ describe("LibraryPanel", () => {
           summariseDocuments: true,
           extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
         };
       }
       if (cmd === "select_vault_folder") return "/chosen";
@@ -360,7 +354,6 @@ describe("LibraryPanel", () => {
           summariseDocuments: true,
           extractEntities: true,
       extraEntityLabels: "",
-      thoroughReranking: false,
         };
       }
       return {};
@@ -386,7 +379,6 @@ describe("LibraryPanel", () => {
           summariseDocuments: true,
           extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
         };
       }
       if (cmd === "import_documents") {

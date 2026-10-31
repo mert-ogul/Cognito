@@ -253,7 +253,7 @@ def test_low_best_score_returns_not_found(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         cp,
         "rerank_with_budget",
-        lambda app_data, query, documents, thorough_reranking=False: {
+        lambda app_data, query, documents: {
             "scores": [0.1] * len(documents),
             "scored": len(documents),
             "budgetHit": False,
@@ -325,7 +325,7 @@ def test_second_pass_answers_from_scoped_document(
         gat_chunks[0]["text"]: 0.2,
     }
 
-    def fake_rerank(app_data, query, documents, thorough_reranking=False):
+    def fake_rerank(app_data, query, documents):
         scores = [scores_by_text.get(t, 0.2) for t in documents]
         return {
             "scores": scores,
@@ -400,7 +400,7 @@ def test_suggestions_when_both_passes_fail(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(
         cp,
         "rerank_with_budget",
-        lambda app_data, query, documents, thorough_reranking=False: {
+        lambda app_data, query, documents: {
             "scores": [0.1] * len(documents),
             "scored": len(documents),
             "budgetHit": False,

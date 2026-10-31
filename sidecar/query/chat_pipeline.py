@@ -937,14 +937,12 @@ def _rerank_pool(
     app_data: str | None,
     search_text: str,
     pool: list[dict[str, Any]],
-    thorough_reranking: bool,
 ) -> tuple[list[tuple[dict[str, Any], float]], dict[str, Any]]:
     passages = [str(c.get("text") or c.get("snippet") or "") for c in pool]
     rr = rerank_with_budget(
         app_data or "",
         search_text,
         passages,
-        thorough_reranking=thorough_reranking,
     )
     ranked = sorted(
         zip(pool, rr["scores"]),
@@ -1067,7 +1065,6 @@ def prepare_chat_retrieval(
     history: list[dict[str, Any]] | None = None,
     scope_ids: list[str] | None = None,
     app_data: str | None = None,
-    thorough_reranking: bool = False,
     skip_rerank: bool = False,
 ) -> dict[str, Any]:
     """Vector + keyword RRF, profile scope, label boost, optional rerank + second pass."""
@@ -1186,7 +1183,7 @@ def prepare_chat_retrieval(
             },
         }
 
-    ranked, rr = _rerank_pool(app_data, search_text, pool, thorough_reranking)
+    ranked, rr = _rerank_pool(app_data, search_text, pool)
     best_score = float(ranked[0][1]) if ranked else 0.0
     log.info(
         "retrieval %sms rerank %sms scored %s/%s",
@@ -1217,7 +1214,7 @@ def prepare_chat_retrieval(
             if not pool2:
                 continue
             ranked2, rr2 = _rerank_pool(
-                app_data, search_text, pool2, thorough_reranking
+                app_data, search_text, pool2
             )
             rr = {
                 "rerankMs": int(rr.get("rerankMs") or 0) + int(rr2.get("rerankMs") or 0),
@@ -1302,7 +1299,6 @@ def rerank_chat_candidates(
     app_data: str,
     query: str,
     candidates: list[dict[str, Any]],
-    thorough_reranking: bool = False,
     *,
     sqlite_path: str | None = None,
     embed_model: str | None = None,
@@ -1345,7 +1341,7 @@ def rerank_chat_candidates(
             "trace": trace,
         }
 
-    ranked, rr = _rerank_pool(app_data, search_text, candidates, thorough_reranking)
+    ranked, rr = _rerank_pool(app_data, search_text, candidates)
     best_score = float(ranked[0][1]) if ranked else 0.0
     log.info("rerank %sms scored %s/%s", rr["rerankMs"], rr["scored"], len(candidates))
 
@@ -1382,7 +1378,7 @@ def rerank_chat_candidates(
             if not pool2:
                 continue
             ranked2, rr2 = _rerank_pool(
-                app_data, search_text, pool2, thorough_reranking
+                app_data, search_text, pool2
             )
             rr = {
                 "rerankMs": int(rr.get("rerankMs") or 0)
@@ -1533,7 +1529,7 @@ def prepare_related_retrieval(
     if app_data and chunks:
         passages = [str(c.get("text") or "") for c in chunks]
         q = f"{entity_id_a} {entity_id_b}"
-        rr = rerank_with_budget(app_data, q, passages, thorough_reranking=False)
+        rr = rerank_with_budget(app_data, q, passages)
         ranked = sorted(
             zip(chunks, rr["scores"]),
             key=lambda pair: (-pair[1], str(pair[0].get("chunk_id") or "")),

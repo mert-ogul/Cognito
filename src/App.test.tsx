@@ -43,7 +43,6 @@ vi.mock("@tauri-apps/api/core", () => ({
         summariseDocuments: true,
         extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
       };
     }
     return {};

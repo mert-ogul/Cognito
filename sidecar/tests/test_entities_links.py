@@ -310,3 +310,146 @@ def test_recompute_links_mock_writes_rows(mock_models: None) -> None:
     topics = con.execute("SELECT id FROM topics").fetchall()
     assert len(topics) >= 1
     con.close()
+
+
+def test_windows_stay_under_gliner_token_cap() -> None:
+    from ingestion.rpc_entities import _windows, gliner_token_count
+
+    words = [f"word{i}" for i in range(1200)]
+    text = " ".join(words)
+    windows = _windows(text)
+    assert windows
+    for _start, _end, window in windows:
+        assert gliner_token_count(window) <= 384
+
+
+def test_incremental_extract_matches_single_pass(mock_models: None) -> None:
+    from ingestion.rpc_entities import rpc_extract_entities
+
+    d = tempfile.mkdtemp()
+    sqlite_path = str(Path(d) / "v.sqlite")
+    con = sqlite3.connect(sqlite_path)
+    con.executescript(
+        """
+        CREATE TABLE documents (
+          id TEXT PRIMARY KEY, path TEXT, title TEXT, status TEXT
+        );
+        CREATE TABLE chunks (
+          id TEXT PRIMARY KEY, document_id TEXT, ordinal INT, text TEXT, role TEXT
+        );
+        CREATE TABLE document_cards (
+          document_id TEXT PRIMARY KEY, type TEXT, title TEXT,
+          aliases TEXT, summary TEXT
+        );
+        """
+        + _ENTITIES_DDL
+    )
+    con.execute(
+        "INSERT INTO documents VALUES ('d1','/a.pdf','Cora paper','indexed')"
+    )
+    texts = [
+        "The Cora dataset is used for citation classification in 2017.",
+        "Graph Convolutional Networks (GCN) beat baselines on Cora.",
+        "Later work cites GCN and the Cora dataset again.",
+        "Ada Chen published follow-ups in Cambridge during 2018.",
+        "Meridian Labs funded the Cora study.",
+    ]
+    for i, body in enumerate(texts):
+        con.execute(
+            "INSERT INTO chunks VALUES (?, 'd1', ?, ?, 'body')",
+            (f"c{i}", i, body),
+        )
+    con.execute(
+        "INSERT INTO document_cards VALUES ('d1','paper','Cora paper','[]','[]')"
+    )
+    con.commit()
+    con.close()
+
+    params_base = {
+        "sqlitePath": sqlite_path,
+        "documentId": "d1",
+        "app_data": d,
+        "labels": [],
+    }
+    full = rpc_extract_entities({**params_base, "chunkOffset": 0, "chunkLimit": 100})
+    assert full["done"] is True
+    con = sqlite3.connect(sqlite_path)
+    full_mentions = con.execute(
+        "SELECT entity_id, chunk_id, start, end FROM mentions ORDER BY chunk_id, start, end"
+    ).fetchall()
+    con.execute("DELETE FROM mentions")
+    con.execute("DELETE FROM entity_aliases")
+    con.execute("DELETE FROM entities")
+    con.commit()
+    con.close()
+
+    offset = 0
+    while True:
+        out = rpc_extract_entities(
+            {**params_base, "chunkOffset": offset, "chunkLimit": 2}
+        )
+        if out["done"]:
+            break
+        offset = int(out["nextOffset"])
+    con = sqlite3.connect(sqlite_path)
+    split_mentions = con.execute(
+        "SELECT entity_id, chunk_id, start, end FROM mentions ORDER BY chunk_id, start, end"
+    ).fetchall()
+    con.close()
+    assert split_mentions == full_mentions
+    assert len(full_mentions) >= 1
+
+
+def test_references_without_card_uses_paper_labels(mock_models: None, monkeypatch) -> None:
+    from ingestion import rpc_entities as re
+    from query.entity_labels import labels_for_document
+
+    seen: list[list[str]] = []
+
+    def capture_batch(app_data, texts, labels, threshold=0.5):
+        seen.append(list(labels))
+        return [[] for _ in texts]
+
+    monkeypatch.setattr(re, "extract_spans_batch", capture_batch)
+
+    d = tempfile.mkdtemp()
+    sqlite_path = str(Path(d) / "v.sqlite")
+    con = sqlite3.connect(sqlite_path)
+    con.executescript(
+        """
+        CREATE TABLE documents (
+          id TEXT PRIMARY KEY, path TEXT, title TEXT, status TEXT
+        );
+        CREATE TABLE chunks (
+          id TEXT PRIMARY KEY, document_id TEXT, ordinal INT, text TEXT, role TEXT
+        );
+        CREATE TABLE document_cards (
+          document_id TEXT PRIMARY KEY, type TEXT, title TEXT,
+          aliases TEXT, summary TEXT
+        );
+        """
+        + _ENTITIES_DDL
+    )
+    con.execute("INSERT INTO documents VALUES ('d1','/a.pdf','Untitled','indexed')")
+    con.execute(
+        "INSERT INTO chunks VALUES ('c0','d1',0,'Body about the Cora dataset.','body')"
+    )
+    con.execute(
+        "INSERT INTO chunks VALUES ('c1','d1',1,'1. Prior work.','references')"
+    )
+    con.commit()
+    con.close()
+
+    out = re.rpc_extract_entities(
+        {
+            "sqlitePath": sqlite_path,
+            "documentId": "d1",
+            "app_data": d,
+            "labels": [],
+            "chunkOffset": 0,
+            "chunkLimit": 40,
+        }
+    )
+    assert out["done"] is True
+    assert seen
+    assert seen[0] == labels_for_document("paper", [])

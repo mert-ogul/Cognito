@@ -25,7 +25,6 @@ describe("SettingsSheet", () => {
           summariseDocuments: true,
           extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
         };
       }
       if (cmd === "list_documents") {

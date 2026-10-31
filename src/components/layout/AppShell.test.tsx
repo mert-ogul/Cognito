@@ -53,7 +53,6 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
       summariseDocuments: false,
       extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
     })),
     getDocumentCard: vi.fn(async () => null),
     getSuggestedQuestions: vi.fn(async () => []),

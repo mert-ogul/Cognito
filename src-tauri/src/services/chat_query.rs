@@ -209,7 +209,6 @@ pub async fn run_chat_query(
     let app_data = sp(&state.data_dir);
     let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
     let hist_for_retrieval = reduce_history(&history, 2);
-    let thorough = settings.thorough_reranking;
 
     let prep = match state.sidecar.with_session(|s| {
         s.request(
@@ -221,7 +220,6 @@ pub async fn run_chat_query(
                 "history": hist_for_retrieval,
                 "scope_ids": scope_ids,
                 "app_data": app_data,
-                "thorough_reranking": thorough,
                 "skip_rerank": true,
             }),
         )
@@ -348,7 +346,6 @@ pub async fn run_chat_query(
                     "app_data": app_data,
                     "query": search_text,
                     "candidates": candidates,
-                    "thorough_reranking": thorough,
                     "sqlite_path": sp(&sqlite_path),
                     "embed_model": settings.embed_model,
                     "profile_matches": profile_matches,

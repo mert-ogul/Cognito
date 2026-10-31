@@ -26,7 +26,7 @@ pub struct SidecarSession {
 fn timeout_for_method(method: &str) -> Duration {
     match method {
         "warm_model" => Duration::from_secs(600),
-        "parse_documents" | "embed_chunks" | "download_models" => Duration::from_secs(1800),
+        "parse_documents" | "embed_chunks" => Duration::from_secs(1800),
         "prepare_chat_retrieval" | "prepare_related_retrieval" | "check_answer" => {
             Duration::from_secs(300)
         }
@@ -56,11 +56,13 @@ fn prepare_log_file(log_path: &Path) -> CognitoResult<File> {
 }
 
 impl SidecarSession {
-    pub fn spawn(main_py: &Path, cwd: &Path, log_path: &Path) -> CognitoResult<Self> {
+    pub fn spawn(main_py: &Path, cwd: &Path, log_path: &Path, app_data: &Path) -> CognitoResult<Self> {
         let py = resolve_python_executable(cwd);
         let program = py.to_string_lossy().into_owned();
         let log_file = prepare_log_file(log_path)?;
         let log = Arc::new(Mutex::new(log_file));
+        let hf_home = app_data.join("models").join("hf");
+        let _ = std::fs::create_dir_all(&hf_home);
 
         let mut child = Command::new(&py)
             .arg(main_py)
@@ -68,6 +70,9 @@ impl SidecarSession {
             .env("PYTHONNOUSERSITE", "1")
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .env("PYTHONUNBUFFERED", "1")
+            .env("HF_HOME", &hf_home)
+            .env("HF_HUB_OFFLINE", "1")
+            .env("TRANSFORMERS_OFFLINE", "1")
             .env_remove("PYTHONHOME")
             .env_remove("PYTHONPATH")
             .stdin(Stdio::piped())
@@ -236,17 +241,27 @@ pub struct SidecarPool {
     main_py: PathBuf,
     cwd: PathBuf,
     log_path: PathBuf,
+    app_data: PathBuf,
     inner: Arc<Mutex<Option<SidecarSession>>>,
 }
 
 impl SidecarPool {
-    pub fn new(main_py: PathBuf, cwd: PathBuf, log_path: PathBuf) -> Self {
+    pub fn new(main_py: PathBuf, cwd: PathBuf, log_path: PathBuf, app_data: PathBuf) -> Self {
         Self {
             main_py,
             cwd,
             log_path,
+            app_data,
             inner: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn main_py(&self) -> &Path {
+        &self.main_py
+    }
+
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
     }
 
     pub fn ensure(&self) -> CognitoResult<()> {
@@ -266,6 +281,7 @@ impl SidecarPool {
                 &self.main_py,
                 &self.cwd,
                 &self.log_path,
+                &self.app_data,
             )?);
         }
         Ok(())
@@ -350,7 +366,7 @@ for line in sys.stdin:
         let dir = tempfile::tempdir().expect("tmpdir");
         let main_py = write_tiny_sidecar(dir.path());
         let log = dir.path().join("sidecar.log");
-        let pool = SidecarPool::new(main_py, dir.path().to_path_buf(), log);
+        let pool = SidecarPool::new(main_py, dir.path().to_path_buf(), log, dir.path().to_path_buf());
 
         pool.with_session(|s| s.request("ping", json!({})))
             .expect("initial ping");

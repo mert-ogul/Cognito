@@ -2,7 +2,7 @@
 
 use crate::app::state::SharedState;
 use crate::db::sqlite;
-use crate::errors::{CognitoError, CognitoResult};
+use crate::errors::CognitoResult;
 use crate::events::{BACKGROUND_PROGRESS, LIBRARY_CHANGED};
 use crate::models::BackgroundProgress;
 use crate::services::document_cards;
@@ -134,53 +134,92 @@ fn process_one_entities(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    let res = state.sidecar.with_session(|s| {
-        s.request(
-            "extract_entities",
-            json!({
-                "sqlitePath": sp(&sqlite_path),
-                "documentId": document_id,
-                "app_data": app_data,
-                "labels": labels,
-            }),
-        )
-    });
-    match res {
-        Ok(v) => {
-            let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
-            if !ok {
-                let msg = v
-                    .get("error")
-                    .and_then(|e| e.as_str())
-                    .unwrap_or("entity extraction failed")
-                    .to_string();
-                state.with_sqlite(|c| sqlite::mark_document_entities_failed(c, document_id, &msg))?;
-                emit_progress(app, None, document_id, "failed", Some(&msg));
-            } else {
-                state.with_sqlite(|c| sqlite::mark_document_entities_ok(c, document_id, None))?;
-                emit_progress(app, None, document_id, "ok", None);
-            }
-            if let Some(a) = app {
-                let _ = a.emit(LIBRARY_CHANGED, &());
-            }
-            Ok(DocOutcome::Finished)
+    let mut chunk_offset = 0i64;
+    loop {
+        if !wait_while_chat_in_flight(state, document_id, WaitKind::Entities)? {
+            return Ok(DocOutcome::Finished);
         }
-        Err(e) => {
-            let msg = e.to_string();
-            if ollama_stream::ollama_unreachable(&e) {
-                state.with_sqlite(|c| sqlite::mark_document_entities_pending(c, document_id))?;
-                emit_progress(app, None, document_id, "pending", Some(&msg));
+        let res = state.sidecar.with_session(|s| {
+            s.request(
+                "extract_entities",
+                json!({
+                    "sqlitePath": sp(&sqlite_path),
+                    "documentId": document_id,
+                    "app_data": app_data,
+                    "labels": labels,
+                    "chunkOffset": chunk_offset,
+                    "chunkLimit": 40,
+                }),
+            )
+        });
+        match res {
+            Ok(v) => {
+                let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                if !ok {
+                    let msg = v
+                        .get("error")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("entity extraction failed")
+                        .to_string();
+                    state.with_sqlite(|c| {
+                        sqlite::mark_document_entities_failed(c, document_id, &msg)
+                    })?;
+                    emit_progress(app, None, document_id, "failed", Some(&msg));
+                    if let Some(a) = app {
+                        let _ = a.emit(LIBRARY_CHANGED, &());
+                    }
+                    return Ok(DocOutcome::Finished);
+                }
+                let total = v
+                    .get("totalChunks")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(0)
+                    .max(0) as usize;
+                let next = v
+                    .get("nextOffset")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(chunk_offset);
+                let done = v.get("done").and_then(|x| x.as_bool()).unwrap_or(false);
+                let shown = next.max(0) as usize;
+                let detail = format!("{shown} of {total} passages");
+                emit_progress(app, None, document_id, "entities", Some(&detail));
+                if done {
+                    state.with_sqlite(|c| sqlite::mark_document_entities_ok(c, document_id, None))?;
+                    emit_progress(app, None, document_id, "ok", None);
+                    if let Some(a) = app {
+                        let _ = a.emit(LIBRARY_CHANGED, &());
+                    }
+                    return Ok(DocOutcome::Finished);
+                }
+                chunk_offset = next;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if crate::services::checking_models::is_missing_model_error(&msg) {
+                    state.with_sqlite(|c| sqlite::mark_document_entities_pending(c, document_id))?;
+                    emit_progress(app, None, document_id, "pending", Some(&msg));
+                    if let Some(a) = app {
+                        let _ = a.emit(LIBRARY_CHANGED, &());
+                    }
+                    return Ok(DocOutcome::Pause);
+                }
+                if ollama_stream::ollama_unreachable(&e) {
+                    state.with_sqlite(|c| sqlite::mark_document_entities_pending(c, document_id))?;
+                    emit_progress(app, None, document_id, "pending", Some(&msg));
+                    if let Some(a) = app {
+                        let _ = a.emit(LIBRARY_CHANGED, &());
+                    }
+                    return Ok(DocOutcome::Pause);
+                }
+                state.with_sqlite(|c| {
+                    sqlite::mark_document_entities_failed(c, document_id, &msg)
+                })?;
+                emit_progress(app, None, document_id, "failed", Some(&msg));
                 if let Some(a) = app {
                     let _ = a.emit(LIBRARY_CHANGED, &());
                 }
-                return Ok(DocOutcome::Pause);
+                return Ok(DocOutcome::Finished);
             }
-            state.with_sqlite(|c| sqlite::mark_document_entities_failed(c, document_id, &msg))?;
-            emit_progress(app, None, document_id, "failed", Some(&msg));
-            if let Some(a) = app {
-                let _ = a.emit(LIBRARY_CHANGED, &());
-            }
-            Ok(DocOutcome::Finished)
         }
     }
 }
@@ -288,6 +327,17 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> usize {
         n += 1;
     }
 
+    let entity_queue_empty = state
+        .with_sqlite(|c| sqlite::next_pending_entities_document(c))
+        .ok()
+        .flatten()
+        .is_none();
+    if entity_queue_empty {
+        let _ = state.sidecar.with_session(|s| {
+            s.request("unload_entity_model", json!({}))
+        });
+    }
+
     if !pause {
         loop {
             let summarise = state
@@ -365,6 +415,7 @@ fn worker_loop(state: SharedState, app: AppHandle, rx: Receiver<()>) {
 mod tests {
     use super::*;
     use crate::app::state::AppState;
+    use crate::errors::CognitoError;
     use crate::sidecar::SidecarPool;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -379,6 +430,7 @@ mod tests {
             PathBuf::from("/nonexistent/cognito-sidecar/main.py"),
             PathBuf::from("/nonexistent/cognito-sidecar"),
             data.path().join("sidecar.log"),
+            data.path().to_path_buf(),
         );
         let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
         let doc_id = "doc-reindex-card";
@@ -440,7 +492,7 @@ mod tests {
         let data = tempfile::tempdir().expect("data tempdir");
         let sidecar_cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sidecar");
         let main_py = sidecar_cwd.join("main.py");
-        let pool = SidecarPool::new(main_py, sidecar_cwd, data.path().join("sidecar.log"));
+        let pool = SidecarPool::new(main_py, sidecar_cwd, data.path().join("sidecar.log"), data.path().to_path_buf());
         let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
         state.sidecar.ensure().expect("sidecar");
         state
@@ -508,6 +560,7 @@ mod tests {
             PathBuf::from("/nonexistent/cognito-sidecar/main.py"),
             PathBuf::from("/nonexistent/cognito-sidecar"),
             data.path().join("sidecar.log"),
+            data.path().to_path_buf(),
         );
         let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
         state

@@ -55,7 +55,6 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
       summariseDocuments: true,
       extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
     })),
     listDocuments: vi.fn(async () => []),
   };
@@ -362,7 +361,7 @@ describe("ChatPanel", () => {
     );
     expect(
       screen.getByText(
-        "Cognito needs two checking models, about 1 GB, downloaded once.",
+        "Cognito needs checking models, downloaded once.",
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Download" })).toBeInTheDocument();

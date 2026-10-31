@@ -2,6 +2,7 @@
 
 pub mod background_worker;
 pub mod chat_query;
+pub mod checking_models;
 pub mod document_cards;
 pub mod file_watcher;
 pub mod health_snapshot;

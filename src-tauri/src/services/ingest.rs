@@ -584,7 +584,7 @@ mod tests {
         let main_py = sidecar_cwd.join("main.py");
         let log_path = data.path().join("logs").join("sidecar.log");
         std::fs::create_dir_all(log_path.parent().unwrap()).expect("logs dir");
-        let pool = SidecarPool::new(main_py, sidecar_cwd, log_path);
+        let pool = SidecarPool::new(main_py, sidecar_cwd, log_path, data.path().to_path_buf());
         let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
         state.sidecar.ensure().expect("sidecar ensure");
 

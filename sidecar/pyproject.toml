@@ -15,6 +15,7 @@ dependencies = [
   "sentence-transformers>=3.0",
   "huggingface_hub",
   "gliner",
+  "protobuf>=4",
   "rapidfuzz>=3.0",
 ]
 
