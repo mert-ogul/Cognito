@@ -188,6 +188,8 @@ pub struct CitationItem {
     pub page_end: Option<i64>,
     pub chunk_id: String,
     pub snippet: String,
+    #[serde(default, skip_serializing)]
+    pub text: String,
     #[serde(default)]
     pub node_ids: Vec<String>,
     #[serde(default)]
@@ -221,6 +223,8 @@ pub struct AnswerSentence {
     pub text: String,
     pub status: String,
     pub sources: Vec<u32>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -309,6 +313,7 @@ mod chat_payload_tests {
             page_end: Some(2),
             chunk_id: "c1".into(),
             snippet: "snip".into(),
+            text: String::new(),
             node_ids: vec!["n1".into()],
             index: 1,
             regions: None,

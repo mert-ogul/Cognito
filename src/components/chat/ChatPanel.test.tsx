@@ -190,7 +190,7 @@ describe("ChatPanel", () => {
     });
   });
 
-  it("renders unsupported sentences muted with a note", async () => {
+  it("renders answer sentences in one paragraph with unsupported titled", async () => {
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
       e2eEmit("chat-final", {
         messageId,
@@ -206,12 +206,16 @@ describe("ChatPanel", () => {
     });
     renderChat();
     await sendPrompt("ask");
-    expect(await screen.findByText("Guessed claim.")).toBeInTheDocument();
-    expect(screen.getByText("Not found in the sources")).toBeInTheDocument();
-    expect(screen.getByText("Guessed claim.").closest(".text-muted")).not.toBeNull();
+    const guessed = await screen.findByText("Guessed claim.");
+    expect(guessed).toBeInTheDocument();
+    expect(guessed).toHaveAttribute("title", "Not found in the sources");
+    expect(screen.queryByText("Not found in the sources")).toBeNull();
+    expect(screen.getByText("Supported claim.").closest("div.answer")).toBe(
+      guessed.closest("div.answer"),
+    );
   });
 
-  it("renders unchecked sentences muted with Not checked", async () => {
+  it("renders one unchecked note under the paragraph", async () => {
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
       e2eEmit("chat-final", {
         messageId,
@@ -227,8 +231,35 @@ describe("ChatPanel", () => {
     renderChat();
     await sendPrompt("ask");
     expect(await screen.findByText("Timed out claim.")).toBeInTheDocument();
-    expect(screen.getByText("Not checked")).toBeInTheDocument();
-    expect(screen.getByText("Timed out claim.").closest(".text-muted")).not.toBeNull();
+    expect(screen.getByText("Some sentences couldn't be checked.")).toBeInTheDocument();
+    expect(screen.queryByText("Not checked")).toBeNull();
+  });
+
+  it("renders a formula note when any sentence reason is formula", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [cite(1)],
+        sentences: [
+          {
+            text: "$$H = AW$$",
+            status: "unchecked",
+            sources: [1],
+            reason: "formula",
+          },
+        ],
+        notFound: false,
+        error: null,
+      });
+      return messageId;
+    });
+    renderChat();
+    await sendPrompt("ask");
+    expect(
+      await screen.findByText(
+        "Formulas are shown as written by the model; compare them with the page images below.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("adds and removes @ scope documents", async () => {
@@ -295,7 +326,7 @@ describe("ChatPanel", () => {
     renderChat();
     await sendPrompt("classification equation");
     expect(
-      await screen.findByText("Your documents don't seem to cover this."),
+      await screen.findByText("Your documents don't answer this."),
     ).toBeInTheDocument();
     expect(screen.getByText("Closest Paper")).toBeInTheDocument();
     expect(screen.getByText("p. 3")).toBeInTheDocument();
@@ -303,8 +334,34 @@ describe("ChatPanel", () => {
     expect(btn.textContent).toMatch(/Closest Paper/);
     expect(btn.textContent).toMatch(/p\. 3/);
     expect(btn.textContent).toMatch(/classification layer/);
-    // title/page are not glued onto the snippet without a separator
     expect(btn.textContent).not.toMatch(/Closest Paperp\./);
+  });
+
+  it("shows unconfirmed answer disclosure when notFound has sentences", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [cite(1, "Closest Paper", "/vault/c.pdf")],
+        sentences: [
+          { text: "Drafted but unconfirmed.", status: "unsupported", sources: [] },
+        ],
+        notFound: true,
+        error: null,
+        suggestions: [],
+      });
+      return messageId;
+    });
+    renderChat();
+    await sendPrompt("mars capital");
+    expect(
+      await screen.findByText("Your documents don't answer this."),
+    ).toBeInTheDocument();
+    const disclosure = screen.getByText("Show the unconfirmed answer").closest("details");
+    expect(disclosure).not.toBeNull();
+    expect(disclosure).not.toHaveAttribute("open");
+    expect(disclosure?.textContent).toMatch(/Drafted but unconfirmed/);
+    fireEvent.click(screen.getByText("Show the unconfirmed answer"));
+    expect(disclosure).toHaveAttribute("open");
   });
 
   it("suggestion link sets scope and resends the question", async () => {

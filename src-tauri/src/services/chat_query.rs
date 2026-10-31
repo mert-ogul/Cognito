@@ -18,7 +18,7 @@ fn sp(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-const SYSTEM_PROMPT: &str = "Answer only from the numbered passages. First copy the exact sentences you rely on, then write the answer from those quotes alone. Every answer sentence points to at least one quote. If the passages don't answer the question, set answerable to false and leave both lists empty. Write formulas in LaTeX.";
+const SYSTEM_PROMPT: &str = "Answer only from the numbered passages. First copy up to four short, exact sentences you rely on. Then answer the question in plain, natural sentences built only from those quotes, and list the quotes each sentence uses. Write formulas in LaTeX between $ or $$. If the passages don't answer the question, set answerable to false and leave both lists empty.";
 
 fn answer_format_schema() -> Value {
     json!({
@@ -27,7 +27,7 @@ fn answer_format_schema() -> Value {
             "answerable": { "type": "boolean" },
             "quotes": {
                 "type": "array",
-                "maxItems": 8,
+                "maxItems": 4,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -182,7 +182,12 @@ fn build_generation_messages(
     let mut passage_block = String::new();
     for c in citations {
         let idx = if c.index == 0 { 1 } else { c.index };
-        passage_block.push_str(&format!("[{idx}] {}\n{}\n\n", c.title, c.snippet));
+        let body = if c.text.is_empty() {
+            c.snippet.as_str()
+        } else {
+            c.text.as_str()
+        };
+        passage_block.push_str(&format!("[{idx}] {}\n{body}\n\n", c.title));
     }
     let user_content = format!("Question: {query}\n\nPassages:\n{passage_block}");
     messages.push(json!({ "role": "user", "content": user_content }));
@@ -673,7 +678,12 @@ async fn finish_grounded_answer(
         .iter()
         .map(|c| {
             let idx = if c.index == 0 { 1 } else { c.index };
-            json!({ "index": idx, "text": c.snippet })
+            let body = if c.text.is_empty() {
+                c.snippet.as_str()
+            } else {
+                c.text.as_str()
+            };
+            json!({ "index": idx, "text": body })
         })
         .collect();
 

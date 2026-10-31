@@ -208,6 +208,7 @@ export type AnswerSentence = {
   text: string;
   status: string; // supported | unsupported | unchecked
   sources: number[];
+  reason?: string | null;
 };
 
 export type ModelsStatus = {

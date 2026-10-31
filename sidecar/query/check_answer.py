@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 from common.model_store import hhem_scores_bounded
 
 _HHEM_MIN = 0.5
 _ASCII_LETTER_RATIO = 0.6
+_PASSAGE_CAP = 2000
+_QUOTE_SKIPS = 2
+_WORD_RE = re.compile(r"[^\W_]+")
 
 _LIGATURES = str.maketrans(
     {
@@ -51,6 +55,45 @@ def normalize_evidence_text(text: str) -> str:
     s = _HYPHEN_BREAK_RE.sub(r"\1\2", s)
     s = _WS_RE.sub(" ", s).strip()
     return s
+
+
+def evidence_words(text: str) -> list[str]:
+    s = unicodedata.normalize("NFKD", normalize_evidence_text(text))
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    return _WORD_RE.findall(s.lower())
+
+
+def quote_in_passage(quote: str, passage: str) -> bool:
+    q = evidence_words(quote)
+    p = evidence_words(passage)
+    if not q:
+        return False
+    for start, word in enumerate(p):
+        if word != q[0]:
+            continue
+        j, skips, matched = start + 1, 0, True
+        for w in q[1:]:
+            while j < len(p) and p[j] != w and skips < _QUOTE_SKIPS:
+                j += 1
+                skips += 1
+            if j < len(p) and p[j] == w:
+                j += 1
+            else:
+                matched = False
+                break
+        if matched:
+            return True
+    return False
+
+
+def looks_like_formula(text: str) -> bool:
+    if "$" in text or "\\" in text:
+        return True
+    words = evidence_words(text)
+    if not words:
+        return True
+    plain = sum(1 for w in words if len(w) >= 3 and w.isalpha())
+    return plain * 2 < len(words)
 
 
 def _ascii_letter_ratio(text: str) -> float:
@@ -101,7 +144,7 @@ def _claim_supported(claim: str, haystacks: list[str]) -> bool:
 def check_answer(app_data: str, passages: list[dict], draft: dict) -> dict:
     answerable = bool(draft.get("answerable"))
     answer = draft.get("answer") or []
-    if not answerable or not answer:
+    if not answer:
         return {"notFound": True, "sentences": []}
 
     by_idx = _passage_by_index(passages)
@@ -118,15 +161,16 @@ def check_answer(app_data: str, passages: list[dict], draft: dict) -> dict:
         if passage is None:
             valid_quotes.append(None)
             continue
-        norm_q = normalize_evidence_text(qtext).lower()
-        norm_p = normalize_evidence_text(passage).lower()
-        if not norm_q or norm_q not in norm_p:
-            valid_quotes.append(None)
+        if quote_in_passage(qtext, passage):
+            valid_quotes.append({"source": source, "text": qtext})
             continue
-        valid_quotes.append({"source": source, "text": qtext})
+        if looks_like_formula(qtext):
+            valid_quotes.append({"source": source, "text": qtext, "formula": True})
+            continue
+        valid_quotes.append(None)
 
     sentences_out: list[dict[str, Any]] = []
-    any_supported = False
+    any_ok = False
     hhem_jobs: list[tuple[int, str, str]] = []
 
     for sent in answer:
@@ -145,37 +189,59 @@ def check_answer(app_data: str, passages: list[dict], draft: dict) -> dict:
         passage_texts = [by_idx[s] for s in sources if s in by_idx]
         haystacks = quote_texts + passage_texts
 
+        formula_sentence = looks_like_formula(text)
+        formula_only = bool(kept) and all(bool(q.get("formula")) for q in kept)
+        if formula_sentence or formula_only:
+            sentences_out.append(
+                {
+                    "text": text,
+                    "status": "unchecked",
+                    "sources": sources,
+                    "reason": "formula",
+                }
+            )
+            any_ok = True
+            continue
+
         ok_quotes = len(kept) >= 1
         claims = _claims_in_sentence(text)
         ok_claims = all(_claim_supported(c, haystacks) for c in claims)
         status = "unsupported"
+        reason: str | None = None
         if ok_quotes and ok_claims:
-            joined = " ".join(quote_texts)
-            if _mostly_english(joined, text):
-                hhem_jobs.append((len(sentences_out), joined, text))
+            premise = " ".join(t[:_PASSAGE_CAP] for t in passage_texts)
+            if _mostly_english(premise, text):
+                hhem_jobs.append((len(sentences_out), premise, text))
                 status = "pending"
             else:
-                status = "supported"
-                any_supported = True
-        sentences_out.append({"text": text, "status": status, "sources": sources})
+                status = "unchecked"
+                reason = "language"
+                any_ok = True
+        row: dict[str, Any] = {"text": text, "status": status, "sources": sources}
+        if reason:
+            row["reason"] = reason
+        sentences_out.append(row)
 
     if hhem_jobs:
         scores = hhem_scores_bounded(app_data, [(j, s) for _i, j, s in hhem_jobs])
         for (idx, _j, _s), score in zip(hhem_jobs, scores):
             if score is None:
                 sentences_out[idx]["status"] = "unchecked"
+                sentences_out[idx]["reason"] = "budget"
+                any_ok = True
             elif float(score) >= _HHEM_MIN:
                 sentences_out[idx]["status"] = "supported"
-                any_supported = True
+                any_ok = True
             else:
                 sentences_out[idx]["status"] = "unsupported"
 
     for s in sentences_out:
         if s["status"] == "pending":
             s["status"] = "unchecked"
+            s["reason"] = "budget"
+            any_ok = True
 
-    # Unchecked sentences still count as covering the question for notFound.
-    if any(s["status"] == "unchecked" for s in sentences_out):
-        any_supported = True
+    if not answerable:
+        return {"notFound": True, "sentences": sentences_out}
 
-    return {"notFound": not any_supported, "sentences": sentences_out}
+    return {"notFound": not any_ok, "sentences": sentences_out}

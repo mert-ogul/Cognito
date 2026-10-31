@@ -29,12 +29,8 @@ _KEYWORD_K = 30
 _RRF_K = 60
 _RERANK_POOL = 20
 _KEEP = 5
-# MiniLM sigmoid retune via `npm run eval -- --mock-models` on vault.sqlite (2026-10-29):
-# mock MiniLM yes-probs are sigmoid(2.0 - i*0.15); top score ≈ 0.8808 for every query.
-# expect_file rows answered (notFound=false + title/file hit): GCN hit@1=1 at thr≤0.88;
-# example.pdf never hits in this vault. At thr=0.89 GCN becomes notFound.
-# Eval averages at 0.88: hit@1=0.500 (n=2), hit@5=0.500, notFound accuracy=0.000 (n=1 Mars).
-NOT_FOUND_SCORE = 0.88
+# Below this reranker probability no passage is worth sending to the answer model. The answer model and the checker decide everything above it.
+NOT_FOUND_SCORE = 0.1
 _HISTORY_TURN_CAP = 2000
 _HISTORY_TOTAL_CAP = 4000
 _CITE_MARK_RE = re.compile(r"\[\d+\]")
@@ -181,7 +177,8 @@ def _chunk_row_dict(r: tuple[Any, ...], chunk_id: str) -> dict[str, Any]:
     role = str(r[6]) if len(r) > 6 and r[6] else "body"
     labels = _parse_labels(r[7] if len(r) > 7 else None)
     regions = _parse_regions(r[8] if len(r) > 8 else None)
-    return {
+    ordinal = r[9] if len(r) > 9 else None
+    out: dict[str, Any] = {
         "chunk_id": chunk_id,
         "document_id": did,
         "text": text,
@@ -193,6 +190,9 @@ def _chunk_row_dict(r: tuple[Any, ...], chunk_id: str) -> dict[str, Any]:
         "labels": labels,
         "regions": regions,
     }
+    if ordinal is not None:
+        out["ordinal"] = int(ordinal)
+    return out
 
 
 def _doc_id_clause(
@@ -251,7 +251,7 @@ def vector_top_k(
         r = con.execute(
             """
             SELECT c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
-                   c.role, c.labels, c.regions
+                   c.role, c.labels, c.regions, c.ordinal
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE c.id = ? AND d.status = 'indexed'
@@ -289,7 +289,7 @@ def keyword_top_k(
         rows = con.execute(
             f"""
             SELECT c.id, c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
-                   c.role, c.labels, c.regions
+                   c.role, c.labels, c.regions, c.ordinal
             FROM chunks_fts
             JOIN chunks c ON c.rowid = chunks_fts.rowid
             JOIN documents d ON d.id = c.document_id
@@ -306,7 +306,7 @@ def keyword_top_k(
     finally:
         con.close()
     out: list[dict[str, Any]] = []
-    for chunk_id, did, body, ps, pe, title, dpath, role, labels, regions in rows:
+    for chunk_id, did, body, ps, pe, title, dpath, role, labels, regions, ordinal in rows:
         out.append(
             {
                 "chunk_id": chunk_id,
@@ -319,6 +319,7 @@ def keyword_top_k(
                 "role": role or "body",
                 "labels": _parse_labels(labels),
                 "regions": _parse_regions(regions),
+                "ordinal": int(ordinal) if ordinal is not None else 0,
             }
         )
     return out
@@ -668,7 +669,7 @@ def label_chunks_for_documents(
         rows = con.execute(
             f"""
             SELECT c.id, c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
-                   c.role, c.labels, c.regions
+                   c.role, c.labels, c.regions, c.ordinal
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE c.document_id IN ({ph})
@@ -685,7 +686,7 @@ def label_chunks_for_documents(
     finally:
         con.close()
     out: list[dict[str, Any]] = []
-    for chunk_id, did, body, ps, pe, title, dpath, role, lab_raw, regions in rows:
+    for chunk_id, did, body, ps, pe, title, dpath, role, lab_raw, regions, ordinal in rows:
         chunk = {
             "chunk_id": chunk_id,
             "document_id": did,
@@ -697,6 +698,7 @@ def label_chunks_for_documents(
             "role": role or "body",
             "labels": _parse_labels(lab_raw),
             "regions": _parse_regions(regions),
+            "ordinal": int(ordinal) if ordinal is not None else 0,
         }
         if _chunk_has_label(chunk, labels):
             out.append(chunk)
@@ -787,18 +789,27 @@ def _card_people(raw: Any) -> list[Any]:
 
 
 def _citation_from_chunk(c: dict[str, Any], index: int) -> dict[str, Any]:
-    return {
-        "documentId": c["document_id"],
-        "title": c["title"],
-        "path": c["path"],
-        "pageStart": c["page_start"],
-        "pageEnd": c["page_end"],
-        "chunkId": c["chunk_id"],
-        "snippet": (c["text"] or "")[:1200],
-        "nodeIds": [],
+    body = str(c.get("text") or c.get("snippet") or "")
+    out: dict[str, Any] = {
+        "documentId": c.get("document_id") or c.get("documentId"),
+        "title": c.get("title") or "",
+        "path": c.get("path") or "",
+        "pageStart": c.get("page_start", c.get("pageStart")),
+        "pageEnd": c.get("page_end", c.get("pageEnd")),
+        "chunkId": c.get("chunk_id") or c.get("chunkId"),
+        "snippet": body[:1200],
+        "text": body,
+        "nodeIds": c.get("nodeIds") or c.get("node_ids") or [],
         "index": index,
         "regions": c.get("regions"),
     }
+    labels = c.get("labels")
+    if labels is not None:
+        out["labels"] = labels
+    ordinal = c.get("ordinal")
+    if ordinal is not None:
+        out["ordinal"] = int(ordinal)
+    return out
 
 
 def _empty_result(
@@ -914,9 +925,15 @@ def _retrieve_pool(
         sqlite_path, search_text, _KEYWORD_K, document_ids=scope_filter
     )
     label_extra: list[dict[str, Any]] = []
-    if inject_label_from_profiles and labels and not scope_filter:
-        doc_ids = [str(m["documentId"]) for m in profile_matches[:3]]
-        label_extra = label_chunks_for_documents(sqlite_path, doc_ids, labels)
+    if labels:
+        if scope_filter:
+            doc_ids = [str(x) for x in scope_filter]
+        elif inject_label_from_profiles:
+            doc_ids = [str(m["documentId"]) for m in profile_matches[:3]]
+        else:
+            doc_ids = []
+        if doc_ids:
+            label_extra = label_chunks_for_documents(sqlite_path, doc_ids, labels)
     ranked_lists: list[list[dict[str, Any]]] = [vector_chunks, keyword_chunks]
     if entity_chunks:
         ranked_lists.append(entity_chunks)
@@ -976,7 +993,7 @@ def _chunks_by_ids(
             r = con.execute(
                 """
                 SELECT c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
-                       c.role, c.labels, c.regions
+                       c.role, c.labels, c.regions, c.ordinal
                 FROM chunks c
                 JOIN documents d ON d.id = c.document_id
                 WHERE c.id = ? AND d.status = 'indexed'
@@ -990,6 +1007,137 @@ def _chunks_by_ids(
         return []
     finally:
         con.close()
+
+
+def _chunk_id_of(c: dict[str, Any]) -> str:
+    return str(c.get("chunkId") or c.get("chunk_id") or "")
+
+
+def _document_id_of(c: dict[str, Any]) -> str:
+    return str(c.get("documentId") or c.get("document_id") or "")
+
+
+def _labels_of(c: dict[str, Any]) -> list[str]:
+    raw = c.get("labels")
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    return _parse_labels(raw)
+
+
+def _ordinal_of(c: dict[str, Any], sqlite_path: str | None) -> int | None:
+    raw = c.get("ordinal")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    cid = _chunk_id_of(c)
+    if not cid or not sqlite_path:
+        return None
+    try:
+        con = sqlite3.connect(sqlite_path)
+    except Exception:
+        return None
+    try:
+        row = con.execute(
+            "SELECT ordinal FROM chunks WHERE id = ?", (cid,)
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+    except Exception:
+        return None
+    finally:
+        con.close()
+
+
+def _chunk_after_ordinal(
+    sqlite_path: str, document_id: str, ordinal: int
+) -> dict[str, Any] | None:
+    try:
+        con = sqlite3.connect(sqlite_path)
+    except Exception:
+        return None
+    try:
+        row = con.execute(
+            """
+            SELECT c.id, c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
+                   c.role, c.labels, c.regions, c.ordinal
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.document_id = ? AND c.ordinal = ? AND d.status = 'indexed'
+            """,
+            (document_id, ordinal + 1),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "chunk_id": row[0],
+            "document_id": row[1],
+            "text": row[2],
+            "page_start": row[3],
+            "page_end": row[4],
+            "title": row[5],
+            "path": row[6],
+            "role": row[7] or "body",
+            "labels": _parse_labels(row[8]),
+            "regions": _parse_regions(row[9]),
+            "ordinal": int(row[10]) if row[10] is not None else ordinal + 1,
+        }
+    except Exception:
+        return None
+    finally:
+        con.close()
+
+
+def _pin_label_chunks(
+    ranked: list[tuple[dict[str, Any], float]],
+    labels: list[str],
+    *,
+    sqlite_path: str | None,
+    matched_doc_ids: set[str],
+) -> tuple[list[tuple[dict[str, Any], float]], bool]:
+    """Move up to two labelled chunks (+ next ordinal) to the front after rerank."""
+    if not labels or not ranked:
+        return ranked, False
+
+    hits: list[tuple[dict[str, Any], float]] = []
+    for c, score in ranked:
+        if _chunk_has_label({"labels": _labels_of(c)}, labels):
+            hits.append((c, score))
+            if len(hits) >= 2:
+                break
+    if not hits:
+        return ranked, False
+
+    pinned: list[tuple[dict[str, Any], float]] = []
+    used: set[str] = set()
+    covers = False
+    for c, score in hits:
+        cid = _chunk_id_of(c)
+        if not cid or cid in used:
+            continue
+        pinned.append((c, score))
+        used.add(cid)
+        did = _document_id_of(c)
+        if did and did in matched_doc_ids:
+            covers = True
+        if not sqlite_path or not did:
+            continue
+        ordinal = _ordinal_of(c, sqlite_path)
+        if ordinal is None:
+            continue
+        nxt = _chunk_after_ordinal(sqlite_path, did, ordinal)
+        if not nxt:
+            continue
+        nid = _chunk_id_of(nxt)
+        if not nid or nid in used:
+            continue
+        pinned.append((_citation_from_chunk(nxt, 0), score))
+        used.add(nid)
+
+    rest = [(c, s) for c, s in ranked if _chunk_id_of(c) not in used]
+    return pinned + rest, covers
 
 
 def match_entity_mention_chunks(
@@ -1351,7 +1499,9 @@ def rerank_chat_candidates(
     out_scope_chosen = False
     out_scope_reason = scope_reason or ""
     suggestions: list[dict[str, Any]] = []
-    label_list = list(labels or [])
+    label_list = list(labels or []) or question_label_mentions(
+        normalised_question or search_text
+    )
 
     if (
         best_score < NOT_FOUND_SCORE
@@ -1369,7 +1519,7 @@ def rerank_chat_candidates(
                     search_text,
                     _VECTOR_K,
                     [did],
-                    label_list or question_label_mentions(search_text),
+                    label_list,
                     matches,
                     inject_label_from_profiles=False,
                 )
@@ -1398,12 +1548,25 @@ def rerank_chat_candidates(
         else:
             suggestions = _suggestions_from_profiles(matches)
 
+    matched_doc_ids = {
+        str(m["documentId"]) for m in matches if m.get("documentId")
+    }
+    matched_doc_ids.update(str(x) for x in out_scope_ids if x)
+    ranked, label_covers = _pin_label_chunks(
+        ranked,
+        label_list,
+        sqlite_path=sqlite_path,
+        matched_doc_ids=matched_doc_ids,
+    )
+
+    found = best_score >= NOT_FOUND_SCORE or label_covers
+
     trace = _build_trace(
         normalised_question=normalised_question or search_text,
         profile_matches=matches,
         scope_ids=out_scope_ids,
         scope_reason=out_scope_reason
-        or ("not_found" if best_score < NOT_FOUND_SCORE else "rerank"),
+        or ("not_found" if not found else "rerank"),
         vector_n=int(counts.get("vector") or 0),
         keyword_n=int(counts.get("keyword") or 0),
         label_n=int(counts.get("label") or 0),
@@ -1427,6 +1590,8 @@ def rerank_chat_candidates(
         if c.get("chunkId") is not None and "snippet" in c:
             item = dict(c)
             item["index"] = index
+            if not item.get("text"):
+                item["text"] = item.get("snippet") or ""
             return item
         return _citation_from_chunk(
             {
@@ -1436,13 +1601,15 @@ def rerank_chat_candidates(
                 "page_start": c.get("pageStart") or c.get("page_start"),
                 "page_end": c.get("pageEnd") or c.get("page_end"),
                 "chunk_id": c.get("chunkId") or c.get("chunk_id"),
-                "text": c.get("snippet") or c.get("text") or "",
+                "text": c.get("text") or c.get("snippet") or "",
                 "regions": c.get("regions"),
+                "labels": c.get("labels"),
+                "ordinal": c.get("ordinal"),
             },
             index,
         )
 
-    if best_score < NOT_FOUND_SCORE:
+    if not found:
         cites = [_cite_row(c, i + 1) for i, (c, _s) in enumerate(ranked[:3])]
         return {
             "citations": cites,

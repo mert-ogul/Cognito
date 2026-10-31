@@ -15,7 +15,12 @@ from query.chat_pipeline import (
     rebuild_document_profile,
     resolve_scope,
 )
-from query.check_answer import check_answer, normalize_evidence_text
+from query.check_answer import (
+    check_answer,
+    looks_like_formula,
+    normalize_evidence_text,
+    quote_in_passage,
+)
 
 _DOCUMENTS_FTS_DDL = """
 CREATE TABLE documents (
@@ -183,30 +188,52 @@ def test_author_lines_from_front_stops_at_abstract() -> None:
     assert not any("Abstract" in ln or "scalable" in ln for ln in lines)
 
 
-def test_quote_validation_hyphen_spacing_and_rejects_invented() -> None:
-    passages = [
-        {
-            "index": 1,
-            "text": "We use the renorm-\nalization trick for training.",
-        }
-    ]
-    draft_ok = {
-        "answerable": True,
-        "quotes": [{"source": 1, "text": "renormalization trick"}],
-        "answer": [{"sentence": "They use the renormalization trick.", "quotes": [0]}],
-    }
-    out_ok = check_answer("/tmp", passages, draft_ok)
-    assert out_ok["notFound"] is False
-    assert out_ok["sentences"][0]["status"] == "supported"
+def test_quote_in_passage_exact_and_line_break() -> None:
+    passage = "We use the renorm-\nalization trick for training."
+    assert quote_in_passage("renormalization trick", passage) is True
+    assert quote_in_passage("We use the renormalization trick", passage) is True
 
-    draft_bad = {
+
+def test_quote_in_passage_one_stray_token() -> None:
+    passage = "The model reaches 81.5 percent accuracy on Cora."
+    assert quote_in_passage("The model reaches 81.5 accuracy on Cora", passage) is True
+
+
+def test_quote_in_passage_rejects_invented_added_not_swapped_dropped() -> None:
+    passage = "The model reaches 81.5 percent accuracy on Cora."
+    assert quote_in_passage("invented phrase nowhere present", passage) is False
+    assert quote_in_passage("The model does not reach 81.5 percent accuracy on Cora", passage) is False
+    assert quote_in_passage("The model reaches accuracy percent 81.5 on Cora", passage) is False
+    assert quote_in_passage("The model on Cora", passage) is False
+
+
+def test_looks_like_formula() -> None:
+    assert looks_like_formula(r"$H^{(l+1)}=\sigma(\tilde{A}H^{(l)}W^{(l)})$") is True
+    assert looks_like_formula(r"\tilde{A}=D^{-1/2}AD^{-1/2}") is True
+    assert looks_like_formula("The model is trained on Cora.") is False
+
+
+def test_check_answer_keeps_formula_quote() -> None:
+    passages = [{"index": 1, "text": "Layer update uses the renormalized adjacency."}]
+    draft = {
         "answerable": True,
-        "quotes": [{"source": 1, "text": "invented phrase nowhere present"}],
-        "answer": [{"sentence": "Something invented.", "quotes": [0]}],
+        "quotes": [
+            {
+                "source": 1,
+                "text": r"$H^{(l+1)}=\sigma(\tilde{A}H^{(l)}W^{(l)})$",
+            }
+        ],
+        "answer": [
+            {
+                "sentence": r"$$H^{(l+1)}=\sigma(\tilde{A}H^{(l)}W^{(l)})$$",
+                "quotes": [0],
+            }
+        ],
     }
-    out_bad = check_answer("/tmp", passages, draft_bad)
-    assert out_bad["notFound"] is True
-    assert out_bad["sentences"][0]["status"] == "unsupported"
+    out = check_answer("/tmp", passages, draft)
+    assert out["notFound"] is False
+    assert out["sentences"][0]["status"] == "unchecked"
+    assert out["sentences"][0]["reason"] == "formula"
 
 
 def test_name_number_check_catches_year_mismatch() -> None:
@@ -254,7 +281,7 @@ def test_low_best_score_returns_not_found(monkeypatch: pytest.MonkeyPatch) -> No
         cp,
         "rerank_with_budget",
         lambda app_data, query, documents: {
-            "scores": [0.1] * len(documents),
+            "scores": [0.05] * len(documents),
             "scored": len(documents),
             "budgetHit": False,
             "rerankMs": 1,
@@ -274,10 +301,11 @@ def test_low_best_score_returns_not_found(monkeypatch: pytest.MonkeyPatch) -> No
         "nomic-embed-text",
     )
     assert out["notFound"] is True
-    assert out["bestScore"] < 0.30
+    assert out["bestScore"] < 0.10
     assert len(out["citations"]) == 3
     assert [c["index"] for c in out["citations"]] == [1, 2, 3]
     assert "trace" in out
+    assert "text" in out["citations"][0]
 
 
 def test_second_pass_answers_from_scoped_document(
@@ -322,7 +350,7 @@ def test_second_pass_answers_from_scoped_document(
 
     scores_by_text = {
         gcn_chunks[0]["text"]: 0.95,
-        gat_chunks[0]["text"]: 0.2,
+        gat_chunks[0]["text"]: 0.05,
     }
 
     def fake_rerank(app_data, query, documents):
@@ -401,7 +429,7 @@ def test_suggestions_when_both_passes_fail(monkeypatch: pytest.MonkeyPatch) -> N
         cp,
         "rerank_with_budget",
         lambda app_data, query, documents: {
-            "scores": [0.1] * len(documents),
+            "scores": [0.05] * len(documents),
             "scored": len(documents),
             "budgetHit": False,
             "rerankMs": 1,
