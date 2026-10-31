@@ -12,6 +12,8 @@ pub enum CognitoError {
     Sidecar(String),
     #[error("vault: {0}")]
     Vault(String),
+    #[error("interrupted by chat")]
+    InterruptedByChat,
 }
 
 pub type CognitoResult<T> = Result<T, CognitoError>;

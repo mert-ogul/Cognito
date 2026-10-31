@@ -122,7 +122,7 @@ fn default_true() -> bool {
 }
 
 fn default_background_model() -> String {
-    "qwen3.5:4b".to_string()
+    "qwen3.5:9b".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,6 +215,8 @@ pub struct ChatStageEvent {
     pub citations: Option<Vec<CitationItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draft: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

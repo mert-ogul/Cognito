@@ -49,7 +49,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
       vaultPath: "/vault",
       chatModel: "qwen3.5:9b",
       embedModel: "qwen3-embedding:0.6b",
-      backgroundModel: "qwen3.5:4b",
+      backgroundModel: "qwen3.5:9b",
       summariseDocuments: false,
       extractEntities: false,
       extraEntityLabels: "",

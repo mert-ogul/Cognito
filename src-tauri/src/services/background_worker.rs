@@ -40,16 +40,19 @@ pub(crate) fn emit_progress(
     );
 }
 
-fn background_model(state: &SharedState) -> String {
+fn background_and_chat_models(state: &SharedState) -> (String, String) {
     state
         .with_sqlite(|c| sqlite::load_settings(c))
-        .map(|s| s.background_model)
-        .unwrap_or_else(|_| "qwen3.5:4b".into())
+        .map(|s| (s.background_model, s.chat_model))
+        .unwrap_or_else(|_| ("qwen3.5:9b".into(), "qwen3.5:9b".into()))
 }
 
 fn unload_background(state: &SharedState) {
-    let model = background_model(state);
-    ollama_stream::unload_model_blocking(&model);
+    let (background, chat) = background_and_chat_models(state);
+    if background == chat {
+        return;
+    }
+    ollama_stream::unload_model_blocking(&background);
 }
 
 enum WaitKind {
@@ -106,6 +109,16 @@ enum DocOutcome {
     Finished,
     Pause,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessPendingOutcome {
+    pub finished: usize,
+    pub paused: bool,
+}
+
+/// Test hook: increments on each `process_pending` entry.
+pub static PROCESS_PENDING_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 fn process_one_entities(
     state: &SharedState,
@@ -247,6 +260,15 @@ fn process_one_card(
             }
             Ok(DocOutcome::Finished)
         }
+        Err(crate::errors::CognitoError::InterruptedByChat) => {
+            state.with_sqlite(|c| sqlite::mark_document_card_pending(c, document_id))?;
+            emit_progress(app, None, document_id, "pending", None);
+            if let Some(a) = app {
+                let _ = a.emit(LIBRARY_CHANGED, &());
+            }
+            let _ = wait_while_chat_in_flight(state, document_id, WaitKind::Card)?;
+            Ok(DocOutcome::Finished)
+        }
         Err(e) => {
             let msg = e.to_string();
             if ollama_stream::ollama_unreachable(&e) {
@@ -278,8 +300,9 @@ fn recompute_links(state: &SharedState) {
 }
 
 /// Processes pending entities, then cards, then recomputes links when idle.
-pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> usize {
-    let mut n = 0usize;
+pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> ProcessPendingOutcome {
+    PROCESS_PENDING_CALLS.fetch_add(1, Ordering::SeqCst);
+    let mut finished = 0usize;
     let mut pause = false;
 
     loop {
@@ -300,7 +323,6 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> usize {
         match process_one_entities(state, app, &doc_id) {
             Ok(DocOutcome::Finished) => {}
             Ok(DocOutcome::Pause) => {
-                n += 1;
                 pause = true;
                 break;
             }
@@ -313,7 +335,6 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> usize {
                     if let Some(a) = app {
                         let _ = a.emit(LIBRARY_CHANGED, &());
                     }
-                    n += 1;
                     pause = true;
                     break;
                 }
@@ -324,7 +345,7 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> usize {
                 }
             }
         }
-        n += 1;
+        finished += 1;
     }
 
     let entity_queue_empty = state
@@ -357,7 +378,6 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> usize {
             match process_one_card(state, app, &doc_id) {
                 Ok(DocOutcome::Finished) => {}
                 Ok(DocOutcome::Pause) => {
-                    n += 1;
                     pause = true;
                     break;
                 }
@@ -370,7 +390,7 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> usize {
                     }
                 }
             }
-            n += 1;
+            finished += 1;
         }
     }
 
@@ -383,7 +403,7 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> usize {
         }
         unload_background(state);
     }
-    n
+    ProcessPendingOutcome { finished, paused: pause }
 }
 
 pub fn spawn(state: SharedState, app: AppHandle) {
@@ -400,11 +420,20 @@ pub fn spawn(state: SharedState, app: AppHandle) {
     thread::spawn(move || worker_loop(state, app, rx));
 }
 
+fn drain_pending(state: &SharedState, app: Option<&AppHandle>) {
+    loop {
+        let outcome = process_pending(state, app);
+        if outcome.paused || outcome.finished == 0 {
+            break;
+        }
+    }
+}
+
 fn worker_loop(state: SharedState, app: AppHandle, rx: Receiver<()>) {
     loop {
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {
-                while process_pending(&state, Some(&app)) > 0 {}
+                drain_pending(&state, Some(&app));
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -461,7 +490,7 @@ mod tests {
                     "[]",
                     "[]",
                     "[]",
-                    "qwen3.5:4b",
+                    "qwen3.5:9b",
                 )?;
                 let n: i64 = c
                     .query_row(
@@ -534,8 +563,9 @@ mod tests {
             })
             .expect("seed");
 
-        let n = process_pending(&state, None);
-        assert_eq!(n, 1);
+        let outcome = process_pending(&state, None);
+        assert_eq!(outcome.finished, 1);
+        assert!(!outcome.paused);
         let (status, err): (String, Option<String>) = state
             .with_sqlite(|c| {
                 c.query_row(
@@ -567,6 +597,8 @@ mod tests {
             .with_sqlite(|c| {
                 sqlite::upsert_setting(c, "summarise_documents", "true")?;
                 sqlite::upsert_setting(c, "extract_entities", "false")?;
+                sqlite::upsert_setting(c, "chat_model", "qwen3.5:9b")?;
+                sqlite::upsert_setting(c, "background_model", "qwen3.5:4b")?;
                 sqlite::insert_document_row(
                     c,
                     "doc-unload",
@@ -600,5 +632,114 @@ mod tests {
         let ok = handle.join().expect("join").expect("wait");
         assert!(ok);
         std::env::remove_var("COGNITO_MOCK_LLM");
+    }
+
+    #[test]
+    fn unload_background_noop_when_models_match() {
+        let _env = ENV_LOCK.lock().expect("env lock");
+        std::env::set_var("COGNITO_MOCK_LLM", "1");
+        ollama_stream::UNLOAD_CALLS.store(0, AtomicOrdering::SeqCst);
+        let data = tempfile::tempdir().expect("data tempdir");
+        let pool = SidecarPool::new(
+            PathBuf::from("/nonexistent/cognito-sidecar/main.py"),
+            PathBuf::from("/nonexistent/cognito-sidecar"),
+            data.path().join("sidecar.log"),
+            data.path().to_path_buf(),
+        );
+        let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
+        state
+            .with_sqlite(|c| {
+                sqlite::upsert_setting(c, "chat_model", "qwen3.5:9b")?;
+                sqlite::upsert_setting(c, "background_model", "qwen3.5:9b")?;
+                Ok(())
+            })
+            .expect("settings");
+        let before = ollama_stream::UNLOAD_CALLS.load(AtomicOrdering::SeqCst);
+        unload_background(&state);
+        assert_eq!(
+            ollama_stream::UNLOAD_CALLS.load(AtomicOrdering::SeqCst),
+            before
+        );
+        std::env::remove_var("COGNITO_MOCK_LLM");
+    }
+
+    #[test]
+    fn worker_loop_does_not_spin_when_ollama_unreachable() {
+        let _env = ENV_LOCK.lock().expect("env lock");
+        std::env::remove_var("COGNITO_MOCK_LLM");
+        std::env::set_var("OLLAMA_HOST", "127.0.0.1:9");
+        PROCESS_PENDING_CALLS.store(0, AtomicOrdering::SeqCst);
+        let data = tempfile::tempdir().expect("data tempdir");
+        let pool = SidecarPool::new(
+            PathBuf::from("/nonexistent/cognito-sidecar/main.py"),
+            PathBuf::from("/nonexistent/cognito-sidecar"),
+            data.path().join("sidecar.log"),
+            data.path().to_path_buf(),
+        );
+        let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
+        state
+            .with_sqlite(|c| {
+                sqlite::upsert_setting(c, "extract_entities", "false")?;
+                sqlite::upsert_setting(c, "summarise_documents", "true")?;
+                sqlite::insert_document_row(
+                    c,
+                    "doc-pause",
+                    "/tmp/p.md",
+                    "P",
+                    "markdown",
+                    "hash",
+                    None,
+                    "indexed",
+                    None,
+                    None,
+                )?;
+                sqlite::insert_chunk_row(
+                    c,
+                    "c-pause",
+                    "doc-pause",
+                    0,
+                    None,
+                    None,
+                    "Some body text for the card.",
+                    5,
+                    "h",
+                    "body",
+                    "[]",
+                    None,
+                )?;
+                c.execute(
+                    "UPDATE documents SET card_status = 'pending' WHERE id = 'doc-pause'",
+                    [],
+                )
+                .map_err(|e| CognitoError::Database(e.to_string()))?;
+                Ok(())
+            })
+            .expect("seed");
+
+        let (tx, rx) = mpsc::channel::<()>();
+        let state_w = state.clone();
+        let handle = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match rx.recv_timeout(remaining.min(Duration::from_millis(200))) {
+                    Ok(()) | Err(RecvTimeoutError::Timeout) => {
+                        drain_pending(&state_w, None);
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        });
+        let _ = tx.send(());
+        handle.join().expect("worker");
+        std::env::remove_var("OLLAMA_HOST");
+        let calls = PROCESS_PENDING_CALLS.load(AtomicOrdering::SeqCst);
+        assert!(
+            calls > 0 && calls < 30,
+            "expected a few process_pending calls over 2s, got {calls}"
+        );
     }
 }

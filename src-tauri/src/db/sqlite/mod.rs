@@ -19,6 +19,7 @@ const MIGRATION_010: &str = include_str!("../../../migrations/010_document_cards
 const MIGRATION_011: &str = include_str!("../../../migrations/011_entities_connections.sql");
 const MIGRATION_012: &str = include_str!("../../../migrations/012_chunk_regions.sql");
 const MIGRATION_013: &str = include_str!("../../../migrations/013_documents_fts.sql");
+const MIGRATION_014: &str = include_str!("../../../migrations/014_background_model_default.sql");
 
 /// Bump when embedding text format or retrieval index layout changes.
 pub const INDEX_FORMAT_VERSION: i32 = 5;
@@ -176,6 +177,17 @@ fn migrate(conn: &Connection) -> CognitoResult<()> {
             "INSERT INTO schema_migrations(version, applied_at) VALUES (13, datetime('now'))",
             [],
         );
+        v = 13;
+    }
+    if v < 14 {
+        conn.execute_batch(MIGRATION_014)
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        conn.execute("PRAGMA user_version = 14", [])
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        let _ = conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (14, datetime('now'))",
+            [],
+        );
     }
     Ok(())
 }
@@ -228,7 +240,7 @@ pub fn load_settings(conn: &Connection) -> CognitoResult<SettingsPayload> {
     let embed =
         get_setting(conn, "embed_model")?.unwrap_or_else(|| "qwen3-embedding:0.6b".to_string());
     let background =
-        get_setting(conn, "background_model")?.unwrap_or_else(|| "qwen3.5:4b".to_string());
+        get_setting(conn, "background_model")?.unwrap_or_else(|| chat.clone());
     let summarise =
         get_setting(conn, "summarise_documents")?.unwrap_or_else(|| "true".to_string());
     let extract =
@@ -1609,7 +1621,7 @@ mod tests {
             let v: i32 = c
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .expect("uv");
-            assert_eq!(v, 13);
+            assert_eq!(v, 14);
             assert_eq!(INDEX_FORMAT_VERSION, 5);
             let has_profile: i32 = c
                 .query_row(

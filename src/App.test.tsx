@@ -39,7 +39,7 @@ vi.mock("@tauri-apps/api/core", () => ({
         vaultPath: null,
         chatModel: "qwen3.5:9b",
         embedModel: "qwen3-embedding:0.6b",
-        backgroundModel: "qwen3.5:4b",
+        backgroundModel: "qwen3.5:9b",
         summariseDocuments: true,
         extractEntities: false,
       extraEntityLabels: "",

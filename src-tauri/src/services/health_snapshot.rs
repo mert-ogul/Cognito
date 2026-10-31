@@ -29,40 +29,42 @@ pub(crate) fn missing_configured_models(
         .collect()
 }
 
-async fn probe_ollama(chat_model: &str, embed_model: &str) -> (bool, Vec<String>) {
+fn configured_models_for_health(
+    chat_model: &str,
+    embed_model: &str,
+    background_model: &str,
+) -> Vec<String> {
+    let mut models = vec![chat_model.to_string(), embed_model.to_string()];
+    if background_model != chat_model {
+        models.push(background_model.to_string());
+    }
+    models
+}
+
+async fn probe_ollama(
+    chat_model: &str,
+    embed_model: &str,
+    background_model: &str,
+) -> (bool, Vec<String>) {
+    let configured = configured_models_for_health(chat_model, embed_model, background_model);
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
     {
         Ok(c) => c,
         Err(_) => {
-            return (
-                false,
-                missing_configured_models(
-                    &[chat_model.to_string(), embed_model.to_string()],
-                    &[],
-                ),
-            );
+            return (false, missing_configured_models(&configured, &[]));
         }
     };
     let url = format!("{}/api/tags", ollama_base_url().trim_end_matches('/'));
     let Ok(res) = client.get(&url).send().await else {
-        return (
-            false,
-            missing_configured_models(&[chat_model.to_string(), embed_model.to_string()], &[]),
-        );
+        return (false, missing_configured_models(&configured, &[]));
     };
     if !res.status().is_success() {
-        return (
-            false,
-            missing_configured_models(&[chat_model.to_string(), embed_model.to_string()], &[]),
-        );
+        return (false, missing_configured_models(&configured, &[]));
     }
     let Ok(body) = res.json::<Value>().await else {
-        return (
-            false,
-            missing_configured_models(&[chat_model.to_string(), embed_model.to_string()], &[]),
-        );
+        return (false, missing_configured_models(&configured, &[]));
     };
     let available: Vec<String> = body
         .get("models")
@@ -73,10 +75,7 @@ async fn probe_ollama(chat_model: &str, embed_model: &str) -> (bool, Vec<String>
                 .collect()
         })
         .unwrap_or_default();
-    let missing = missing_configured_models(
-        &[chat_model.to_string(), embed_model.to_string()],
-        &available,
-    );
+    let missing = missing_configured_models(&configured, &available);
     (true, missing)
 }
 
@@ -128,8 +127,12 @@ pub async fn read_app_health(
         checking_models_ready,
     ) = sync;
 
-    let (ollama_reachable, missing_models) =
-        probe_ollama(&settings.chat_model, &settings.embed_model).await;
+    let (ollama_reachable, missing_models) = probe_ollama(
+        &settings.chat_model,
+        &settings.embed_model,
+        &settings.background_model,
+    )
+    .await;
     let ollama_model_ready = ollama_reachable && missing_models.is_empty();
 
     Ok(AppHealth {

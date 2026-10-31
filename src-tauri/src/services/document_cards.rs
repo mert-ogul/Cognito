@@ -6,6 +6,7 @@ use crate::errors::{CognitoError, CognitoResult};
 use crate::services::ollama_stream;
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 const HEAD_WORDS: usize = 2500;
 const TAIL_WORDS: usize = 300;
@@ -442,15 +443,26 @@ pub fn build_and_store_card(state: &SharedState, document_id: &str) -> CognitoRe
             "\nPassages:\n{}",
             format_passages_for_prompt(&passages)
         ));
-        let content = tauri::async_runtime::block_on(ollama_stream::chat_completion_json(
-            &model,
-            vec![
-                json!({ "role": "system", "content": SYSTEM_PROMPT }),
-                json!({ "role": "user", "content": user }),
-            ],
-            card_response_schema(),
-        ))
-        .map_err(CognitoError::Sidecar)?;
+        let messages = vec![
+            json!({ "role": "system", "content": SYSTEM_PROMPT }),
+            json!({ "role": "user", "content": user }),
+        ];
+        let schema = card_response_schema();
+        let state_for_interrupt = state.clone();
+        let content = tauri::async_runtime::block_on(async {
+            ollama_stream::chat_completion_json_interruptible(
+                &model,
+                messages,
+                schema,
+                || state_for_interrupt.chat_in_flight.load(Ordering::SeqCst) > 0,
+            )
+            .await
+        });
+        let content = match content {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(CognitoError::Sidecar(e)),
+            Err(()) => return Err(CognitoError::InterruptedByChat),
+        };
         serde_json::from_str(&content)
             .map_err(|e| CognitoError::Sidecar(format!("card JSON: {e}")))?
     };

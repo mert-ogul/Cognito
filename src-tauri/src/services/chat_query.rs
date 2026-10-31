@@ -144,6 +144,7 @@ fn emit_stage(
     stage: &str,
     citations: Option<Vec<CitationItem>>,
     detail: Option<String>,
+    draft: Vec<String>,
 ) {
     let _ = app.emit(
         CHAT_STAGE,
@@ -152,8 +153,23 @@ fn emit_stage(
             stage: stage.to_string(),
             citations,
             detail,
+            draft,
         },
     );
+}
+
+async fn sidecar_request(
+    state: &SharedState,
+    method: &str,
+    params: Value,
+) -> CognitoResult<Value> {
+    let state = state.clone();
+    let method = method.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.sidecar.with_session(|s| s.request(&method, params))
+    })
+    .await
+    .map_err(|e| crate::errors::CognitoError::Sidecar(e.to_string()))?
 }
 
 fn emit_final(app: &AppHandle, result: &ChatFinalResult) {
@@ -215,20 +231,21 @@ pub async fn run_chat_query(
     let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
     let hist_for_retrieval = reduce_history(&history, 2);
 
-    let prep = match state.sidecar.with_session(|s| {
-        s.request(
-            "prepare_chat_retrieval",
-            json!({
-                "sqlite_path": sp(&sqlite_path),
-                "query": query,
-                "embed_model": settings.embed_model,
-                "history": hist_for_retrieval,
-                "scope_ids": scope_ids,
-                "app_data": app_data,
-                "skip_rerank": true,
-            }),
-        )
-    }) {
+    let prep = match sidecar_request(
+        &state,
+        "prepare_chat_retrieval",
+        json!({
+            "sqlite_path": sp(&sqlite_path),
+            "query": query,
+            "embed_model": settings.embed_model,
+            "history": hist_for_retrieval,
+            "scope_ids": scope_ids,
+            "app_data": app_data,
+            "skip_rerank": true,
+        }),
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             emit_final(
@@ -272,7 +289,7 @@ pub async fn run_chat_query(
         .take(5)
         .filter_map(|v| serde_json::from_value(v.clone()).ok())
         .collect();
-    emit_stage(&app, &message_id, "passages", Some(preview), None);
+    emit_stage(&app, &message_id, "passages", Some(preview), None, vec![]);
 
     let mut scope_chosen = prep
         .get("scopeChosen")
@@ -326,6 +343,7 @@ pub async fn run_chat_query(
         "ranking",
         None,
         Some("Ranking passages".into()),
+        vec![],
     );
 
     let search_text = prep
@@ -344,25 +362,26 @@ pub async fn run_chat_query(
             "trace": prep_trace.clone().unwrap_or(json!({})),
         })
     } else {
-        match state.sidecar.with_session(|s| {
-            s.request(
-                "rerank_chat_candidates",
-                json!({
-                    "app_data": app_data,
-                    "query": search_text,
-                    "candidates": candidates,
-                    "sqlite_path": sp(&sqlite_path),
-                    "embed_model": settings.embed_model,
-                    "profile_matches": profile_matches,
-                    "explicit_scope": explicit_scope,
-                    "labels": labels,
-                    "normalised_question": normalised_question,
-                    "scope_ids": result_scope_ids,
-                    "scope_reason": scope_reason,
-                    "candidate_counts": candidate_counts,
-                }),
-            )
-        }) {
+        match sidecar_request(
+            &state,
+            "rerank_chat_candidates",
+            json!({
+                "app_data": app_data,
+                "query": search_text,
+                "candidates": candidates,
+                "sqlite_path": sp(&sqlite_path),
+                "embed_model": settings.embed_model,
+                "profile_matches": profile_matches,
+                "explicit_scope": explicit_scope,
+                "labels": labels,
+                "normalised_question": normalised_question,
+                "scope_ids": result_scope_ids,
+                "scope_reason": scope_reason,
+                "candidate_counts": candidate_counts,
+            }),
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 emit_final(
@@ -486,18 +505,19 @@ pub async fn run_related_query(
     let (name_a, name_b) = state.with_sqlite(|c| sqlite::entity_names(c, &entity_id_a, &entity_id_b))?;
     let query = format!("How are {name_a} and {name_b} related?");
 
-    let prep = match state.sidecar.with_session(|s| {
-        s.request(
-            "prepare_related_retrieval",
-            json!({
-                "sqlite_path": sp(&sqlite_path),
-                "entity_id_a": entity_id_a,
-                "entity_id_b": entity_id_b,
-                "embed_model": settings.embed_model,
-                "app_data": app_data,
-            }),
-        )
-    }) {
+    let prep = match sidecar_request(
+        &state,
+        "prepare_related_retrieval",
+        json!({
+            "sqlite_path": sp(&sqlite_path),
+            "entity_id_a": entity_id_a,
+            "entity_id_b": entity_id_b,
+            "embed_model": settings.embed_model,
+            "app_data": app_data,
+        }),
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             emit_final(
@@ -521,13 +541,21 @@ pub async fn run_related_query(
     };
 
     let citations = parse_citations(&prep);
-    emit_stage(&app, &message_id, "passages", Some(citations.clone()), None);
+    emit_stage(
+        &app,
+        &message_id,
+        "passages",
+        Some(citations.clone()),
+        None,
+        vec![],
+    );
     emit_stage(
         &app,
         &message_id,
         "ranking",
         None,
         Some("Ranking passages".into()),
+        vec![],
     );
     let empty = citations.is_empty();
     finish_grounded_answer(
@@ -576,6 +604,7 @@ async fn finish_grounded_answer(
         "passages",
         Some(citations.clone()),
         None,
+        vec![],
     );
 
     if early_not_found {
@@ -602,14 +631,31 @@ async fn finish_grounded_answer(
         return Ok(());
     }
 
-    emit_stage(&app, &message_id, "writing", None, None);
+    emit_stage(
+        &app,
+        &message_id,
+        "writing",
+        None,
+        Some("Quoting the sources".into()),
+        vec![],
+    );
 
     let messages = build_generation_messages(&query, &history, &citations);
     let gen_started = Instant::now();
-    let raw = match ollama_stream::chat_completion_json(
+    let app_write = app.clone();
+    let mid_write = message_id.clone();
+    let mut emitted_draft_len = 0usize;
+    let raw = match ollama_stream::chat_completion_json_streaming(
         chat_model,
         messages,
         answer_format_schema(),
+        |acc| {
+            let draft_now = ollama_stream::draft_sentences_from_partial(acc);
+            if draft_now.len() > emitted_draft_len {
+                emitted_draft_len = draft_now.len();
+                emit_stage(&app_write, &mid_write, "writing", None, None, draft_now);
+            }
+        },
     )
     .await
     {
@@ -666,12 +712,14 @@ async fn finish_grounded_answer(
     };
 
     let n_sentences = draft.answer.len();
+    let writing_draft: Vec<String> = draft.answer.iter().map(|a| a.sentence.clone()).collect();
     emit_stage(
         &app,
         &message_id,
         "checking",
         None,
         Some(format!("Checking {n_sentences} sentences")),
+        writing_draft,
     );
 
     let passages: Vec<Value> = citations
@@ -688,16 +736,17 @@ async fn finish_grounded_answer(
         .collect();
 
     let check_started = Instant::now();
-    let check = match state.sidecar.with_session(|s| {
-        s.request(
-            "check_answer",
-            json!({
-                "app_data": app_data,
-                "passages": passages,
-                "draft": draft,
-            }),
-        )
-    }) {
+    let check = match sidecar_request(
+        &state,
+        "check_answer",
+        json!({
+            "app_data": app_data,
+            "passages": passages,
+            "draft": draft,
+        }),
+    )
+    .await
+    {
         Ok(v) => v,
         Err(e) => {
             emit_final(

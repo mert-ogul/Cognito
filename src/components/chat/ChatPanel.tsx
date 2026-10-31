@@ -36,6 +36,7 @@ type ChatMessage = {
   text: string;
   citations?: CitationItem[];
   sentences?: AnswerSentence[];
+  draft?: string[];
   notFound?: boolean;
   scopeTitle?: string | null;
   suggestions?: ScopeSearchSuggestion[];
@@ -105,7 +106,8 @@ export function ChatPanel({ health }: Props) {
   const lastSentRef = useRef<string | null>(null);
   const lastSentScopeRef = useRef<ScopeDoc[]>([]);
   const warmRetryErrorRef = useRef<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
 
@@ -120,10 +122,20 @@ export function ChatPanel({ health }: Props) {
     !!health?.checkingModelsReady;
 
   useEffect(() => {
-    const el = bottomRef.current;
-    if (el && typeof el.scrollIntoView === "function") {
-      el.scrollIntoView({ block: "end" });
-    }
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      stickToBottomRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight <= 80;
+    };
+    el.addEventListener("scroll", onScroll);
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !stickToBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
   }, [messages, busyId]);
 
   useLayoutEffect(() => {
@@ -252,6 +264,7 @@ export function ChatPanel({ health }: Props) {
     stage: string;
     citations?: CitationItem[] | null;
     detail?: string | null;
+    draft?: string[];
   }>("chat-stage", (ev) => {
     const p = ev.payload;
     const stage = p.stage as ChatMessage["stage"];
@@ -271,6 +284,7 @@ export function ChatPanel({ health }: Props) {
               stage,
               stageDetail: p.detail ?? undefined,
               citations: p.citations ?? m.citations,
+              draft: p.draft && p.draft.length > 0 ? p.draft : m.draft,
             }
           : m,
       ),
@@ -307,6 +321,7 @@ export function ChatPanel({ health }: Props) {
               error: p.error ?? undefined,
               stage: "done",
               stageDetail: undefined,
+              draft: undefined,
               text: sentences.map((s) => s.text).join(" "),
             }
           : m,
@@ -527,7 +542,7 @@ export function ChatPanel({ health }: Props) {
             </Button>
           ) : null}
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
           <div className="space-y-8 pb-8">
             {messages.length === 0 && ready && suggestions.length > 0 ? (
               <div className="space-y-2">
@@ -586,7 +601,6 @@ export function ChatPanel({ health }: Props) {
                 </article>
               );
             })}
-            <div ref={bottomRef} />
           </div>
         </div>
         <div ref={composerRef} className="relative shrink-0 pb-4 pt-2">

@@ -377,7 +377,7 @@ export async function getSettings(): Promise<SettingsPayload> {
       vaultPath: "/fixture",
       chatModel: "qwen3.5:9b",
       embedModel: "qwen3-embedding:0.6b",
-      backgroundModel: "qwen3.5:4b",
+      backgroundModel: "qwen3.5:9b",
       summariseDocuments: true,
       extractEntities: true,
       extraEntityLabels: "",

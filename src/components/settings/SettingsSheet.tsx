@@ -30,7 +30,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
   const { data } = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: open });
   const docs = useQuery({ queryKey: ["documents"], queryFn: listDocuments, enabled: open });
   const [chat, setChat] = useState("qwen3.5:9b");
-  const [background, setBackground] = useState("qwen3.5:4b");
+  const [background, setBackground] = useState("qwen3.5:9b");
   const [embed, setEmbed] = useState("qwen3-embedding:0.6b");
   const [summariseOn, setSummariseOn] = useState(true);
   const [findNamesOn, setFindNamesOn] = useState(true);

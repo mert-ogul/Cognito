@@ -25,6 +25,7 @@ export type AssistantChatMessage = {
   text: string;
   citations?: CitationItem[];
   sentences?: AnswerSentence[];
+  draft?: string[];
   notFound?: boolean;
   scopeTitle?: string | null;
   suggestions?: ScopeSearchSuggestion[];
@@ -362,14 +363,23 @@ export function AssistantMessage({
 }) {
   const citations = message.citations ?? [];
   const stage = message.stage;
-  const ranking =
-    stage === "ranking" ? message.stageDetail || "Ranking passages" : null;
-  const writing =
-    stage === "passages" || stage === "writing"
-      ? message.stageDetail || "Writing the answer"
-      : null;
-  const checking =
-    stage === "checking" ? message.stageDetail || "Checking sentences" : null;
+  const statusLine =
+    stage === "ranking"
+      ? message.stageDetail || "Ranking passages"
+      : stage === "checking"
+        ? message.stageDetail || "Checking sentences"
+        : stage === "writing" || stage === "passages"
+          ? message.stageDetail || "Writing the answer"
+          : null;
+
+  const draftSentences: AnswerSentence[] = (message.draft ?? []).map((text) => ({
+    text,
+    status: "unchecked",
+    sources: [],
+  }));
+  const showDraft =
+    (stage === "writing" || stage === "checking") && draftSentences.length > 0;
+  const showFinal = stage === "done" && (message.sentences?.length ?? 0) > 0;
 
   if (message.notFound) {
     const searchSuggestions = message.suggestions ?? [];
@@ -410,10 +420,10 @@ export function AssistantMessage({
     );
   }
 
-  if (stage === "done" && message.sentences && message.sentences.length > 0) {
+  if (showFinal || showDraft || statusLine || citations.length > 0) {
     return (
       <div className="space-y-3">
-        {message.scopeTitle ? (
+        {message.scopeTitle && showFinal ? (
           <p className="text-muted">
             Answered from {message.scopeTitle}{" "}
             <Button
@@ -426,29 +436,23 @@ export function AssistantMessage({
             </Button>
           </p>
         ) : null}
-        <AnswerParagraph
-          sentences={message.sentences}
-          citations={citations}
-          onCite={onCite}
-        />
-        <SourcesList citations={citations} onCite={onCite} />
-      </div>
-    );
-  }
-
-  if (writing || checking || ranking || citations.length > 0) {
-    return (
-      <div className="space-y-3">
-        {citations.length > 0 &&
-        (stage === "passages" ||
-          stage === "ranking" ||
-          stage === "writing" ||
-          stage === "checking") ? (
-          <SourcesList citations={citations} onCite={onCite} />
+        {showFinal ? (
+          <AnswerParagraph
+            sentences={message.sentences ?? []}
+            citations={citations}
+            onCite={onCite}
+          />
+        ) : showDraft ? (
+          <AnswerParagraph
+            sentences={draftSentences}
+            citations={citations}
+            onCite={onCite}
+            muted
+          />
+        ) : statusLine ? (
+          <p className="text-muted">{statusLine}</p>
         ) : null}
-        {ranking ? <p className="text-muted">{ranking}</p> : null}
-        {writing ? <p className="text-muted">{writing}</p> : null}
-        {checking ? <p className="text-muted">{checking}</p> : null}
+        {citations.length > 0 ? <SourcesList citations={citations} onCite={onCite} /> : null}
       </div>
     );
   }

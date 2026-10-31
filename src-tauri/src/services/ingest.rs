@@ -667,7 +667,10 @@ mod tests {
             .expect("assert first import rows");
 
         let processed = background_worker::process_pending(&state, None);
-        assert!(processed >= 1, "expected process_pending to handle note.md");
+        assert!(
+            processed.finished >= 1,
+            "expected process_pending to handle note.md"
+        );
         state
             .with_sqlite(|conn| {
                 let entities_status: String = conn
