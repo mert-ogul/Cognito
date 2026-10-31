@@ -33,9 +33,9 @@ test.describe("E2E mock build", () => {
     await input.fill("What is in the library?");
     await input.press("Enter");
     await expect(page.getByText(/Hello world/)).toBeVisible({ timeout: 15_000 });
-    const cite = page.getByRole("button", { name: "Source 1" });
-    await expect(cite).toBeVisible();
-    await cite.click();
+    const answer = page.locator("article").filter({ hasText: "Hello world" });
+    await answer.getByRole("button", { name: "Sources · 1" }).click();
+    await answer.getByRole("button", { name: /fixture evidence/i }).click();
     await expect(page.getByRole("button", { name: "Passage", pressed: true })).toBeVisible();
   });
 });
