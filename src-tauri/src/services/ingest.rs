@@ -5,13 +5,21 @@ use crate::db::sqlite;
 use crate::errors::{CognitoError, CognitoResult};
 use crate::events::IMPORT_PROGRESS;
 use crate::models::ImportProgress;
+use crate::services::chat_gate::{self, IMPORT_CHAT_WAIT_CAP};
 use crate::services::import_job;
 use crate::vault::{self, IMPORT_BATCH};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::AppHandle;
 use tauri::Emitter;
 use uuid::Uuid;
+
+/// Chunks per `embed_chunks` sidecar request so chat can interleave.
+pub const EMBED_RPC_BATCH: usize = 32;
+
+/// Test hook: increments once per `embed_chunks` RPC.
+pub static EMBED_RPC_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 fn emit_job(
     app: Option<&AppHandle>,
@@ -133,6 +141,7 @@ fn embed_items_rpc(
     document_id: &str,
     items: Vec<Value>,
 ) -> CognitoResult<Value> {
+    EMBED_RPC_CALLS.fetch_add(1, Ordering::SeqCst);
     state.sidecar.with_session(|s| {
         s.request(
             "embed_chunks",
@@ -145,6 +154,70 @@ fn embed_items_rpc(
             }),
         )
     })
+}
+
+fn pause_if_chat(
+    state: &SharedState,
+    app: Option<&AppHandle>,
+    job_id: &str,
+    total: u32,
+    done: u32,
+    failed: u32,
+) {
+    if !chat_gate::chat_in_flight(state) {
+        return;
+    }
+    emit_job(
+        app,
+        job_id,
+        "running",
+        total,
+        done,
+        failed,
+        "paused_for_chat",
+        None,
+        None,
+    );
+    let _ = chat_gate::wait_until_chat_idle(state, IMPORT_CHAT_WAIT_CAP);
+}
+
+fn embed_document_in_batches(
+    state: &SharedState,
+    app: Option<&AppHandle>,
+    job_id: Option<&str>,
+    total: u32,
+    done: u32,
+    failed: u32,
+    sqlite_path: &Path,
+    embed: &str,
+    chat: &str,
+    document_id: &str,
+    embed_payload: Vec<Value>,
+) -> CognitoResult<bool> {
+    for batch in embed_payload.chunks(EMBED_RPC_BATCH) {
+        if let Some(jid) = job_id {
+            pause_if_chat(state, app, jid, total, done, failed);
+        } else {
+            let _ = chat_gate::wait_until_chat_idle(state, IMPORT_CHAT_WAIT_CAP);
+        }
+        let emb = embed_items_rpc(
+            state,
+            sqlite_path,
+            embed,
+            chat,
+            document_id,
+            batch.to_vec(),
+        )?;
+        let batch_failed = emb
+            .get("failed")
+            .and_then(|x| x.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        if batch_failed {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn file_type_label(path: &Path) -> String {
@@ -193,6 +266,11 @@ fn process_one_parsed(
     embed: &str,
     chat: &str,
     parsed: &Value,
+    app: Option<&AppHandle>,
+    job_id: Option<&str>,
+    total: u32,
+    done: u32,
+    failed: u32,
 ) -> CognitoResult<bool> {
     let path = parsed
         .get("path")
@@ -240,7 +318,7 @@ fn process_one_parsed(
         let scan_status = parsed
             .get("scanStatus")
             .and_then(|x| x.as_str())
-            .filter(|s| *s == "ocr" || *s == "no_text");
+            .filter(|s| *s == "ocr" || *s == "no_text" || *s == "partial_text");
         sqlite::insert_document_row(
             conn,
             &doc_id,
@@ -321,13 +399,20 @@ fn process_one_parsed(
         state.with_sqlite(|conn| sqlite::mark_document_indexed(conn, &doc_id))?;
         return Ok(true);
     }
-    let emb = embed_items_rpc(state, sqlite_path, embed, chat, &doc_id, embed_payload)?;
-    let failed = emb
-        .get("failed")
-        .and_then(|x| x.as_array())
-        .map(|a| !a.is_empty())
-        .unwrap_or(false);
-    if failed {
+    let ok = embed_document_in_batches(
+        state,
+        app,
+        job_id,
+        total,
+        done,
+        failed,
+        sqlite_path,
+        embed,
+        chat,
+        &doc_id,
+        embed_payload,
+    )?;
+    if !ok {
         state.with_sqlite(|conn| {
             sqlite::mark_document_failed(conn, &doc_id, "embedding failed for one or more chunks")
         })?;
@@ -368,6 +453,7 @@ pub fn run_import_job(
     let mut done = 0u32;
     let mut failed = 0u32;
     for batch in paths.chunks(IMPORT_BATCH) {
+        pause_if_chat(&state, app.as_ref(), &job_id, total, done, failed);
         emit_job(
             app.as_ref(),
             &job_id,
@@ -391,6 +477,7 @@ pub fn run_import_job(
             .cloned()
             .unwrap_or_default();
         for p in &items {
+            pause_if_chat(&state, app.as_ref(), &job_id, total, done, failed);
             let path_hint = p.get("path").and_then(|x| x.as_str());
             emit_job(
                 app.as_ref(),
@@ -403,7 +490,18 @@ pub fn run_import_job(
                 path_hint,
                 None,
             );
-            let r = process_one_parsed(&state, &sqlite_path, &embed_model, &chat_model, p);
+            let r = process_one_parsed(
+                &state,
+                &sqlite_path,
+                &embed_model,
+                &chat_model,
+                p,
+                app.as_ref(),
+                Some(&job_id),
+                total,
+                done,
+                failed,
+            );
             match r {
                 Ok(true) => done += 1,
                 Ok(false) => failed += 1,
@@ -495,7 +593,19 @@ pub fn run_single_file(
         .cloned()
         .unwrap_or_default();
     if let Some(p) = items.first() {
-        process_one_parsed(state, &sqlite_path, embed_model, chat_model, p)?;
+        pause_if_chat(state, app, &job_id, 1, 0, 0);
+        process_one_parsed(
+            state,
+            &sqlite_path,
+            embed_model,
+            chat_model,
+            p,
+            app,
+            Some(&job_id),
+            1,
+            0,
+            0,
+        )?;
     }
     emit_job(
         app,
@@ -909,5 +1019,87 @@ mod tests {
                 Ok(())
             })
             .expect("empty after forget");
+    }
+
+    #[test]
+    fn embed_rpc_batch_is_32_and_100_chunks_need_four_requests() {
+        assert_eq!(EMBED_RPC_BATCH, 32);
+        let n = 100usize;
+        let batches = n.div_ceil(EMBED_RPC_BATCH);
+        assert_eq!(batches, 4);
+    }
+
+    #[test]
+    #[ignore = "needs the sidecar venv: cd sidecar && uv sync"]
+    fn embed_batches_100_chunks_into_four_rpc_calls() {
+        std::env::set_var("COGNITO_MOCK_EMBED", "1");
+
+        let data = tempfile::tempdir().expect("data");
+        let sidecar_cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sidecar");
+        let main_py = sidecar_cwd.join("main.py");
+        let log_path = data.path().join("logs").join("sidecar.log");
+        std::fs::create_dir_all(log_path.parent().unwrap()).expect("logs");
+        let pool = SidecarPool::new(main_py, sidecar_cwd, log_path, data.path().to_path_buf());
+        let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
+        state.sidecar.ensure().expect("sidecar");
+
+        let payload: Vec<Value> = (0..100)
+            .map(|i| {
+                json!({
+                    "chunkId": format!("c{i}"),
+                    "text": format!("chunk body {i}"),
+                    "ordinal": i,
+                    "title": "Doc",
+                })
+            })
+            .collect();
+
+        EMBED_RPC_CALLS.store(0, Ordering::SeqCst);
+        let ok = embed_document_in_batches(
+            &state,
+            None,
+            None,
+            0,
+            0,
+            0,
+            &state.sqlite_path(),
+            "nomic-embed-text",
+            "phi4-mini",
+            "doc-1",
+            payload,
+        )
+        .expect("embed batches");
+        assert!(ok);
+        assert_eq!(EMBED_RPC_CALLS.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn import_waits_while_chat_in_flight_then_continues() {
+        let data = tempfile::tempdir().expect("data");
+        let sidecar_cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sidecar");
+        let main_py = sidecar_cwd.join("main.py");
+        let log_path = data.path().join("logs").join("sidecar.log");
+        std::fs::create_dir_all(log_path.parent().unwrap()).expect("logs");
+        let pool = SidecarPool::new(
+            main_py,
+            sidecar_cwd,
+            log_path,
+            data.path().to_path_buf(),
+        );
+        let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
+
+        state.chat_in_flight.fetch_add(1, Ordering::SeqCst);
+        let st = state.clone();
+        let waiter = std::thread::spawn(move || {
+            chat_gate::wait_until_chat_idle(&st, Duration::from_secs(5))
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !waiter.is_finished(),
+            "waiter should block while chat_in_flight > 0"
+        );
+        state.chat_in_flight.fetch_sub(1, Ordering::SeqCst);
+        let cleared = waiter.join().expect("join");
+        assert!(cleared);
     }
 }

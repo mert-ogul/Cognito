@@ -41,6 +41,9 @@ export function describeStatus(
     importProgress.status !== "failed" &&
     importProgress.phase !== "done"
   ) {
+    if (importProgress.phase === "paused_for_chat") {
+      return { text: "Indexing paused while answering", tone: "muted" };
+    }
     return {
       text: `Indexing ${importProgress.completedFiles} of ${importProgress.totalFiles}`,
       tone: "muted",

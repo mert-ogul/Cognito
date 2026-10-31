@@ -42,11 +42,11 @@ pub async fn send_chat_query(
     }
     require_conversation(state.inner(), &conversation_id)?;
     let user_id = Uuid::new_v4().to_string();
-    state
-        .with_sqlite(|c| {
-            sqlite::conversations::append_turn(c, &conversation_id, &user_id, &query, &message_id)
-        })
-        .map_err(|e| e.to_string())?;
+    if let Err(e) = state.with_sqlite(|c| {
+        sqlite::conversations::append_turn(c, &conversation_id, &user_id, &query, &message_id)
+    }) {
+        eprintln!("chat user save failed for {message_id}: {e}");
+    }
     let st = state.inner().clone();
     st.chat_in_flight.fetch_add(1, Ordering::SeqCst);
     let app_c = app.clone();
@@ -98,11 +98,11 @@ pub async fn send_related_query(
         .map_err(|e| e.to_string())?;
     let query = format!("How are {name_a} and {name_b} related?");
     let user_id = Uuid::new_v4().to_string();
-    state
-        .with_sqlite(|c| {
-            sqlite::conversations::append_turn(c, &conversation_id, &user_id, &query, &message_id)
-        })
-        .map_err(|e| e.to_string())?;
+    if let Err(e) = state.with_sqlite(|c| {
+        sqlite::conversations::append_turn(c, &conversation_id, &user_id, &query, &message_id)
+    }) {
+        eprintln!("chat user save failed for {message_id}: {e}");
+    }
     let st = state.inner().clone();
     st.chat_in_flight.fetch_add(1, Ordering::SeqCst);
     let app_c = app.clone();

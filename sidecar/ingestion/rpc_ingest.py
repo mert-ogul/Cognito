@@ -97,42 +97,45 @@ def rpc_embed_chunks(params: dict[str, Any]) -> dict[str, Any]:
     sqlite_path = require_sqlite_path(params.get("sqlitePath"))
     model = str(params["embedModel"])
     items = params["items"]
-    con = connect_with_vec(sqlite_path)
     failed: list[dict[str, str]] = []
-    try:
-        prepared: list[tuple[str, str]] = []
-        for item in items:
-            cid = str(item["chunkId"])
-            text = str(item["text"])
-            title = str(item.get("title") or "")
-            trail = item.get("headingTrail")
-            trail_s = str(trail) if trail else None
-            embed_input = _embed_document_text(model, title, trail_s, text)[:8000]
-            prepared.append((cid, embed_input))
+    prepared: list[tuple[str, str]] = []
+    for item in items:
+        cid = str(item["chunkId"])
+        text = str(item["text"])
+        title = str(item.get("title") or "")
+        trail = item.get("headingTrail")
+        trail_s = str(trail) if trail else None
+        embed_input = _embed_document_text(model, title, trail_s, text)[:8000]
+        prepared.append((cid, embed_input))
 
-        for start in range(0, len(prepared), _EMBED_BATCH):
-            batch = prepared[start : start + _EMBED_BATCH]
-            cids = [c for c, _ in batch]
-            texts = [t for _, t in batch]
-            try:
-                if mock_embed_enabled():
-                    vecs = [[0.0] * MOCK_EMBED_DIM for _ in texts]
-                else:
-                    vecs = embed_texts(model, texts)
-                for cid, vec in zip(cids, vecs, strict=True):
-                    try:
-                        if table_dimension(con) is None:
-                            ensure_chunk_embedding_table(con, len(vec))
-                        insert_chunk_embedding(con, cid, vec)
-                    except Exception as exc:  # noqa: BLE001
-                        failed.append({"chunkId": cid, "error": str(exc)[:240]})
-            except Exception as exc:  # noqa: BLE001
-                err = str(exc)[:240]
-                for cid in cids:
-                    failed.append({"chunkId": cid, "error": err})
-        con.commit()
-    finally:
-        con.close()
+    # Embed with no write transaction open; insert+commit one batch at a time.
+    for start in range(0, len(prepared), _EMBED_BATCH):
+        batch = prepared[start : start + _EMBED_BATCH]
+        cids = [c for c, _ in batch]
+        texts = [t for _, t in batch]
+        try:
+            if mock_embed_enabled():
+                vecs = [[0.0] * MOCK_EMBED_DIM for _ in texts]
+            else:
+                vecs = embed_texts(model, texts)
+        except Exception as exc:  # noqa: BLE001
+            err = str(exc)[:240]
+            for cid in cids:
+                failed.append({"chunkId": cid, "error": err})
+            continue
+
+        con = connect_with_vec(sqlite_path)
+        try:
+            for cid, vec in zip(cids, vecs, strict=True):
+                try:
+                    if table_dimension(con) is None:
+                        ensure_chunk_embedding_table(con, len(vec))
+                    insert_chunk_embedding(con, cid, vec)
+                except Exception as exc:  # noqa: BLE001
+                    failed.append({"chunkId": cid, "error": str(exc)[:240]})
+            con.commit()
+        finally:
+            con.close()
     return {"ok": True, "failed": failed}
 
 

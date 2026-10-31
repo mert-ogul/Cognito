@@ -5,6 +5,7 @@ use crate::db::sqlite;
 use crate::errors::CognitoResult;
 use crate::events::{BACKGROUND_PROGRESS, LIBRARY_CHANGED};
 use crate::models::BackgroundProgress;
+use crate::services::chat_gate::{self, WaitKind};
 use crate::services::document_cards;
 use crate::services::ollama_stream;
 use crate::vault;
@@ -51,56 +52,6 @@ fn unload_background(state: &SharedState) {
     ollama_stream::unload_model_blocking(&background);
 }
 
-enum WaitKind {
-    Entities,
-    Card,
-}
-
-fn wait_while_chat_in_flight(
-    state: &SharedState,
-    document_id: &str,
-    kind: WaitKind,
-) -> CognitoResult<bool> {
-    let mut unloaded = false;
-    while state.chat_in_flight.load(Ordering::SeqCst) > 0 {
-        if !unloaded {
-            unload_background(state);
-            unloaded = true;
-        }
-        match kind {
-            WaitKind::Card => {
-                let still =
-                    state.with_sqlite(|c| sqlite::document_card_still_running(c, document_id))?;
-                if !still {
-                    return Ok(false);
-                }
-                let enabled = state
-                    .with_sqlite(sqlite::load_settings)?
-                    .summarise_documents;
-                if !enabled {
-                    state.with_sqlite(|c| sqlite::mark_document_card_pending(c, document_id))?;
-                    return Ok(false);
-                }
-            }
-            WaitKind::Entities => {
-                let still = state
-                    .with_sqlite(|c| sqlite::document_entities_still_running(c, document_id))?;
-                if !still {
-                    return Ok(false);
-                }
-                let enabled = state.with_sqlite(sqlite::load_settings)?.extract_entities;
-                if !enabled {
-                    state
-                        .with_sqlite(|c| sqlite::mark_document_entities_pending(c, document_id))?;
-                    return Ok(false);
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-    Ok(true)
-}
-
 enum DocOutcome {
     Finished,
     Pause,
@@ -131,7 +82,7 @@ fn process_one_entities(
         Ok(())
     })?;
     emit_progress(app, None, document_id, "entities", None);
-    if !wait_while_chat_in_flight(state, document_id, WaitKind::Entities)? {
+    if !chat_gate::wait_while_chat_in_flight(state, document_id, WaitKind::Entities)? {
         return Ok(DocOutcome::Finished);
     }
     let sqlite_path = state.sqlite_path();
@@ -145,7 +96,7 @@ fn process_one_entities(
         .collect();
     let mut chunk_offset = 0i64;
     loop {
-        if !wait_while_chat_in_flight(state, document_id, WaitKind::Entities)? {
+        if !chat_gate::wait_while_chat_in_flight(state, document_id, WaitKind::Entities)? {
             return Ok(DocOutcome::Finished);
         }
         let res = state.sidecar.with_session(|s| {
@@ -246,7 +197,7 @@ fn process_one_card(
     }
     state.with_sqlite(|c| sqlite::mark_document_card_running(c, document_id))?;
     emit_progress(app, None, document_id, "summarising", None);
-    if !wait_while_chat_in_flight(state, document_id, WaitKind::Card)? {
+    if !chat_gate::wait_while_chat_in_flight(state, document_id, WaitKind::Card)? {
         return Ok(DocOutcome::Finished);
     }
     match document_cards::build_and_store_card(state, document_id) {
@@ -265,7 +216,7 @@ fn process_one_card(
             if let Some(a) = app {
                 let _ = a.emit(LIBRARY_CHANGED, &());
             }
-            let _ = wait_while_chat_in_flight(state, document_id, WaitKind::Card)?;
+            let _ = chat_gate::wait_while_chat_in_flight(state, document_id, WaitKind::Card)?;
             Ok(DocOutcome::Finished)
         }
         Err(e) => {
@@ -619,7 +570,7 @@ mod tests {
         let before = ollama_stream::UNLOAD_CALLS.load(AtomicOrdering::SeqCst);
         let handle = {
             let state = state.clone();
-            thread::spawn(move || wait_while_chat_in_flight(&state, "doc-unload", WaitKind::Card))
+            thread::spawn(move || chat_gate::wait_while_chat_in_flight(&state, "doc-unload", WaitKind::Card))
         };
         thread::sleep(Duration::from_millis(600));
         let mid = ollama_stream::UNLOAD_CALLS.load(AtomicOrdering::SeqCst);

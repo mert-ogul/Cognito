@@ -16,6 +16,7 @@ from common.model_store import rerank_with_budget
 from common.ollama import embed_prefixes, embed_text
 from common.sqlite_vec_util import (
     MOCK_EMBED_DIM,
+    connect_sqlite,
     connect_with_vec,
     mock_embed_enabled,
     table_dimension,
@@ -89,7 +90,7 @@ class EmbeddingDimMismatch(Exception):
 
 def _indexed_chunk_count(sqlite_path: str) -> int:
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
         try:
             row = con.execute("SELECT COUNT(*) FROM chunks").fetchone()
             return int(row[0]) if row else 0
@@ -277,7 +278,7 @@ def keyword_top_k(
     if not fts_q or k <= 0:
         return []
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return []
     params: list[Any] = [fts_q]
@@ -414,7 +415,7 @@ def build_document_profile_text(
 def rebuild_document_profile(sqlite_path: str, document_id: str) -> None:
     """Upsert documents_profile (+ FTS triggers) for one document."""
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return
     try:
@@ -488,7 +489,7 @@ def match_document_profiles(
     if not fts_q:
         return []
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return []
     try:
@@ -657,7 +658,7 @@ def label_chunks_for_documents(
     if not document_ids or not labels:
         return []
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return []
     try:
@@ -972,7 +973,7 @@ def _chunks_by_ids(sqlite_path: str, chunk_ids: list[str]) -> list[dict[str, Any
     if not chunk_ids:
         return []
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return []
     try:
@@ -1027,7 +1028,7 @@ def _ordinal_of(c: dict[str, Any], sqlite_path: str | None) -> int | None:
     if not cid or not sqlite_path:
         return None
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return None
     try:
@@ -1043,7 +1044,7 @@ def _ordinal_of(c: dict[str, Any], sqlite_path: str | None) -> int | None:
 
 def _chunk_after_ordinal(sqlite_path: str, document_id: str, ordinal: int) -> dict[str, Any] | None:
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return None
     try:
@@ -1133,7 +1134,7 @@ def match_entity_mention_chunks(
 ) -> list[str]:
     """Chunk ids for entities named in the question that appear in few documents."""
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return []
     try:
@@ -1633,7 +1634,7 @@ def prepare_related_retrieval(
     a_list: list[str] = []
     b_list: list[str] = []
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return empty
     try:

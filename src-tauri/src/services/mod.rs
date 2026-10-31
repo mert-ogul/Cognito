@@ -1,6 +1,7 @@
 //! Import, chat, health, and background work used by Tauri commands.
 
 pub mod background_worker;
+pub mod chat_gate;
 pub mod chat_query;
 pub mod checking_models;
 pub mod document_cards;

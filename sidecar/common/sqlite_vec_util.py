@@ -14,6 +14,9 @@ MOCK_EMBED_ENV = "COGNITO_MOCK_EMBED"
 # Kept for callers that still import the mock size under the old name.
 VEC_DIM = MOCK_EMBED_DIM
 
+# Seconds; matches Rust SQLITE_BUSY_TIMEOUT_SECS.
+SQLITE_BUSY_TIMEOUT_S = 15.0
+
 
 def require_sqlite_path(path: str | None) -> str:
     """Reject missing paths so sqlite3.connect never creates a file named 'None'."""
@@ -25,9 +28,13 @@ def require_sqlite_path(path: str | None) -> str:
     return path
 
 
-def connect_with_vec(path: str) -> sqlite3.Connection:
+def connect_sqlite(path: str) -> sqlite3.Connection:
     path = require_sqlite_path(path)
-    con = sqlite3.connect(path)
+    return sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_S)
+
+
+def connect_with_vec(path: str) -> sqlite3.Connection:
+    con = connect_sqlite(path)
     con.execute("PRAGMA foreign_keys = ON")
     con.enable_load_extension(True)
     sqlite_vec.load(con)

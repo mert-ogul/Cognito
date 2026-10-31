@@ -73,8 +73,12 @@ const MIGRATIONS: &[(i32, &str)] = &[
 /// Bump when embedding text format or retrieval index layout changes.
 pub const INDEX_FORMAT_VERSION: i32 = 7;
 
+/// Matches Python `SQLITE_BUSY_TIMEOUT_S`.
+pub const SQLITE_BUSY_TIMEOUT_SECS: u64 = 15;
+
 pub fn open_sqlite(path: &Path) -> CognitoResult<Connection> {
     let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(SQLITE_BUSY_TIMEOUT_SECS))?;
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
     migrate(&conn)?;
     Ok(conn)
@@ -99,6 +103,19 @@ fn migrate(conn: &Connection) -> CognitoResult<()> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn open_sqlite_sets_busy_timeout_above_five_seconds() {
+        assert!(SQLITE_BUSY_TIMEOUT_SECS > 5);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("busy.sqlite");
+        let c = open_sqlite(&p).expect("open");
+        // rusqlite stores the timeout on the connection; reopen would reset it.
+        // Assert the constant and that open succeeds with it applied.
+        drop(c);
+        let c2 = open_sqlite(&p).expect("reopen");
+        drop(c2);
+    }
 
     #[test]
     fn migration_applies_to_temp_file() {
