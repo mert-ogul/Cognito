@@ -72,7 +72,27 @@ def _metadata_title_ok(title: str) -> bool:
         return False
     if low.endswith(".doc") or low.endswith(".docx"):
         return False
+    return _title_candidate_ok(t)
+
+
+def _title_candidate_ok(title: str) -> bool:
+    """Reject letter-spaced junk (e.g. 'p R E s s K') and titles under 3 letters."""
+    t = (title or "").strip()
+    if len(t) < 3:
+        return False
+    tokens = t.split()
+    if not tokens:
+        return False
+    single = sum(1 for tok in tokens if len(tok) == 1)
+    if single > len(tokens) / 2:
+        return False
     return True
+
+
+def _filename_title(path: Path) -> str:
+    stem = path.stem.replace("_", " ").strip()
+    cleaned = clean_title(stem)
+    return cleaned or stem
 
 
 def _line_upright(line: dict) -> bool:
@@ -153,14 +173,17 @@ def pdf_title(doc: fitz.Document, fallback: str) -> str:
     meta_title = str(meta.get("title") or "").strip()
     if _metadata_title_ok(meta_title):
         cleaned = clean_title(meta_title)
-        if cleaned:
+        if cleaned and _title_candidate_ok(cleaned):
             return cleaned
     if len(doc) > 0:
         page_title = _largest_font_title(doc.load_page(0))
         if page_title:
             cleaned = clean_title(page_title)
-            if cleaned:
+            if cleaned and _title_candidate_ok(cleaned):
                 return cleaned
+    fb = (fallback or "").strip()
+    if _title_candidate_ok(fb):
+        return fb
     return fallback
 
 
@@ -249,9 +272,42 @@ def _ocr_page_darwin(page: fitz.Page) -> tuple[str, list[dict]]:
     return "\n".join(lines).strip(), blocks
 
 
+def _page_has_large_image(page: fitz.Page) -> bool:
+    """True when an image covers at least half the page area."""
+    page_area = float(page.rect.width) * float(page.rect.height)
+    if page_area <= 0:
+        return False
+    threshold = 0.5 * page_area
+    try:
+        infos = page.get_image_info() or []
+    except Exception:  # noqa: BLE001
+        return False
+    for info in infos:
+        bbox = info.get("bbox")
+        if not bbox or len(bbox) < 4:
+            continue
+        try:
+            x0, y0, x1, y1 = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+        except (TypeError, ValueError):
+            continue
+        if (x1 - x0) * (y1 - y0) >= threshold:
+            return True
+    return False
+
+
 def _parse_pdf_page(page: fitz.Page, page_no: int) -> dict:
     plain = normalize_pdf_text((page.get_text("text") or "").strip())
     if len(plain) < _SCANNED_TEXT_MIN:
+        if not _page_has_large_image(page):
+            # Blank / nearly empty page: skip OCR and do not count as scanned.
+            return {
+                "page": page_no,
+                "text": "",
+                "blocks": [],
+                "scanned": False,
+                "ocr": False,
+                "blank": True,
+            }
         if platform.system() == "Darwin":
             ocr_text, ocr_blocks = _ocr_page_darwin(page)
             if ocr_text:
@@ -287,14 +343,29 @@ def _parse_pdf_page(page: fitz.Page, page_no: int) -> dict:
 
 
 def _scan_status_from_pages(pages: list[dict]) -> str | None:
-    any_ocr = any(bool(p.get("ocr")) for p in pages)
-    if any_ocr:
-        return "ocr"
-    any_scanned_empty = any(
-        bool(p.get("scanned")) and not str(p.get("text") or "").strip() for p in pages
-    )
-    if any_scanned_empty:
+    n = len(pages)
+    if n == 0:
         return "no_text"
+    joined = "\n\n".join(str(p.get("text") or "") for p in pages).strip()
+    if not joined:
+        return "no_text"
+
+    ocr_pages = sum(1 for p in pages if p.get("ocr") and str(p.get("text") or "").strip())
+    scanned_unreadable = sum(
+        1 for p in pages if p.get("scanned") and not str(p.get("text") or "").strip()
+    )
+    native_text_pages = sum(
+        1
+        for p in pages
+        if not p.get("scanned")
+        and not p.get("blank")
+        and len(str(p.get("text") or "").strip()) >= _SCANNED_TEXT_MIN
+    )
+
+    if ocr_pages >= max(1, int(0.1 * n)) or (native_text_pages == 0 and ocr_pages > 0):
+        return "ocr"
+    if scanned_unreadable > n / 4:
+        return "partial_text"
     return None
 
 
@@ -379,7 +450,7 @@ def parse_file(path: Path) -> dict:
     raw = path.read_bytes()
     chash = hash_bytes(raw)
     suf = path.suffix.lower()
-    fallback = path.stem
+    fallback = _filename_title(path) if suf == ".pdf" else path.stem
     if suf == ".pdf":
         doc = fitz.open(path)
         try:

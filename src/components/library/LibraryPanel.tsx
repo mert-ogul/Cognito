@@ -60,6 +60,9 @@ function scanStatusWords(status: string | null | undefined): string | null {
   ) {
     return "No text found";
   }
+  if (s === "partial_text" || s.includes("partial_text")) {
+    return "Some pages have no text";
+  }
   return "Scanned, text recognised";
 }
 
