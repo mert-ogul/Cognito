@@ -107,7 +107,7 @@ pub fn run() {
             commands::rebuild_connections,
             commands::get_entities_index,
             commands::get_entity_detail,
-            commands::get_connections_map,
+            commands::get_related_documents,
             commands::get_connections_timeline,
         ]);
     let app = builder

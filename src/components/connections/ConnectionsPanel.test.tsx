@@ -6,7 +6,6 @@ import {
   ConnectionsPanel,
   filterAndSortEntities,
   groupTimelineByYear,
-  mapPointOpacity,
 } from "./ConnectionsPanel";
 import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useMainViewStore } from "@/stores/mainViewStore";
@@ -71,28 +70,6 @@ describe("ConnectionsPanel helpers", () => {
     expect(search.map((e) => e.id)).toEqual(["e-org"]);
   });
 
-  it("mapPointOpacity fades unrelated documents", () => {
-    const selected = new Set(["doc-a"]);
-    expect(
-      mapPointOpacity(
-        { documentId: "doc-a", title: "A", x: 0, y: 0, topicId: null },
-        selected,
-      ),
-    ).toBe(1);
-    expect(
-      mapPointOpacity(
-        { documentId: "doc-b", title: "B", x: 1, y: 1, topicId: null },
-        selected,
-      ),
-    ).toBe(0.2);
-    expect(
-      mapPointOpacity(
-        { documentId: "doc-b", title: "B", x: 1, y: 1, topicId: null },
-        null,
-      ),
-    ).toBe(1);
-  });
-
   it("groupTimelineByYear groups and sorts", () => {
     const items: TimelineItem[] = [
       { kind: "document", id: "d2", title: "B", date: "2021-05", documentId: "d2" },
@@ -151,24 +128,6 @@ describe("ConnectionsPanel", () => {
           ],
         };
       }
-      if (cmd === "get_connections_map") {
-        return {
-          points: [
-            { documentId: "doc-a", title: "Paper A", x: 0, y: 0, topicId: "t1" },
-            { documentId: "doc-b", title: "Paper B", x: 1, y: 1, topicId: "t1" },
-          ],
-          links: [
-            {
-              sourceId: "doc-a",
-              targetId: "doc-b",
-              kind: "mentions",
-              weight: 1,
-              evidenceChunkId: null,
-            },
-          ],
-          topics: [{ id: "t1", name: "Graphs", documentIds: ["doc-a", "doc-b"] }],
-        };
-      }
       if (cmd === "get_connections_timeline") {
         return {
           items: [
@@ -200,18 +159,6 @@ describe("ConnectionsPanel", () => {
     const related = useChatIntentStore.getState().pendingRelated;
     expect(related?.entityIdA).toBe("e-person");
     expect(related?.entityIdB).toBe("e-org");
-  });
-
-  it("fades unrelated map points when entity selected", async () => {
-    useSidePaneStore.setState({ selectedEntityId: "e-person" });
-    wrap(<ConnectionsPanel />);
-    fireEvent.click(screen.getByRole("button", { name: "Map" }));
-    await waitFor(() => expect(screen.getByLabelText("Connections map")).toBeTruthy());
-    const circles = screen.getByLabelText("Connections map").querySelectorAll("circle");
-    expect(circles.length).toBe(2);
-    const opacities = [...circles].map((c) => c.getAttribute("opacity"));
-    expect(opacities).toContain("1");
-    expect(opacities).toContain("0.2");
   });
 
   it("timeline groups by year", async () => {

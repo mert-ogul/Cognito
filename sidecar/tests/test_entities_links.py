@@ -1,4 +1,4 @@
-"""Entity extraction merges, labels, links, and PCA."""
+"""Entity extraction merges, labels, and document links."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from common.text_norm import normalize_date, normalize_name
 from ingestion.rpc_entities import (
     find_mentions_links,
     merge_within_doc,
-    pca_points,
     rpc_recompute_links,
     similar_links,
 )
@@ -49,17 +48,6 @@ CREATE TABLE IF NOT EXISTS document_links (
   kind TEXT NOT NULL,
   weight REAL NOT NULL,
   evidence_chunk_id TEXT
-);
-CREATE TABLE IF NOT EXISTS topics (
-  id TEXT PRIMARY KEY NOT NULL,
-  name TEXT NOT NULL,
-  document_ids TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS document_points (
-  document_id TEXT PRIMARY KEY NOT NULL,
-  x REAL NOT NULL,
-  y REAL NOT NULL,
-  topic_id TEXT
 );
 """
 
@@ -215,24 +203,6 @@ def test_similar_links_threshold() -> None:
     assert ("c", "a") not in pair_set
 
 
-def test_pca_points_stable_for_fixed_vectors() -> None:
-    vecs = np.array(
-        [
-            [1.0, 0.0, 0.0, 0.5],
-            [0.0, 1.0, 0.0, 0.2],
-            [0.5, 0.5, 0.1, 0.0],
-            [0.2, 0.8, 0.3, 0.1],
-        ],
-        dtype=np.float64,
-    )
-    a = pca_points(vecs)
-    b = pca_points(vecs)
-    assert a.shape == (4, 2)
-    np.testing.assert_allclose(a, b)
-    # Not all zeros for this spread.
-    assert np.linalg.norm(a) > 0
-
-
 def test_recompute_links_mock_writes_rows(mock_models: None) -> None:
     d = tempfile.mkdtemp()
     sqlite_path = str(Path(d) / "v.sqlite")
@@ -305,10 +275,10 @@ def test_recompute_links_mock_writes_rows(mock_models: None) -> None:
         "SELECT source_id, target_id FROM document_links WHERE kind = 'mentions'"
     ).fetchall()
     assert ("d2", "d1") in {(r[0], r[1]) for r in mention_rows}
-    points = con.execute("SELECT document_id, x, y FROM document_points").fetchall()
-    assert len(points) == 2
-    topics = con.execute("SELECT id FROM topics").fetchall()
-    assert len(topics) >= 1
+    similar_rows = con.execute(
+        "SELECT source_id, target_id FROM document_links WHERE kind = 'similar'"
+    ).fetchall()
+    assert len(similar_rows) >= 1
     con.close()
 
 

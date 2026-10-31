@@ -1,13 +1,10 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  getConnectionsMap,
   getConnectionsTimeline,
   getDocumentPreview,
   getEntitiesIndex,
   getEntityDetail,
-  type ConnectionsMap,
-  type ConnectionsMapPoint,
   type EntityDetail,
   type EntityIndexItem,
   type TimelineItem,
@@ -20,7 +17,7 @@ import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
-type Tab = "index" | "map" | "timeline";
+type Tab = "index" | "timeline";
 
 const PRIMARY_FILTERS: { key: string; label: string }[] = [
   { key: "all", label: "All" },
@@ -38,8 +35,6 @@ const LABEL_DISPLAY: Record<string, string> = {
   place: "Places",
   date: "Dates",
 };
-
-const TOPIC_HUES = [200, 25, 145, 45, 330, 175, 85, 15];
 
 export function labelTabName(label: string): string {
   const key = label.trim().toLowerCase();
@@ -65,14 +60,6 @@ export function filterAndSortEntities(
     if (b.docCount !== a.docCount) return b.docCount - a.docCount;
     return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
   });
-}
-
-export function mapPointOpacity(
-  point: ConnectionsMapPoint,
-  selectedDocIds: Set<string> | null,
-): number {
-  if (!selectedDocIds || selectedDocIds.size === 0) return 1;
-  return selectedDocIds.has(point.documentId) ? 1 : 0.2;
 }
 
 export function groupTimelineByYear(
@@ -113,44 +100,6 @@ function pageLabel(pageStart: number | null | undefined, pageEnd: number | null 
   return null;
 }
 
-function topicColor(topicId: string | null | undefined, index: number): string {
-  if (!topicId) return "hsl(200 12% 55%)";
-  const hue = TOPIC_HUES[index % TOPIC_HUES.length] ?? 200;
-  return `hsl(${hue} 28% 48%)`;
-}
-
-function normalizePoints(points: ConnectionsMapPoint[]): {
-  documentId: string;
-  title: string;
-  x: number;
-  y: number;
-  topicId: string | null;
-}[] {
-  if (points.length === 0) return [];
-  let minX = Infinity;
-  let maxX = -Infinity;
-  let minY = Infinity;
-  let maxY = -Infinity;
-  for (const p of points) {
-    minX = Math.min(minX, p.x);
-    maxX = Math.max(maxX, p.x);
-    minY = Math.min(minY, p.y);
-    maxY = Math.max(maxY, p.y);
-  }
-  const dx = maxX - minX || 1;
-  const dy = maxY - minY || 1;
-  const pad = 8;
-  const w = 100 - pad * 2;
-  const h = 100 - pad * 2;
-  return points.map((p) => ({
-    documentId: p.documentId,
-    title: p.title,
-    topicId: p.topicId,
-    x: pad + ((p.x - minX) / dx) * w,
-    y: pad + ((p.y - minY) / dy) * h,
-  }));
-}
-
 export function ConnectionsPanel() {
   const [tab, setTab] = useState<Tab>("index");
   const [labelFilter, setLabelFilter] = useState("all");
@@ -171,11 +120,6 @@ export function ConnectionsPanel() {
     queryKey: ["entity-detail", selectedEntityId],
     queryFn: () => getEntityDetail(selectedEntityId!),
     enabled: !!selectedEntityId,
-  });
-  const mapQ = useQuery({
-    queryKey: ["connections-map"],
-    queryFn: getConnectionsMap,
-    enabled: tab === "map",
   });
   const timelineQ = useQuery({
     queryKey: ["connections-timeline"],
@@ -200,12 +144,6 @@ export function ConnectionsPanel() {
     () => filterAndSortEntities(entities, labelFilter, search),
     [entities, labelFilter, search],
   );
-
-  const selectedDocIds = useMemo(() => {
-    const docs = detailQ.data?.documents;
-    if (!selectedEntityId || !docs) return null;
-    return new Set(docs.map((d) => d.documentId));
-  }, [selectedEntityId, detailQ.data]);
 
   const openEntityPassage = async (
     documentId: string,
@@ -249,7 +187,6 @@ export function ConnectionsPanel() {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 gap-1 border-b border-line px-2 py-1">
         <ModeButton label="Index" active={tab === "index"} onClick={() => setTab("index")} />
-        <ModeButton label="Map" active={tab === "map"} onClick={() => setTab("map")} />
         <ModeButton
           label="Timeline"
           active={tab === "timeline"}
@@ -272,14 +209,6 @@ export function ConnectionsPanel() {
             onOpenPassage={openEntityPassage}
             onAskRelated={askRelated}
             onOpenDocument={setDocument}
-          />
-        ) : null}
-        {tab === "map" ? (
-          <MapView
-            data={mapQ.data ?? null}
-            loading={mapQ.isLoading}
-            selectedDocIds={selectedDocIds}
-            onSelectDocument={setDocument}
           />
         ) : null}
         {tab === "timeline" ? (
@@ -536,134 +465,6 @@ function EntityDetailView({
             ))}
           </ul>
         </div>
-      ) : null}
-    </div>
-  );
-}
-
-function MapView({
-  data,
-  loading,
-  selectedDocIds,
-  onSelectDocument,
-}: {
-  data: ConnectionsMap | null;
-  loading: boolean;
-  selectedDocIds: Set<string> | null;
-  onSelectDocument: (documentId: string) => void;
-}) {
-  const [hoverId, setHoverId] = useState<string | null>(null);
-
-  const points = useMemo(() => normalizePoints(data?.points ?? []), [data]);
-  const byId = useMemo(() => new Map(points.map((p) => [p.documentId, p])), [points]);
-  const topicIndex = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const t of data?.topics ?? []) {
-      if (!m.has(t.id)) m.set(t.id, m.size);
-    }
-    for (const p of points) {
-      if (p.topicId && !m.has(p.topicId)) m.set(p.topicId, m.size);
-    }
-    return m;
-  }, [data, points]);
-
-  const centroids = useMemo(() => {
-    const acc = new Map<string, { sx: number; sy: number; n: number; name: string }>();
-    const names = new Map((data?.topics ?? []).map((t) => [t.id, t.name]));
-    for (const p of points) {
-      if (!p.topicId) continue;
-      const cur = acc.get(p.topicId) ?? {
-        sx: 0,
-        sy: 0,
-        n: 0,
-        name: names.get(p.topicId) ?? "",
-      };
-      cur.sx += p.x;
-      cur.sy += p.y;
-      cur.n += 1;
-      acc.set(p.topicId, cur);
-    }
-    return [...acc.entries()].map(([id, v]) => ({
-      id,
-      name: v.name,
-      x: v.sx / v.n,
-      y: v.sy / v.n,
-    }));
-  }, [points, data]);
-
-  if (loading) {
-    return <p className="p-3 text-muted">Loading map…</p>;
-  }
-  if (!data || points.length === 0) {
-    return <p className="p-3 text-muted">No document map yet.</p>;
-  }
-
-  const links = (data.links ?? []).filter((l) => l.kind === "mentions");
-
-  return (
-    <div className="relative h-full min-h-[220px] p-2">
-      <svg viewBox="0 0 100 100" className="h-full w-full" role="img" aria-label="Connections map">
-        {links.map((l) => {
-          const a = byId.get(l.sourceId);
-          const b = byId.get(l.targetId);
-          if (!a || !b) return null;
-          const fade =
-            selectedDocIds &&
-            selectedDocIds.size > 0 &&
-            (!selectedDocIds.has(a.documentId) || !selectedDocIds.has(b.documentId));
-          return (
-            <line
-              key={`${l.sourceId}-${l.targetId}-${l.evidenceChunkId ?? ""}`}
-              x1={a.x}
-              y1={a.y}
-              x2={b.x}
-              y2={b.y}
-              stroke="currentColor"
-              className="text-line"
-              strokeWidth={0.3}
-              opacity={fade ? 0.15 : 0.55}
-            />
-          );
-        })}
-        {centroids.map((c) =>
-          c.name ? (
-            <text
-              key={`label-${c.id}`}
-              x={c.x}
-              y={c.y - 2.5}
-              textAnchor="middle"
-              className="fill-muted"
-              fontSize={2.4}
-            >
-              {c.name}
-            </text>
-          ) : null,
-        )}
-        {points.map((p) => {
-          const opacity = mapPointOpacity(p, selectedDocIds);
-          const idx = p.topicId ? (topicIndex.get(p.topicId) ?? 0) : 0;
-          return (
-            <circle
-              key={p.documentId}
-              cx={p.x}
-              cy={p.y}
-              r={1.6}
-              fill={topicColor(p.topicId, idx)}
-              opacity={opacity}
-              className="cursor-pointer"
-              onMouseEnter={() => setHoverId(p.documentId)}
-              onMouseLeave={() => setHoverId(null)}
-              onClick={() => onSelectDocument(p.documentId)}
-            >
-              <title>{p.title || p.documentId}</title>
-            </circle>
-          );
-        })}
-      </svg>
-      {hoverId ? (
-        <p className="pointer-events-none absolute bottom-2 left-2 right-2 truncate text-[12px] text-muted">
-          {byId.get(hoverId)?.title || hoverId}
-        </p>
       ) : null}
     </div>
   );

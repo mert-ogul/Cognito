@@ -42,11 +42,12 @@ describe("SourceQuoteOrThumb", () => {
       />,
     );
     await waitFor(() => {
-      expect(renderPageRegion).toHaveBeenCalledWith(
-        "/vault/a.pdf",
-        2,
-        { x0: 10, y0: 20, x1: 100, y1: 80 },
-      );
+      expect(renderPageRegion).toHaveBeenCalledWith("d1", 2, {
+        x0: 10,
+        y0: 20,
+        x1: 100,
+        y1: 80,
+      });
     });
     const img = await screen.findByRole("img", { name: "Source region" });
     expect(img.getAttribute("src")).toContain(TINY_PNG_BASE64);

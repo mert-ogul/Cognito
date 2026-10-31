@@ -20,6 +20,7 @@ const MIGRATION_011: &str = include_str!("../../../migrations/011_entities_conne
 const MIGRATION_012: &str = include_str!("../../../migrations/012_chunk_regions.sql");
 const MIGRATION_013: &str = include_str!("../../../migrations/013_documents_fts.sql");
 const MIGRATION_014: &str = include_str!("../../../migrations/014_background_model_default.sql");
+const MIGRATION_015: &str = include_str!("../../../migrations/015_drop_map_tables.sql");
 
 /// Bump when embedding text format or retrieval index layout changes.
 pub const INDEX_FORMAT_VERSION: i32 = 5;
@@ -186,6 +187,17 @@ fn migrate(conn: &Connection) -> CognitoResult<()> {
             .map_err(|e| CognitoError::Database(e.to_string()))?;
         let _ = conn.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (14, datetime('now'))",
+            [],
+        );
+        v = 14;
+    }
+    if v < 15 {
+        conn.execute_batch(MIGRATION_015)
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        conn.execute("PRAGMA user_version = 15", [])
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
+        let _ = conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (15, datetime('now'))",
             [],
         );
     }
@@ -516,6 +528,21 @@ pub fn document_path_by_id(conn: &Connection, id: &str) -> CognitoResult<Option<
     Ok(row)
 }
 
+pub fn document_path_and_hash_by_id(
+    conn: &Connection,
+    id: &str,
+) -> CognitoResult<Option<(String, String)>> {
+    let row = conn
+        .query_row(
+            "SELECT path, content_hash FROM documents WHERE id = ?1",
+            [id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|e| CognitoError::Database(e.to_string()))?;
+    Ok(row)
+}
+
 pub fn document_scan_status(conn: &Connection, id: &str) -> CognitoResult<Option<String>> {
     let row = conn
         .query_row(
@@ -704,11 +731,6 @@ pub fn clear_document_entity_rows(conn: &Connection, document_id: &str) -> Cogni
     conn.execute("DELETE FROM mentions WHERE document_id = ?1", [document_id])
         .map_err(|e| CognitoError::Database(e.to_string()))?;
     conn.execute(
-        "DELETE FROM document_points WHERE document_id = ?1",
-        [document_id],
-    )
-    .map_err(|e| CognitoError::Database(e.to_string()))?;
-    conn.execute(
         "DELETE FROM document_links WHERE source_id = ?1 OR target_id = ?1",
         [document_id],
     )
@@ -888,91 +910,176 @@ fn mention_snippet(text: &str, start: i64, end: i64) -> String {
     snippet
 }
 
-pub fn list_document_points(conn: &Connection) -> CognitoResult<Vec<Value>> {
-    let mut stmt = conn
+fn related_link_kind_label(kind: &str) -> Option<&'static str> {
+    match kind {
+        "mentions" => Some("mentions this document"),
+        "similar" => Some("similar content"),
+        _ => None,
+    }
+}
+
+fn entity_label_rank(label: &str) -> i32 {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "person" => 0,
+        "organization" => 1,
+        _ => 2,
+    }
+}
+
+/// Up to 8 related documents: shared entities (rarity-weighted) plus document_links.
+pub fn list_related_documents(conn: &Connection, document_id: &str) -> CognitoResult<Vec<Value>> {
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct Acc {
+        title: String,
+        score: f64,
+        shared: Vec<(String, String, i64)>,
+        mentions: bool,
+        similar: bool,
+    }
+
+    let mut by_id: HashMap<String, Acc> = HashMap::new();
+
+    let mut share_stmt = conn
         .prepare(
-            "SELECT p.document_id, IFNULL(d.title, ''), p.x, p.y, p.topic_id
-             FROM document_points p
-             LEFT JOIN documents d ON d.id = p.document_id
-             ORDER BY p.document_id LIMIT 500",
+            "SELECT d.id, IFNULL(d.title, ''), e.name, e.label, e.doc_count
+             FROM mentions m1
+             JOIN mentions m2
+               ON m1.entity_id = m2.entity_id AND m2.document_id != m1.document_id
+             JOIN entities e ON e.id = m1.entity_id
+             JOIN documents d ON d.id = m2.document_id
+             WHERE m1.document_id = ?1
+               AND lower(e.label) != 'date'
+               AND d.status = 'indexed'
+             GROUP BY d.id, e.id",
         )
         .map_err(|e| CognitoError::Database(e.to_string()))?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(serde_json::json!({
-                "documentId": r.get::<_, String>(0)?,
-                "title": r.get::<_, String>(1)?,
-                "x": r.get::<_, f64>(2)?,
-                "y": r.get::<_, f64>(3)?,
-                "topicId": r.get::<_, Option<String>>(4)?,
-            }))
+    let share_rows = share_stmt
+        .query_map([document_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
         })
         .map_err(|e| CognitoError::Database(e.to_string()))?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|e| CognitoError::Database(e.to_string()))?);
+    for row in share_rows {
+        let (oid, title, name, label, doc_count) =
+            row.map_err(|e| CognitoError::Database(e.to_string()))?;
+        let rarity = if doc_count > 0 {
+            1.0 / (doc_count as f64)
+        } else {
+            0.0
+        };
+        let entry = by_id.entry(oid).or_default();
+        if entry.title.is_empty() {
+            entry.title = title;
+        }
+        entry.score += rarity;
+        entry.shared.push((name, label, doc_count));
     }
-    Ok(out)
-}
 
-pub fn list_mentions_links(conn: &Connection) -> CognitoResult<Vec<Value>> {
-    let mut stmt = conn
+    let mut mention_stmt = conn
         .prepare(
-            "SELECT source_id, target_id, kind, weight, evidence_chunk_id
-             FROM document_links WHERE kind = 'mentions' LIMIT 1000",
+            "SELECT l.source_id, IFNULL(d.title, '')
+             FROM document_links l
+             JOIN documents d ON d.id = l.source_id
+             WHERE l.kind = 'mentions' AND l.target_id = ?1 AND d.status = 'indexed'",
         )
         .map_err(|e| CognitoError::Database(e.to_string()))?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(serde_json::json!({
-                "sourceId": r.get::<_, String>(0)?,
-                "targetId": r.get::<_, String>(1)?,
-                "kind": r.get::<_, String>(2)?,
-                "weight": r.get::<_, f64>(3)?,
-                "evidenceChunkId": r.get::<_, Option<String>>(4)?,
-            }))
+    let mention_rows = mention_stmt
+        .query_map([document_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })
         .map_err(|e| CognitoError::Database(e.to_string()))?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|e| CognitoError::Database(e.to_string()))?);
+    for row in mention_rows {
+        let (oid, title) = row.map_err(|e| CognitoError::Database(e.to_string()))?;
+        let entry = by_id.entry(oid).or_default();
+        if entry.title.is_empty() {
+            entry.title = title;
+        }
+        entry.mentions = true;
+        entry.score += 0.01;
     }
-    Ok(out)
-}
 
-pub fn list_topics(conn: &Connection) -> CognitoResult<Vec<Value>> {
-    let mut stmt = conn
-        .prepare("SELECT id, name, document_ids FROM topics ORDER BY name COLLATE NOCASE")
+    let mut similar_stmt = conn
+        .prepare(
+            "SELECT
+                CASE WHEN source_id = ?1 THEN target_id ELSE source_id END AS other_id,
+                IFNULL(d.title, '')
+             FROM document_links l
+             JOIN documents d
+               ON d.id = CASE WHEN l.source_id = ?1 THEN l.target_id ELSE l.source_id END
+             WHERE l.kind = 'similar'
+               AND (l.source_id = ?1 OR l.target_id = ?1)
+               AND d.status = 'indexed'",
+        )
         .map_err(|e| CognitoError::Database(e.to_string()))?;
-    let rows = stmt
-        .query_map([], |r| {
-            let id: String = r.get(0)?;
-            let name: String = r.get(1)?;
-            let raw: String = r.get(2)?;
-            let document_ids: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
-            Ok(serde_json::json!({
-                "id": id,
-                "name": name,
-                "documentIds": document_ids,
-            }))
+    let similar_rows = similar_stmt
+        .query_map([document_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })
         .map_err(|e| CognitoError::Database(e.to_string()))?;
+    for row in similar_rows {
+        let (oid, title) = row.map_err(|e| CognitoError::Database(e.to_string()))?;
+        if oid == document_id {
+            continue;
+        }
+        let entry = by_id.entry(oid).or_default();
+        if entry.title.is_empty() {
+            entry.title = title;
+        }
+        entry.similar = true;
+        entry.score += 0.001;
+    }
+
+    let mut ranked: Vec<(String, Acc)> = by_id.into_iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1.score
+            .partial_cmp(&a.1.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.title.cmp(&b.1.title))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
     let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|e| CognitoError::Database(e.to_string()))?);
+    for (id, mut acc) in ranked.into_iter().take(8) {
+        acc.shared.sort_by(|a, b| {
+            entity_label_rank(&a.1)
+                .cmp(&entity_label_rank(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        acc.shared.dedup_by(|a, b| a.0 == b.0);
+        let shared_names: Vec<String> = acc
+            .shared
+            .into_iter()
+            .take(5)
+            .map(|(name, _, _)| name)
+            .collect();
+
+        let (kind, kind_label) = if acc.mentions {
+            ("mentions", related_link_kind_label("mentions").unwrap())
+        } else if !shared_names.is_empty() {
+            ("shares_names", "shares names")
+        } else if acc.similar {
+            ("similar", related_link_kind_label("similar").unwrap())
+        } else {
+            ("shares_names", "shares names")
+        };
+
+        out.push(serde_json::json!({
+            "id": id,
+            "title": acc.title,
+            "kind": kind,
+            "kindLabel": kind_label,
+            "sharedEntities": shared_names,
+        }));
     }
     Ok(out)
-}
-
-pub fn connections_map(conn: &Connection) -> CognitoResult<Value> {
-    let points = list_document_points(conn)?;
-    let links = list_mentions_links(conn)?;
-    let topics = list_topics(conn)?;
-    Ok(serde_json::json!({
-        "points": points,
-        "links": links,
-        "topics": topics,
-    }))
 }
 
 pub fn connections_timeline(conn: &Connection) -> CognitoResult<Value> {
@@ -1621,8 +1728,24 @@ mod tests {
             let v: i32 = c
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .expect("uv");
-            assert_eq!(v, 14);
+            assert_eq!(v, 15);
             assert_eq!(INDEX_FORMAT_VERSION, 5);
+            let has_topics: i32 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='topics'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("topics");
+            assert_eq!(has_topics, 0);
+            let has_points: i32 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='document_points'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("document_points");
+            assert_eq!(has_points, 0);
             let has_profile: i32 = c
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='documents_profile'",
@@ -1881,5 +2004,77 @@ mod tests {
         assert_eq!(last.highlight, "last");
         assert_eq!(last.text, "middle\n\nlast");
         assert_eq!(last.page_end, Some(3));
+    }
+
+    #[test]
+    fn related_documents_ranks_rare_shared_name_above_common() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("v.sqlite");
+        let c = open_sqlite(&p).expect("open");
+        for (id, title) in [
+            ("d0", "Anchor"),
+            ("d_rare", "Rare Partner"),
+            ("d_common", "Common Partner"),
+        ] {
+            insert_document_row(
+                &c,
+                id,
+                &format!("/{id}.pdf"),
+                title,
+                "pdf",
+                "hash",
+                Some(1),
+                "indexed",
+                None,
+                None,
+            )
+            .expect("doc");
+        }
+        insert_chunk_row(&c, "c0", "d0", 0, None, None, "Cora IEEE", 2, "h0", "body", "[]", None)
+            .expect("c0");
+        insert_chunk_row(&c, "c1", "d_rare", 0, None, None, "Cora", 1, "h1", "body", "[]", None)
+            .expect("c1");
+        insert_chunk_row(
+            &c,
+            "c2",
+            "d_common",
+            0,
+            None,
+            None,
+            "IEEE",
+            1,
+            "h2",
+            "body",
+            "[]",
+            None,
+        )
+        .expect("c2");
+        c.execute_batch(
+            "
+            INSERT INTO entities(id, label, name, normalized, doc_count, mention_count)
+            VALUES
+              ('e_rare', 'person', 'Cora', 'cora', 2, 2),
+              ('e_common', 'organization', 'IEEE', 'ieee', 10, 20);
+            INSERT INTO mentions(entity_id, chunk_id, document_id, start, end) VALUES
+              ('e_rare', 'c0', 'd0', 0, 4),
+              ('e_rare', 'c1', 'd_rare', 0, 4),
+              ('e_common', 'c0', 'd0', 5, 9),
+              ('e_common', 'c2', 'd_common', 0, 4);
+            ",
+        )
+        .expect("entities");
+        let related = list_related_documents(&c, "d0").expect("related");
+        assert!(related.len() >= 2);
+        let ids: Vec<&str> = related
+            .iter()
+            .filter_map(|v| v.get("id").and_then(|x| x.as_str()))
+            .collect();
+        let rare_pos = ids.iter().position(|id| *id == "d_rare").expect("rare");
+        let common_pos = ids.iter().position(|id| *id == "d_common").expect("common");
+        assert!(rare_pos < common_pos);
+        assert_eq!(
+            related[rare_pos].get("kind").and_then(|v| v.as_str()),
+            Some("shares_names")
+        );
     }
 }

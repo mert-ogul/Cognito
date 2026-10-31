@@ -4,10 +4,10 @@ import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useEffect, useRef, useState } from "react";
 
 type Props = {
-  path: string;
+  path?: string | null;
   region: PageRegion;
   quote: string;
-  documentId?: string;
+  documentId: string;
   title?: string;
   pageCount?: number | null;
 };
@@ -48,11 +48,11 @@ export function SourceRegionThumb({
   }, []);
 
   useEffect(() => {
-    if (!visible || !path) return;
+    if (!visible || !documentId) return;
     let cancelled = false;
     void (async () => {
       try {
-        const rendered = await renderPageRegion(path, region.page, {
+        const rendered = await renderPageRegion(documentId, region.page, {
           x0: region.x0,
           y0: region.y0,
           x1: region.x1,
@@ -71,19 +71,17 @@ export function SourceRegionThumb({
     return () => {
       cancelled = true;
     };
-  }, [visible, path, region.page, region.x0, region.y0, region.x1, region.y1]);
+  }, [visible, documentId, region.page, region.x0, region.y0, region.x1, region.y1]);
 
   const open = () => {
-    if (documentId) {
-      addRegions(documentId, [region]);
-    }
+    addRegions(documentId, [region]);
     openPassage({
-      documentId: documentId ?? "",
+      documentId,
       title: title ?? "",
       pageLabel: `p. ${region.page}`,
       text: quote,
       highlight: quote,
-      path,
+      path: path ?? "",
       page: region.page,
       pageCount: pageCount ?? null,
       regions: [region],
@@ -131,7 +129,7 @@ export function SourceQuoteOrThumb({
   pageCount,
 }: QuoteOrThumbProps) {
   const region = regions?.[0];
-  if (path && region) {
+  if (documentId && region) {
     return (
       <SourceRegionThumb
         path={path}

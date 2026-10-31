@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import {
   getDocumentCard,
   getDocumentPreview,
+  getRelatedDocuments,
   getSettings,
   listDocuments,
   openDocument,
@@ -10,9 +11,11 @@ import {
   type DocumentCardPayload,
   type DocumentRow,
   type PageRegion,
+  type RelatedDocument,
 } from "@/lib/tauri";
 import { useChatIntentStore } from "@/stores/chatIntentStore";
 import { useCitedRegionsStore } from "@/stores/citedRegionsStore";
+import { useMainViewStore } from "@/stores/mainViewStore";
 import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -117,6 +120,7 @@ export function DocumentPage({ documentId, onBackToConversation, onAskAboutDocum
   const citedForDoc = useCitedRegionsStore((s) => s.byDoc[documentId]);
   const citedRegions = citedForDoc ?? EMPTY_REGIONS;
   const setAskAbout = useChatIntentStore((s) => s.setAskAbout);
+  const setDocument = useMainViewStore((s) => s.setDocument);
 
   const docs = useQuery({
     queryKey: ["documents"],
@@ -131,6 +135,11 @@ export function DocumentPage({ documentId, onBackToConversation, onAskAboutDocum
   const cardQ = useQuery({
     queryKey: ["document-card", documentId],
     queryFn: () => getDocumentCard(documentId),
+  });
+
+  const relatedQ = useQuery({
+    queryKey: ["related-documents", documentId],
+    queryFn: () => getRelatedDocuments(documentId),
   });
 
   const summariseOn = settings.data?.summariseDocuments !== false;
@@ -208,6 +217,32 @@ export function DocumentPage({ documentId, onBackToConversation, onAskAboutDocum
     onBackToConversation();
   }, [card, documentId, onAskAboutDocument, onBackToConversation, row, setAskAbout, title]);
 
+  const askAboutBoth = useCallback(
+    (other: RelatedDocument) => {
+      const scopeTitle =
+        (card?.title || row?.title || "").trim() ||
+        (row ? fileName(row.path) : title);
+      setAskAbout(
+        [
+          { id: documentId, title: scopeTitle },
+          { id: other.id, title: other.title.trim() || other.id },
+        ],
+        "How do these two documents relate?",
+      );
+      onBackToConversation();
+    },
+    [card, documentId, onBackToConversation, row, setAskAbout, title],
+  );
+
+  const relatedCaption = (r: RelatedDocument): string => {
+    if (r.kind === "mentions") return "Mentions this document";
+    if (r.kind === "similar") return "Similar content";
+    if (r.sharedEntities.length > 0) {
+      return `Shares ${r.sharedEntities.join(", ")}`;
+    }
+    return "Shares names";
+  };
+
   return (
     <div className="mx-auto flex h-full min-h-0 w-full max-w-[68ch] flex-col px-4 pt-6">
       <div className="mb-4 shrink-0">
@@ -254,7 +289,7 @@ export function DocumentPage({ documentId, onBackToConversation, onAskAboutDocum
                   <span>{f.text}</span>
                   {f.quote ? (
                     <div className="mt-1">
-                      {f.regions && f.regions.length > 0 && docPath ? (
+                      {f.regions && f.regions.length > 0 ? (
                         <SourceQuoteOrThumb
                           path={docPath}
                           regions={f.regions}
@@ -307,9 +342,36 @@ export function DocumentPage({ documentId, onBackToConversation, onAskAboutDocum
           </Button>
         </div>
 
-        {docPath && pageCount != null && pageCount > 0 ? (
+        {(relatedQ.data?.length ?? 0) > 0 ? (
+          <div className="mt-8 space-y-2">
+            <p className="font-medium text-text">Related documents</p>
+            <ul className="flex flex-col gap-2">
+              {(relatedQ.data ?? []).map((r) => (
+                <li key={r.id} className="flex flex-col gap-0.5">
+                  <button
+                    type="button"
+                    className="text-left text-[13px] text-text hover:underline"
+                    onClick={() => setDocument(r.id)}
+                  >
+                    {r.title.trim() || r.id}
+                  </button>
+                  <p className="text-[12px] text-muted">{relatedCaption(r)}</p>
+                  <button
+                    type="button"
+                    className="w-fit text-[12px] text-muted hover:text-text"
+                    onClick={() => askAboutBoth(r)}
+                  >
+                    Ask about both
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {pageCount != null && pageCount > 0 ? (
           <DocumentPages
-            path={docPath}
+            documentId={documentId}
             pageCount={pageCount}
             citedRegions={citedRegions}
           />
@@ -320,11 +382,11 @@ export function DocumentPage({ documentId, onBackToConversation, onAskAboutDocum
 }
 
 function DocumentPages({
-  path,
+  documentId,
   pageCount,
   citedRegions,
 }: {
-  path: string;
+  documentId: string;
   pageCount: number;
   citedRegions: PageRegion[];
 }) {
@@ -349,7 +411,7 @@ function DocumentPages({
         {pages.map((page) => (
           <DocumentPageImage
             key={page}
-            path={path}
+            documentId={documentId}
             page={page}
             regions={byPage.get(page) ?? []}
           />
@@ -360,11 +422,11 @@ function DocumentPages({
 }
 
 function DocumentPageImage({
-  path,
+  documentId,
   page,
   regions,
 }: {
-  path: string;
+  documentId: string;
   page: number;
   regions: PageRegion[];
 }) {
@@ -403,7 +465,7 @@ function DocumentPageImage({
     const scale = 1.5;
     void (async () => {
       try {
-        const rendered = await renderDocumentPage(path, page, scale);
+        const rendered = await renderDocumentPage(documentId, page, scale);
         if (cancelled) return;
         setImg({
           src: `data:image/png;base64,${rendered.pngBase64}`,
@@ -418,7 +480,7 @@ function DocumentPageImage({
     return () => {
       cancelled = true;
     };
-  }, [visible, path, page]);
+  }, [visible, documentId, page]);
 
   return (
     <div ref={rootRef} className="space-y-1">

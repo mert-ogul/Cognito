@@ -7,14 +7,12 @@ import json
 import re
 import sqlite3
 import struct
-import uuid
 from typing import Any
 
 import numpy as np
 from rapidfuzz import fuzz
 
 from common.model_store import extract_spans_batch, mock_models_enabled
-from common.ollama import chat
 from common.sqlite_vec_util import connect_with_vec, mock_embed_enabled, table_dimension
 from common.text_norm import normalize_date, normalize_name
 from query.entity_labels import labels_for_document
@@ -243,34 +241,6 @@ def _blob_to_vec(blob: bytes) -> np.ndarray:
     return np.asarray(struct.unpack(f"{n}f", blob), dtype=np.float64)
 
 
-def pca_points(vectors: np.ndarray) -> np.ndarray:
-    """Return Nx2 PCA coordinates via SVD. Stable for fixed inputs."""
-    if vectors.size == 0:
-        return np.zeros((0, 2), dtype=np.float64)
-    n, d = vectors.shape
-    if n == 1:
-        return np.zeros((1, 2), dtype=np.float64)
-    mean = vectors.mean(axis=0)
-    centered = vectors - mean
-    # Economy SVD on centered data.
-    _u, _s, vt = np.linalg.svd(centered, full_matrices=False)
-    comps = vt[:2].T  # d x 2
-    if comps.shape[1] == 1:
-        comps = np.concatenate([comps, np.zeros((d, 1))], axis=1)
-    pts = centered @ comps
-    if pts.shape[1] == 1:
-        pts = np.concatenate([pts, np.zeros((n, 1))], axis=1)
-    # Flip signs for stability: first nonzero in each component positive.
-    for j in range(min(2, pts.shape[1])):
-        col = pts[:, j]
-        for v in col:
-            if abs(v) > 1e-12:
-                if v < 0:
-                    pts[:, j] *= -1
-                break
-    return pts[:, :2]
-
-
 def similar_links(
     doc_ids: list[str],
     vectors: np.ndarray,
@@ -296,56 +266,103 @@ def similar_links(
     return out
 
 
-def agglomerative_clusters(
-    vectors: np.ndarray,
-    *,
-    target_size: int = 8,
-) -> list[list[int]]:
-    """Average-linkage clustering on cosine distance; cluster count from target size."""
-    n = vectors.shape[0]
-    if n == 0:
+_FTS_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "how",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "was",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "with",
+    }
+)
+
+
+def _significant_title_words(title: str) -> list[str]:
+    out: list[str] = []
+    for m in _WORD_RE.finditer(title or ""):
+        t = m.group(0).lower()
+        if t.endswith("'s"):
+            t = t[:-2]
+        if len(t) < 2 or t in _FTS_STOPWORDS:
+            continue
+        out.append(t)
+    return out
+
+
+def _fts_phrase_from_title(title: str) -> str | None:
+    words = _significant_title_words(title)
+    if not words:
+        return None
+    return " ".join('"' + w.replace('"', '""') + '"' for w in words)
+
+
+def _has_chunks_fts(con: sqlite3.Connection) -> bool:
+    row = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_fts'"
+    ).fetchone()
+    return row is not None
+
+
+def _candidate_chunks_for_title(
+    con: sqlite3.Connection | None,
+    document_id: str,
+    title: str,
+    chunks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """FTS5 phrase filter on title words; fall back to all chunks when FTS is unavailable."""
+    if con is None or not _has_chunks_fts(con):
+        return chunks
+    phrase = _fts_phrase_from_title(title)
+    if not phrase:
+        return chunks
+    try:
+        rows = con.execute(
+            """
+            SELECT c.id, c.text
+            FROM chunks_fts
+            JOIN chunks c ON c.rowid = chunks_fts.rowid
+            WHERE c.document_id = ?
+              AND chunks_fts MATCH ?
+            ORDER BY c.ordinal
+            """,
+            (document_id, phrase),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return chunks
+    if not rows:
         return []
-    if n == 1:
-        return [[0]]
-    # Cosine distance matrix.
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    norms = np.maximum(norms, 1e-12)
-    unit = vectors / norms
-    sim = unit @ unit.T
-    dist = np.clip(1.0 - sim, 0.0, 2.0)
-    np.fill_diagonal(dist, 0.0)
-
-    n_clusters = max(1, min(n, n // max(1, target_size)))
-    if n <= 15:
-        n_clusters = max(1, min(n, max(1, n // 3)))
-    if n >= 20:
-        # Aim for cluster sizes in ~3–15.
-        n_clusters = max(2, min(n // 3, max(1, n // 8)))
-
-    clusters: list[list[int]] = [[i] for i in range(n)]
-    # Cluster distance = average linkage.
-    while len(clusters) > n_clusters:
-        best = None
-        best_d = float("inf")
-        for i in range(len(clusters)):
-            for j in range(i + 1, len(clusters)):
-                total = 0.0
-                count = 0
-                for a in clusters[i]:
-                    for b in clusters[j]:
-                        total += float(dist[a, b])
-                        count += 1
-                d = total / max(1, count)
-                if d < best_d:
-                    best_d = d
-                    best = (i, j)
-        if best is None:
-            break
-        i, j = best
-        merged = clusters[i] + clusters[j]
-        clusters = [c for k, c in enumerate(clusters) if k != i and k != j]
-        clusters.append(merged)
-    return clusters
+    by_id = {str(c.get("id") or ""): c for c in chunks}
+    out: list[dict[str, Any]] = []
+    for cid, text in rows:
+        key = str(cid)
+        if key in by_id:
+            out.append(by_id[key])
+        else:
+            out.append({"id": key, "text": str(text or "")})
+    return out
 
 
 def _phrase_in_text(haystack_norm: str, needle: str) -> bool:
@@ -359,6 +376,7 @@ def _phrase_in_text(haystack_norm: str, needle: str) -> bool:
 
 def find_mentions_links(
     docs: list[dict[str, Any]],
+    con: sqlite3.Connection | None = None,
 ) -> list[tuple[str, str, str | None, float]]:
     """Return (source_id, target_id, evidence_chunk_id, weight) for title/alias mentions."""
     links: list[tuple[str, str, str | None, float]] = []
@@ -375,22 +393,27 @@ def find_mentions_links(
             hit = False
             title_words = _word_count(title)
             title_norm = normalize_name(title)
-            for ch in chunks:
-                text = str(ch.get("text") or "")
-                text_norm = normalize_name(text)
-                cid = str(ch.get("id") or "") or None
-                if title_words >= _TITLE_MIN_WORDS and title_norm:
+            if title_words >= _TITLE_MIN_WORDS and title_norm:
+                for ch in _candidate_chunks_for_title(con, sid, title, chunks):
+                    text = str(ch.get("text") or "")
+                    text_norm = normalize_name(text)
+                    cid = str(ch.get("id") or "") or None
                     if fuzz.partial_ratio(title_norm, text_norm) >= _TITLE_PARTIAL_RATIO:
                         hit = True
                         evidence = cid
                         break
-                for alias in aliases:
-                    if _phrase_in_text(text_norm, alias):
-                        hit = True
-                        evidence = cid
+            if not hit:
+                for ch in chunks:
+                    text = str(ch.get("text") or "")
+                    text_norm = normalize_name(text)
+                    cid = str(ch.get("id") or "") or None
+                    for alias in aliases:
+                        if _phrase_in_text(text_norm, alias):
+                            hit = True
+                            evidence = cid
+                            break
+                    if hit:
                         break
-                if hit:
-                    break
             if hit:
                 links.append((sid, tid, evidence, 1.0))
     return links
@@ -451,26 +474,6 @@ def rpc_purge_document_entities(params: dict[str, Any]) -> dict[str, Any]:
             "DELETE FROM document_links WHERE source_id = ? OR target_id = ?",
             (document_id, document_id),
         )
-        con.execute("DELETE FROM document_points WHERE document_id = ?", (document_id,))
-        # Drop topics that referenced this document (full recompute preferred; prune JSON).
-        topic_rows = con.execute("SELECT id, document_ids FROM topics").fetchall()
-        for tid, raw in topic_rows:
-            try:
-                ids = json.loads(raw or "[]")
-            except (TypeError, json.JSONDecodeError):
-                ids = []
-            if not isinstance(ids, list):
-                continue
-            if document_id not in ids:
-                continue
-            left = [x for x in ids if str(x) != document_id]
-            if not left:
-                con.execute("DELETE FROM topics WHERE id = ?", (tid,))
-            else:
-                con.execute(
-                    "UPDATE topics SET document_ids = ? WHERE id = ?",
-                    (json.dumps(left), tid),
-                )
         con.commit()
     finally:
         con.close()
@@ -765,16 +768,14 @@ def _mean_pool_doc_vectors(
         con.close()
 
 
-def _mock_recompute(docs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Deterministic fake links/topics/points for tests."""
+def _mock_similar_links(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deterministic fake similar links for tests."""
     ids = [str(d["id"]) for d in docs]
     links: list[dict[str, Any]] = []
-    # Mentions from title/alias logic still applied by caller; add deterministic similar.
     for i, sid in enumerate(ids):
         for j, tid in enumerate(ids):
             if i >= j:
                 continue
-            # Fake weight from id order.
             w = 0.8 - 0.01 * abs(i - j)
             if w >= _SIMILAR_COSINE:
                 links.append(
@@ -786,85 +787,35 @@ def _mock_recompute(docs: list[dict[str, Any]]) -> dict[str, Any]:
                         "evidence_chunk_id": None,
                     }
                 )
-                if len([x for x in links if x["source_id"] == sid and x["kind"] == "similar"]) >= _SIMILAR_TOP_K:
+                if (
+                    len(
+                        [
+                            x
+                            for x in links
+                            if x["source_id"] == sid and x["kind"] == "similar"
+                        ]
+                    )
+                    >= _SIMILAR_TOP_K
+                ):
                     break
-    topics = []
-    if ids:
-        topics.append(
-            {
-                "id": "topic_mock_0",
-                "name": "Mock topic",
-                "document_ids": ids[: min(len(ids), 15)],
-            }
-        )
-    points = []
-    for i, did in enumerate(ids):
-        points.append(
-            {
-                "document_id": did,
-                "x": float(i),
-                "y": float(i % 3),
-                "topic_id": "topic_mock_0" if ids else None,
-            }
-        )
-    return {"links": links, "topics": topics, "points": points}
-
-
-def _name_topics(
-    background_model: str | None,
-    clusters: list[list[dict[str, Any]]],
-) -> list[str]:
-    names: list[str] = []
-    if mock_models_enabled() or not background_model:
-        for i, _ in enumerate(clusters):
-            names.append(f"Topic {i + 1}")
-        return names
-    # One call for all clusters.
-    blocks: list[str] = []
-    for i, docs in enumerate(clusters):
-        lines = []
-        for d in docs[:12]:
-            title = str(d.get("title") or d.get("id") or "")
-            summ = "; ".join(d.get("summary") or [])[:240]
-            lines.append(f"- {title}" + (f" :: {summ}" if summ else ""))
-        blocks.append(f"Cluster {i + 1}:\n" + "\n".join(lines))
-    prompt = (
-        "Name each cluster with a short 2-5 word topic label. "
-        "Reply with one label per line, same order, no numbering.\n\n"
-        + "\n\n".join(blocks)
-    )
-    try:
-        content = chat(
-            background_model,
-            [{"role": "user", "content": prompt}],
-            think=False,
-        )
-    except Exception:
-        return [f"Topic {i + 1}" for i in range(len(clusters))]
-    lines = [ln.strip(" -•\t") for ln in content.splitlines() if ln.strip()]
-    while len(lines) < len(clusters):
-        lines.append(f"Topic {len(lines) + 1}")
-    return lines[: len(clusters)]
+    return links
 
 
 def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
     sqlite_path = str(_param(params, "sqlitePath", "sqlite_path"))
     _app_data = str(_param(params, "app_data", "appData") or "")
     del _app_data  # reserved for future local models
-    embed_model = str(
+    _embed_model = str(
         _param(params, "embed_model", "embedModel") or "qwen3-embedding:0.6b"
     )
-    background_model = _param(params, "background_model", "backgroundModel")
-    background_model_s = str(background_model) if background_model else None
+    del _embed_model
 
     con = sqlite3.connect(sqlite_path)
     try:
         docs = _load_docs_for_links(con)
         con.execute("DELETE FROM document_links")
-        con.execute("DELETE FROM topics")
-        con.execute("DELETE FROM document_points")
 
-        mention_links = find_mentions_links(docs)
+        mention_links = find_mentions_links(docs, con=con)
         for sid, tid, evid, weight in mention_links:
             con.execute(
                 """
@@ -877,13 +828,9 @@ def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
 
         doc_ids = [str(d["id"]) for d in docs]
         similar_count = 0
-        topic_count = 0
-        point_count = 0
 
         if mock_models_enabled() or mock_embed_enabled():
-            fake = _mock_recompute(docs)
-            # Still compute real mentions (already written); add mock similar/topics/points.
-            for link in fake["links"]:
+            for link in _mock_similar_links(docs):
                 con.execute(
                     """
                     INSERT INTO document_links(
@@ -899,21 +846,6 @@ def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
                     ),
                 )
                 similar_count += 1
-            for topic in fake["topics"]:
-                con.execute(
-                    "INSERT INTO topics(id, name, document_ids) VALUES (?, ?, ?)",
-                    (topic["id"], topic["name"], json.dumps(topic["document_ids"])),
-                )
-                topic_count += 1
-            for pt in fake["points"]:
-                con.execute(
-                    """
-                    INSERT INTO document_points(document_id, x, y, topic_id)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (pt["document_id"], pt["x"], pt["y"], pt["topic_id"]),
-                )
-                point_count += 1
         else:
             vecs = _mean_pool_doc_vectors(sqlite_path, doc_ids)
             if vecs is not None and len(doc_ids) >= 2:
@@ -928,51 +860,11 @@ def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
                     )
                     similar_count += 1
 
-                clusters_idx = agglomerative_clusters(vecs)
-                cluster_docs = [[docs[i] for i in idxs] for idxs in clusters_idx]
-                names = _name_topics(background_model_s, cluster_docs)
-                topic_of_doc: dict[str, str] = {}
-                for name, idxs in zip(names, clusters_idx):
-                    tid = f"topic_{uuid.uuid4().hex[:12]}"
-                    member_ids = [doc_ids[i] for i in idxs]
-                    con.execute(
-                        "INSERT INTO topics(id, name, document_ids) VALUES (?, ?, ?)",
-                        (tid, name[:120], json.dumps(member_ids)),
-                    )
-                    topic_count += 1
-                    for mid in member_ids:
-                        topic_of_doc[mid] = tid
-
-                pts = pca_points(vecs)
-                for i, did in enumerate(doc_ids):
-                    x = float(pts[i, 0]) if i < len(pts) else 0.0
-                    y = float(pts[i, 1]) if i < len(pts) else 0.0
-                    con.execute(
-                        """
-                        INSERT INTO document_points(document_id, x, y, topic_id)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        (did, x, y, topic_of_doc.get(did)),
-                    )
-                    point_count += 1
-            elif doc_ids:
-                for did in doc_ids:
-                    con.execute(
-                        """
-                        INSERT INTO document_points(document_id, x, y, topic_id)
-                        VALUES (?, 0, 0, NULL)
-                        """,
-                        (did,),
-                    )
-                    point_count += 1
-
         con.commit()
         return {
             "ok": True,
             "mentionsLinks": len(mention_links),
             "similarLinks": similar_count,
-            "topics": topic_count,
-            "points": point_count,
         }
     finally:
         con.close()

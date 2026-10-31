@@ -159,7 +159,7 @@ function SourcesList({
       <ol className="list-decimal space-y-2 pl-5 text-muted">
         {enriched.map((c) => (
           <li key={`${c.chunkId}-${c.index}`} className="space-y-1">
-            {c.regions && c.regions.length > 0 && c.path ? (
+            {c.regions && c.regions.length > 0 && c.documentId ? (
               <SourceQuoteOrThumb
                 path={c.path}
                 regions={c.regions}
@@ -249,7 +249,7 @@ function ClosestPassages({
                 ) : null}
               </p>
               {snippet ? <p className="text-muted">{snippet}</p> : null}
-              {c.regions && c.regions.length > 0 && c.path ? (
+              {c.regions && c.regions.length > 0 && c.documentId ? (
                 <SourceQuoteOrThumb
                   path={c.path}
                   regions={c.regions}

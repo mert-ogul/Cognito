@@ -30,8 +30,8 @@ export function PassageView({ passage }: Props) {
     scale: number;
   } | null>(null);
   const [textOpen, setTextOpen] = useState(false);
-  const path = passage.path;
-  const showPage = Boolean(path && passage.regions && passage.regions.length > 0);
+  const documentId = passage.documentId;
+  const showPage = Boolean(documentId && passage.regions && passage.regions.length > 0);
   const pageRegions = useMemo(
     () => regionsOnPage(passage.regions, page),
     [passage.regions, page],
@@ -52,12 +52,12 @@ export function PassageView({ passage }: Props) {
   }, [passage.documentId, passage.highlight, passage.text, textOpen]);
 
   useEffect(() => {
-    if (!showPage || !path) return;
+    if (!showPage || !documentId) return;
     let cancelled = false;
     const scale = 2;
     void (async () => {
       try {
-        const rendered = await renderDocumentPage(path, page, scale);
+        const rendered = await renderDocumentPage(documentId, page, scale);
         if (cancelled) return;
         setImg({
           src: `data:image/png;base64,${rendered.pngBase64}`,
@@ -72,7 +72,7 @@ export function PassageView({ passage }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [showPage, path, page]);
+  }, [showPage, documentId, page]);
 
   const header =
     passage.pageLabel != null && passage.pageLabel.length > 0

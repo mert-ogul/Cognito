@@ -38,12 +38,12 @@ describe("PassageView", () => {
       />,
     );
     await waitFor(() => {
-      expect(renderDocumentPage).toHaveBeenCalledWith("/vault/a.pdf", 2, 2);
+      expect(renderDocumentPage).toHaveBeenCalledWith("d1", 2, 2);
     });
     expect(screen.getByText("Page 2 of 3")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Next page" }));
     await waitFor(() => {
-      expect(renderDocumentPage).toHaveBeenCalledWith("/vault/a.pdf", 3, 2);
+      expect(renderDocumentPage).toHaveBeenCalledWith("d1", 3, 2);
     });
     expect(screen.getByText("Page 3 of 3")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();

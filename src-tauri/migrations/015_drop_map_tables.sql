@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS document_points;
+DROP TABLE IF EXISTS topics;

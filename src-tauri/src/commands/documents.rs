@@ -10,6 +10,7 @@ use crate::services::import_job;
 use crate::services::ingest;
 use crate::services::library;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter};
@@ -25,64 +26,125 @@ fn parse_regions_json(raw: Option<String>) -> Option<Value> {
     serde_json::from_str(&s).ok()
 }
 
-fn resolve_render_path(state: &SharedState, path: &str) -> CognitoResult<PathBuf> {
-    let p = PathBuf::from(path);
-    if p.is_absolute() {
-        return Ok(p);
+fn encode_base64(data: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
     }
-    let vault = state
-        .with_sqlite(|c| sqlite::get_setting(c, "vault_path"))?
-        .ok_or_else(|| CognitoError::Vault("Configure a vault folder first.".into()))?;
-    Ok(Path::new(&vault).join(path))
+    out
 }
 
-fn render_rpc(
+fn png_dimensions(data: &[u8]) -> CognitoResult<(i64, i64)> {
+    if data.len() < 24 || &data[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return Err(CognitoError::Sidecar("invalid png cache".into()));
+    }
+    let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]) as i64;
+    let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]) as i64;
+    Ok((width, height))
+}
+
+fn read_cached_png(path: &Path) -> CognitoResult<PageRenderResult> {
+    let data = std::fs::read(path).map_err(|e| CognitoError::Sidecar(e.to_string()))?;
+    let (width, height) = png_dimensions(&data)?;
+    Ok(PageRenderResult {
+        png_base64: encode_base64(&data),
+        width,
+        height,
+    })
+}
+
+fn rect_short_hash(rect: &PageRect) -> String {
+    let raw = format!(
+        "{:.4},{:.4},{:.4},{:.4}",
+        rect.x0, rect.y0, rect.x1, rect.y1
+    );
+    let digest = Sha256::digest(raw.as_bytes());
+    hex::encode(&digest[..6])
+}
+
+pub(crate) fn page_cache_path(
+    data_dir: &Path,
+    document_id: &str,
+    content_hash: &str,
+    page: i64,
+    scale: f64,
+    rect: Option<&PageRect>,
+) -> PathBuf {
+    let hash12: String = content_hash.chars().take(12).collect();
+    let scale_i = (scale * 100.0).round() as i64;
+    let mut name = format!("{document_id}-{hash12}-p{page}-s{scale_i}");
+    if let Some(r) = rect {
+        name.push('-');
+        name.push_str(&rect_short_hash(r));
+    }
+    name.push_str(".png");
+    data_dir.join("page_cache").join(name)
+}
+
+fn render_document_image(
     state: &SharedState,
-    method: &str,
-    path: &Path,
+    document_id: &str,
     page: i64,
     rect: Option<&PageRect>,
     scale: Option<f64>,
 ) -> CognitoResult<PageRenderResult> {
-    let app_data = state.data_dir.to_string_lossy().into_owned();
-    let mut params = json!({
-        "path": path.to_string_lossy(),
-        "page": page,
-        "app_data": app_data,
-    });
-    if let Some(s) = scale {
-        params
-            .as_object_mut()
-            .expect("params object")
-            .insert("scale".into(), json!(s));
+    let (path, content_hash) = state
+        .with_sqlite(|c| sqlite::document_path_and_hash_by_id(c, document_id))?
+        .ok_or_else(|| CognitoError::Vault("Document not found.".into()))?;
+    let scale = scale.filter(|s| *s > 0.0).unwrap_or(2.0);
+    let cache_path = page_cache_path(
+        &state.data_dir,
+        document_id,
+        &content_hash,
+        page,
+        scale,
+        rect,
+    );
+    if cache_path.is_file() {
+        return read_cached_png(&cache_path);
     }
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| CognitoError::Sidecar(e.to_string()))?;
+    }
+    let method = if rect.is_some() {
+        "render_region"
+    } else {
+        "render_page"
+    };
+    let mut params = json!({
+        "path": path,
+        "page": page,
+        "scale": scale,
+        "outPath": cache_path.to_string_lossy(),
+        "app_data": state.data_dir.to_string_lossy(),
+    });
     if let Some(r) = rect {
         params.as_object_mut().expect("params object").insert(
             "rect".into(),
             json!([r.x0, r.y0, r.x1, r.y1]),
         );
     }
-    let result = state.sidecar.with_session(|s| s.request(method, params))?;
-    let png = result
-        .get("pngBase64")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| CognitoError::Sidecar("render pngBase64".into()))?
-        .to_string();
-    let width = result
-        .get("width")
-        .and_then(|v| v.as_i64())
-        .or_else(|| result.get("width").and_then(|v| v.as_u64().map(|u| u as i64)))
-        .unwrap_or(0);
-    let height = result
-        .get("height")
-        .and_then(|v| v.as_i64())
-        .or_else(|| result.get("height").and_then(|v| v.as_u64().map(|u| u as i64)))
-        .unwrap_or(0);
-    Ok(PageRenderResult {
-        png_base64: png,
-        width,
-        height,
-    })
+    let _ = state.sidecar.with_session(|s| s.request(method, params))?;
+    if !cache_path.is_file() {
+        return Err(CognitoError::Sidecar("render wrote no cache file".into()));
+    }
+    read_cached_png(&cache_path)
 }
 
 #[tauri::command]
@@ -152,14 +214,13 @@ pub async fn get_document_preview(
 #[tauri::command]
 pub async fn render_page_region(
     state: tauri::State<'_, SharedState>,
-    path: String,
+    document_id: String,
     page: i64,
     rect: PageRect,
     scale: Option<f64>,
 ) -> Result<PageRenderResult, String> {
     run_blocking(state, move |st| {
-        let resolved = resolve_render_path(&st, &path)?;
-        render_rpc(&st, "render_region", &resolved, page, Some(&rect), scale)
+        render_document_image(&st, &document_id, page, Some(&rect), scale)
     })
     .await
 }
@@ -167,13 +228,12 @@ pub async fn render_page_region(
 #[tauri::command]
 pub async fn render_document_page(
     state: tauri::State<'_, SharedState>,
-    path: String,
+    document_id: String,
     page: i64,
     scale: Option<f64>,
 ) -> Result<PageRenderResult, String> {
     run_blocking(state, move |st| {
-        let resolved = resolve_render_path(&st, &path)?;
-        render_rpc(&st, "render_page", &resolved, page, None, scale)
+        render_document_image(&st, &document_id, page, None, scale)
     })
     .await
 }
@@ -481,4 +541,73 @@ pub async fn rebuild_index(
         settings.chat_model.clone(),
     );
     Ok(job_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::AppState;
+    use crate::sidecar::SidecarPool;
+    use std::sync::Arc;
+
+    // iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xFC,
+        0xCF, 0xC0, 0x50, 0x0F, 0x00, 0x04, 0x85, 0x01, 0x80, 0x84, 0xA9, 0x8C, 0x21, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn test_state(data: &Path) -> SharedState {
+        let sidecar_cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sidecar");
+        let main_py = sidecar_cwd.join("main.py");
+        let log_path = data.join("logs").join("sidecar.log");
+        std::fs::create_dir_all(log_path.parent().unwrap()).expect("logs");
+        let pool = SidecarPool::new(main_py, sidecar_cwd, log_path, data.to_path_buf());
+        Arc::new(AppState::new(data.to_path_buf(), pool))
+    }
+
+    #[test]
+    fn render_unknown_document_id_fails() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let state = test_state(dir.path());
+        let err = render_document_image(&state, "missing-id", 1, None, Some(2.0));
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.to_lowercase().contains("not found"), "{msg}");
+    }
+
+    #[test]
+    fn second_render_reads_cache_without_sidecar() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let state = test_state(dir.path());
+        state
+            .with_sqlite(|c| {
+                sqlite::insert_document_row(
+                    c,
+                    "doc1",
+                    "/vault/a.pdf",
+                    "A",
+                    "pdf",
+                    "contenthashabc123",
+                    Some(2),
+                    "indexed",
+                    None,
+                    None,
+                )
+            })
+            .expect("insert");
+
+        let cache = page_cache_path(dir.path(), "doc1", "contenthashabc123", 1, 2.0, None);
+        std::fs::create_dir_all(cache.parent().unwrap()).expect("cache dir");
+        std::fs::write(&cache, TINY_PNG).expect("write png");
+
+        let first = read_cached_png(&cache).expect("first");
+        assert_eq!(first.width, 1);
+        assert_eq!(first.height, 1);
+        let second = render_document_image(&state, "doc1", 1, None, Some(2.0)).expect("second");
+        assert_eq!(second.png_base64, first.png_base64);
+        assert_eq!(second.width, 1);
+    }
 }

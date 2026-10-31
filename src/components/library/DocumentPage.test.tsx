@@ -5,6 +5,7 @@ import { DocumentPage } from "./DocumentPage";
 import {
   getDocumentCard,
   getDocumentPreview,
+  getRelatedDocuments,
   getSettings,
   listDocuments,
   openDocument,
@@ -14,6 +15,7 @@ import {
 import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useChatIntentStore } from "@/stores/chatIntentStore";
 import { useCitedRegionsStore } from "@/stores/citedRegionsStore";
+import { useMainViewStore } from "@/stores/mainViewStore";
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/tauri")>();
@@ -21,6 +23,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
     ...actual,
     getDocumentCard: vi.fn(),
     getDocumentPreview: vi.fn(),
+    getRelatedDocuments: vi.fn(),
     getSettings: vi.fn(),
     listDocuments: vi.fn(),
     openDocument: vi.fn(async () => {}),
@@ -42,11 +45,21 @@ describe("DocumentPage", () => {
       pendingQuestion: null,
       pendingRelated: null,
     });
+    useMainViewStore.setState({ view: "document", documentId: "d1" });
     vi.mocked(renderDocumentPage).mockResolvedValue({
       pngBase64: TINY_PNG_BASE64,
       width: 100,
       height: 140,
     });
+    vi.mocked(getRelatedDocuments).mockResolvedValue([
+      {
+        id: "d2",
+        title: "Beta Paper",
+        kind: "shares_names",
+        kindLabel: "shares names",
+        sharedEntities: ["Cora", "Thomas Kipf"],
+      },
+    ]);
     vi.mocked(listDocuments).mockResolvedValue([
       {
         id: "d1",
@@ -229,5 +242,34 @@ describe("DocumentPage", () => {
     await waitFor(() => {
       expect(openDocument).toHaveBeenCalledWith("d1");
     });
+  });
+
+  it("related documents open and ask about both", async () => {
+    const onBack = vi.fn();
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <DocumentPage
+          documentId="d1"
+          onBackToConversation={onBack}
+          onAskAboutDocument={() => {}}
+        />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("Related documents")).toBeInTheDocument();
+    expect(screen.getByText("Shares Cora, Thomas Kipf")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Beta Paper" }));
+    expect(useMainViewStore.getState().documentId).toBe("d2");
+    fireEvent.click(screen.getByRole("button", { name: "Ask about both" }));
+    expect(onBack).toHaveBeenCalled();
+    expect(useChatIntentStore.getState().pendingScope).toEqual([
+      { id: "d1", title: "Alpha Paper" },
+      { id: "d2", title: "Beta Paper" },
+    ]);
+    expect(useChatIntentStore.getState().pendingQuestion).toBe(
+      "How do these two documents relate?",
+    );
   });
 });
