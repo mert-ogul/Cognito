@@ -10,7 +10,7 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
-from common.text_norm import normalize_search_text
+from common.text_norm import normalize_pdf_text, normalize_search_text
 
 _SMALL_CAPS_JOIN = re.compile(r"\b([A-Z]) ([A-Z]{2,})")
 _DASH_JOIN = re.compile(r"(\w) -(\w)")
@@ -202,7 +202,7 @@ def _text_block_from_dict(block: dict) -> dict | None:
         box = [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])]
     except (TypeError, ValueError):
         return None
-    return {"text": normalize_search_text(text), "bbox": box}
+    return {"text": normalize_pdf_text(text), "bbox": box}
 
 
 def _ocr_page_darwin(page: fitz.Page) -> tuple[str, list[dict]]:
@@ -247,21 +247,21 @@ def _ocr_page_darwin(page: fitz.Page) -> tuple[str, list[dict]]:
         x1 = (x + w) * page_w
         y0 = (1.0 - y - h) * page_h
         y1 = (1.0 - y) * page_h
-        norm = normalize_search_text(text)
+        norm = normalize_pdf_text(text)
         lines.append(norm)
         blocks.append({"text": norm, "bbox": [x0, y0, x1, y1]})
     return "\n".join(lines).strip(), blocks
 
 
 def _parse_pdf_page(page: fitz.Page, page_no: int) -> dict:
-    plain = normalize_search_text((page.get_text("text") or "").strip())
+    plain = normalize_pdf_text((page.get_text("text") or "").strip())
     if len(plain) < _SCANNED_TEXT_MIN:
         if platform.system() == "Darwin":
             ocr_text, ocr_blocks = _ocr_page_darwin(page)
             if ocr_text:
                 return {
                     "page": page_no,
-                    "text": normalize_search_text(ocr_text),
+                    "text": normalize_pdf_text(ocr_text),
                     "blocks": ocr_blocks,
                     "scanned": True,
                     "ocr": True,
@@ -283,7 +283,7 @@ def _parse_pdf_page(page: fitz.Page, page_no: int) -> dict:
     text = "\n\n".join(b["text"] for b in blocks) if blocks else plain
     return {
         "page": page_no,
-        "text": normalize_search_text(text),
+        "text": normalize_pdf_text(text),
         "blocks": blocks,
         "scanned": False,
         "ocr": False,

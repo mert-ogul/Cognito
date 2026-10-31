@@ -258,6 +258,7 @@ fn process_one_card(
             Ok(DocOutcome::Finished)
         }
         Err(crate::errors::CognitoError::InterruptedByChat) => {
+            eprintln!("card paused for a question: {document_id}");
             state.with_sqlite(|c| sqlite::mark_document_card_pending(c, document_id))?;
             emit_progress(app, None, document_id, "pending", None);
             if let Some(a) = app {

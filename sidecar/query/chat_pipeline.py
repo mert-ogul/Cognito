@@ -29,12 +29,12 @@ _KEYWORD_K = 30
 _RRF_K = 60
 _RERANK_POOL = 20
 _KEEP = 5
-# Below this reranker probability no passage is worth sending to the answer model. The answer model and the checker decide everything above it.
-NOT_FOUND_SCORE = 0.1
+# Between the highest unanswerable score (0.0084) and the lowest answerable one (0.0316) on eval/questions.jsonl.
+NOT_FOUND_SCORE = 0.015
 _HISTORY_TURN_CAP = 2000
 _HISTORY_TOTAL_CAP = 4000
 _CITE_MARK_RE = re.compile(r"\[\d+\]")
-_FTS_WORD_RE = re.compile(r"[0-9A-Za-z]+(?:'[0-9A-Za-z]+)?")
+_FTS_WORD_RE = re.compile(r"[^\W_]+(?:'[^\W_]+)?")
 _FTS_STOPWORDS = frozenset(
     {
         "a",

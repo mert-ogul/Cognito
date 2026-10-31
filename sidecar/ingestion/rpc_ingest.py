@@ -158,4 +158,7 @@ def rpc_reset_index(params: dict[str, Any]) -> dict[str, Any]:
         con.commit()
     finally:
         con.close()
+    from ingestion.rpc_entities import clear_entity_buffers
+
+    clear_entity_buffers()
     return {"ok": True}

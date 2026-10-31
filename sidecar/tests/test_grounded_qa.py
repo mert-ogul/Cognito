@@ -17,6 +17,7 @@ from query.chat_pipeline import (
 )
 from query.check_answer import (
     check_answer,
+    claims_supported,
     looks_like_formula,
     normalize_evidence_text,
     quote_in_passage,
@@ -95,6 +96,24 @@ _GAT_PAGE1 = (
     "operate on graph-structured data, leveraging masked self-attentional layers. "
     "In contrast to related work such as Kipf & Welling (2017), our model assigns "
     "different importance to different nodes.\n"
+)
+
+_GCN_TABLE2 = (
+    "Table 2: Summary of results in terms of classification accuracy (in percent).\n"
+    "Method Cora Citeseer Pubmed\n"
+    "GCN 81.5 70.3 79.0\n"
+    "Dataset Cora is a citation network.\n"
+)
+
+_GAT_HEADER = (
+    "Published as a conference paper at ICLR 2018\n"
+    "Graph Attention Networks\n"
+    "Petar Veličković\n"
+    "Guillem Cucurull\n"
+    "Arantxa Casanova\n"
+    "Adriana Romero\n"
+    "Pietro Liò\n"
+    "Yoshua Bengio\n"
 )
 
 
@@ -211,22 +230,39 @@ def test_looks_like_formula() -> None:
     assert looks_like_formula(r"$H^{(l+1)}=\sigma(\tilde{A}H^{(l)}W^{(l)})$") is True
     assert looks_like_formula(r"\tilde{A}=D^{-1/2}AD^{-1/2}") is True
     assert looks_like_formula("The model is trained on Cora.") is False
+    assert looks_like_formula(r"GCN reaches $81.5\%$ on the Cora dataset.") is False
+    assert looks_like_formula(r"$81.5\%$") is True
+
+
+def test_check_answer_unanswerable_returns_no_sentences() -> None:
+    passages = [{"index": 1, "text": "Something about graphs."}]
+    draft = {
+        "answerable": False,
+        "answer": [
+            {
+                "quotes": [{"source": 1, "text": "Something about graphs."}],
+                "sentence": "The model uses graphs.",
+            }
+        ],
+    }
+    out = check_answer("/tmp", passages, draft)
+    assert out["notFound"] is True
+    assert out["sentences"] == []
 
 
 def test_check_answer_keeps_formula_quote() -> None:
     passages = [{"index": 1, "text": "Layer update uses the renormalized adjacency."}]
     draft = {
         "answerable": True,
-        "quotes": [
-            {
-                "source": 1,
-                "text": r"$H^{(l+1)}=\sigma(\tilde{A}H^{(l)}W^{(l)})$",
-            }
-        ],
         "answer": [
             {
-                "sentence": r"$$H^{(l+1)}=\sigma(\tilde{A}H^{(l)}W^{(l)})$$",
-                "quotes": [0],
+                "quotes": [
+                    {
+                        "source": 1,
+                        "text": r"$H=\sigma(\tilde{A}HW)$",
+                    }
+                ],
+                "sentence": r"$$H=\sigma(\tilde{A}HW)$$",
             }
         ],
     }
@@ -234,6 +270,143 @@ def test_check_answer_keeps_formula_quote() -> None:
     assert out["notFound"] is False
     assert out["sentences"][0]["status"] == "unchecked"
     assert out["sentences"][0]["reason"] == "formula"
+
+
+def test_claims_supported_gcn_table2_accuracy() -> None:
+    evidence = [_GCN_TABLE2]
+    assert claims_supported(
+        "GCN achieves an accuracy of 81.5% on the Cora dataset.",
+        evidence,
+    )
+    assert not claims_supported(
+        "GAT achieves an accuracy of 81.5% on the Cora dataset.",
+        evidence,
+    )
+    assert not claims_supported(
+        "GCN achieves an accuracy of 85.5% on the Cora dataset.",
+        evidence,
+    )
+
+
+def test_claims_supported_gat_header_author_and_venue() -> None:
+    evidence = [_GAT_HEADER]
+    assert claims_supported(
+        "Petar Veličković wrote the paper titled Graph Attention Networks.",
+        evidence,
+    )
+    assert not claims_supported(
+        "Thomas Kipf wrote the paper titled Graph Attention Networks.",
+        evidence,
+    )
+    assert claims_supported(
+        "The paper was published at ICLR 2018.",
+        evidence,
+    )
+    assert not claims_supported(
+        "The paper was published at NeurIPS 2018.",
+        evidence,
+    )
+
+
+def test_check_answer_corrects_quote_source_across_passages() -> None:
+    passages = [
+        {"index": 1, "title": "GCN", "text": "Something unrelated about convolutions."},
+        {
+            "index": 2,
+            "title": "GAT",
+            "text": "We present graph attention networks that operate on graphs.",
+        },
+    ]
+    draft = {
+        "answerable": True,
+        "answer": [
+            {
+                "quotes": [
+                    {
+                        "source": 1,
+                        "text": "graph attention networks that operate on graphs",
+                    }
+                ],
+                "sentence": "The paper presents graph attention networks.",
+            }
+        ],
+    }
+    out = check_answer("/tmp", passages, draft)
+    assert out["notFound"] is False
+    assert out["sentences"][0]["status"] in ("supported", "unchecked")
+    assert out["sentences"][0]["sources"] == [2]
+
+
+def test_check_answer_hhem_weak_keeps_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_bounded(_app, pairs):
+        return [0.2] * len(pairs)
+
+    monkeypatch.setattr("query.check_answer.hhem_scores_bounded", fake_bounded)
+    passages = [{"index": 1, "title": "Cora", "text": "The model uses Cora."}]
+    draft = {
+        "answerable": True,
+        "answer": [
+            {
+                "quotes": [{"source": 1, "text": "uses Cora"}],
+                "sentence": "It uses Cora.",
+            }
+        ],
+    }
+    out = check_answer("/tmp", passages, draft)
+    assert out["notFound"] is False
+    assert out["sentences"][0]["status"] == "unchecked"
+    assert out["sentences"][0]["reason"] == "weak"
+
+
+def test_check_answer_two_sentences_each_with_own_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_bounded(_app, pairs):
+        return [0.9] * len(pairs)
+
+    monkeypatch.setattr("query.check_answer.hhem_scores_bounded", fake_bounded)
+    passages = [
+        {
+            "index": 1,
+            "title": "GCN",
+            "text": "GCN achieves 81.5 accuracy on the Cora dataset.",
+        },
+        {
+            "index": 2,
+            "title": "GAT",
+            "text": "Published as a conference paper at ICLR 2018.",
+        },
+    ]
+    draft = {
+        "answerable": True,
+        "answer": [
+            {
+                "quotes": [
+                    {
+                        "source": 1,
+                        "text": "GCN achieves 81.5 accuracy on the Cora dataset.",
+                    }
+                ],
+                "sentence": "GCN achieves an accuracy of 81.5 on the Cora dataset.",
+            },
+            {
+                "quotes": [
+                    {
+                        "source": 2,
+                        "text": "Published as a conference paper at ICLR 2018.",
+                    }
+                ],
+                "sentence": "The paper was published at ICLR 2018.",
+            },
+        ],
+    }
+    out = check_answer("/tmp", passages, draft)
+    assert out["notFound"] is False
+    assert len(out["sentences"]) == 2
+    assert out["sentences"][0]["status"] == "supported"
+    assert out["sentences"][0]["sources"] == [1]
+    assert out["sentences"][1]["status"] == "supported"
+    assert out["sentences"][1]["sources"] == [2]
 
 
 def test_name_number_check_catches_year_mismatch() -> None:
@@ -245,11 +418,15 @@ def test_name_number_check_catches_year_mismatch() -> None:
     ]
     draft = {
         "answerable": True,
-        "quotes": [{"source": 1, "text": "Kipf and Welling published the model in 2016."}],
         "answer": [
             {
+                "quotes": [
+                    {
+                        "source": 1,
+                        "text": "Kipf and Welling published the model in 2016.",
+                    }
+                ],
                 "sentence": "Kipf and Welling published the model in 2017.",
-                "quotes": [0],
             }
         ],
     }
@@ -281,7 +458,7 @@ def test_low_best_score_returns_not_found(monkeypatch: pytest.MonkeyPatch) -> No
         cp,
         "rerank_with_budget",
         lambda app_data, query, documents: {
-            "scores": [0.05] * len(documents),
+            "scores": [0.008] * len(documents),
             "scored": len(documents),
             "budgetHit": False,
             "rerankMs": 1,
@@ -301,7 +478,7 @@ def test_low_best_score_returns_not_found(monkeypatch: pytest.MonkeyPatch) -> No
         "nomic-embed-text",
     )
     assert out["notFound"] is True
-    assert out["bestScore"] < 0.10
+    assert out["bestScore"] < 0.015
     assert len(out["citations"]) == 3
     assert [c["index"] for c in out["citations"]] == [1, 2, 3]
     assert "trace" in out
@@ -350,7 +527,7 @@ def test_second_pass_answers_from_scoped_document(
 
     scores_by_text = {
         gcn_chunks[0]["text"]: 0.95,
-        gat_chunks[0]["text"]: 0.05,
+        gat_chunks[0]["text"]: 0.008,
     }
 
     def fake_rerank(app_data, query, documents):
@@ -429,7 +606,7 @@ def test_suggestions_when_both_passes_fail(monkeypatch: pytest.MonkeyPatch) -> N
         cp,
         "rerank_with_budget",
         lambda app_data, query, documents: {
-            "scores": [0.05] * len(documents),
+            "scores": [0.008] * len(documents),
             "scored": len(documents),
             "budgetHit": False,
             "rerankMs": 1,

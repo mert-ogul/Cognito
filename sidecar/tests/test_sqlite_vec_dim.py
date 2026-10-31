@@ -37,6 +37,8 @@ def test_insert_wrong_size_raises(tmp_path: Path) -> None:
 
 
 def test_reset_index_removes_embedding_table(tmp_path: Path) -> None:
+    from ingestion import rpc_entities as re
+
     sqlite_path = str(tmp_path / "v.sqlite")
     con = connect_with_vec(sqlite_path)
     ensure_chunk_embedding_table(con, 4)
@@ -44,8 +46,10 @@ def test_reset_index_removes_embedding_table(tmp_path: Path) -> None:
     con.commit()
     con.close()
 
+    re._doc_span_buffers["doc-x"] = [{"label": "person", "text": "Ada"}]
     out = rpc_reset_index({"sqlitePath": sqlite_path})
     assert out["ok"] is True
+    assert re._doc_span_buffers == {}
 
     con2 = sqlite3.connect(sqlite_path)
     n = con2.execute(

@@ -92,6 +92,7 @@ export function ChatPanel({ health }: Props) {
   const addCitedRegions = useCitedRegionsStore((s) => s.addRegions);
   const consumeIntent = useChatIntentStore((s) => s.consumeIntent);
   const pendingRelated = useChatIntentStore((s) => s.pendingRelated);
+  const libraryResetEpoch = useChatIntentStore((s) => s.libraryResetEpoch);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -137,6 +138,16 @@ export function ChatPanel({ health }: Props) {
     if (!el || !stickToBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [messages, busyId]);
+
+  useEffect(() => {
+    if (libraryResetEpoch === 0) return;
+    setMessages([]);
+    setBusyId(null);
+    setRetryUserText(null);
+    setScopeDocs([]);
+    lastSentRef.current = null;
+    lastSentScopeRef.current = [];
+  }, [libraryResetEpoch]);
 
   useLayoutEffect(() => {
     const el = textareaRef.current;

@@ -105,7 +105,7 @@ export function SourceRegionThumb({
           className="mb-1 max-h-[220px] w-auto max-w-full object-contain"
         />
       ) : null}
-      <span className="text-muted">{quote}</span>
+      {quote ? <span className="text-muted">{quote}</span> : null}
     </button>
   );
 }

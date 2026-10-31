@@ -298,26 +298,26 @@ mod tests {
 
     #[test]
     fn draft_scanner_handles_escaped_quotes() {
-        let buf = r#"{"answerable":true,"quotes":[],"answer":[{"sentence":"She said \"hello\".","quotes":[0]}"#;
+        let buf = r#"{"answerable":true,"answer":[{"quotes":[{"source":1,"text":"hello"}],"sentence":"She said \"hello\"."}"#;
         let draft = draft_sentences_from_partial(buf);
         assert_eq!(draft, vec![r#"She said "hello"."#]);
     }
 
     #[test]
     fn draft_scanner_handles_latex_backslashes() {
-        let buf = r#"{"answer":[{"sentence":"Energy $E=mc^{2}$ holds.","quotes":[0]}]}"#;
+        let buf = r#"{"answer":[{"quotes":[{"source":1,"text":"E=mc2"}],"sentence":"Energy $E=mc^{2}$ holds."}]}"#;
         let draft = draft_sentences_from_partial(buf);
         assert_eq!(draft, vec!["Energy $E=mc^{2}$ holds."]);
     }
 
     #[test]
     fn draft_scanner_sentence_split_across_chunks() {
-        let a = r#"{"answer":[{"sentence":"First half "#;
+        let a = r#"{"answer":[{"quotes":[{"source":1,"text":"a"}],"sentence":"First half "#;
         assert!(draft_sentences_from_partial(a).is_empty());
-        let b = r#"{"answer":[{"sentence":"First half continues here.","quotes":[0]},{"sentence":"Second."#;
+        let b = r#"{"answer":[{"quotes":[{"source":1,"text":"a"}],"sentence":"First half continues here."},{"quotes":[{"source":2,"text":"b"}],"sentence":"Second."#;
         let draft = draft_sentences_from_partial(b);
         assert_eq!(draft, vec!["First half continues here."]);
-        let c = r#"{"answer":[{"sentence":"First half continues here.","quotes":[0]},{"sentence":"Second done.","quotes":[1]}]}"#;
+        let c = r#"{"answer":[{"quotes":[{"source":1,"text":"a"}],"sentence":"First half continues here."},{"quotes":[{"source":2,"text":"b"}],"sentence":"Second done."}]}"#;
         assert_eq!(
             draft_sentences_from_partial(c),
             vec!["First half continues here.", "Second done."]

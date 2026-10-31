@@ -50,10 +50,15 @@ _ABBR_RE = re.compile(
     r"(?P<full>(?:[A-Z][A-Za-z0-9]+)(?:[\s\-]+(?:[A-Z][A-Za-z0-9]+)){1,10})"
     r"\s*\((?P<abbr>[A-Z][A-Z0-9]{1,12})\)"
 )
-_WORD_RE = re.compile(r"[0-9A-Za-z]+(?:'[0-9A-Za-z]+)?")
+_WORD_RE = re.compile(r"[^\W_]+(?:'[^\W_]+)?")
+_YEAR_IN_TEXT = re.compile(r"\b(1[0-9]{3}|20[0-9]{2}|2100)\b")
 
 # Raw spans buffered across incremental extract_entities calls, keyed by document id.
 _doc_span_buffers: dict[str, list[dict[str, Any]]] = {}
+
+
+def clear_entity_buffers() -> None:
+    _doc_span_buffers.clear()
 
 
 def _param(params: dict[str, Any], *keys: str, default: Any = None) -> Any:
@@ -136,7 +141,10 @@ def merge_within_doc(
         if label.lower() == "date":
             nd = normalize_date(text)
             if not nd:
-                continue
+                ym = _YEAR_IN_TEXT.search(text)
+                if not ym:
+                    continue
+                nd = ym.group(1)
             name = nd
             normalized = nd
         else:

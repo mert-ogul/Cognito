@@ -26,7 +26,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
 ];
 
 /// Bump when embedding text format or retrieval index layout changes.
-pub const INDEX_FORMAT_VERSION: i32 = 5;
+pub const INDEX_FORMAT_VERSION: i32 = 7;
 
 pub fn open_sqlite(path: &Path) -> CognitoResult<Connection> {
     let conn = Connection::open(path)?;
@@ -78,6 +78,7 @@ pub fn clear_setting(conn: &Connection, key: &str) -> CognitoResult<()> {
 
 pub fn delete_all_documents(conn: &Connection) -> CognitoResult<()> {
     conn.execute("DELETE FROM documents", [])?;
+    prune_entities(conn)?;
     Ok(())
 }
 
@@ -536,12 +537,30 @@ pub fn mark_document_entities_failed(conn: &Connection, id: &str, msg: &str) -> 
     Ok(())
 }
 
+pub fn prune_entities(conn: &Connection) -> CognitoResult<()> {
+    conn.execute_batch(
+        "UPDATE entities SET
+  mention_count = (SELECT COUNT(*) FROM mentions m WHERE m.entity_id = entities.id),
+  doc_count = (SELECT COUNT(DISTINCT m.document_id) FROM mentions m WHERE m.entity_id = entities.id);
+DELETE FROM entities WHERE mention_count = 0;",
+    )?;
+    Ok(())
+}
+
 pub fn clear_document_entity_rows(conn: &Connection, document_id: &str) -> CognitoResult<()> {
     conn.execute("DELETE FROM mentions WHERE document_id = ?1", [document_id])?;
     conn.execute(
         "DELETE FROM document_links WHERE source_id = ?1 OR target_id = ?1",
         [document_id],
     )?;
+    prune_entities(conn)?;
+    Ok(())
+}
+
+pub fn empty_connection_tables(conn: &Connection) -> CognitoResult<()> {
+    conn.execute("DELETE FROM entities", [])?;
+    let _ = conn.execute("DELETE FROM topics", []);
+    let _ = conn.execute("DELETE FROM document_points", []);
     Ok(())
 }
 
@@ -953,6 +972,7 @@ pub fn pending_entities_or_cards_remain(conn: &Connection) -> CognitoResult<bool
 
 pub fn delete_document_by_id(conn: &Connection, id: &str) -> CognitoResult<()> {
     conn.execute("DELETE FROM documents WHERE id = ?1", [id])?;
+    prune_entities(conn)?;
     Ok(())
 }
 
@@ -1483,7 +1503,7 @@ mod tests {
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .expect("uv");
             assert_eq!(v, 16);
-            assert_eq!(INDEX_FORMAT_VERSION, 5);
+            assert_eq!(INDEX_FORMAT_VERSION, 7);
             let has_topics: i32 = c
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='topics'",
@@ -1838,5 +1858,81 @@ mod tests {
             related[rare_pos].get("kind").and_then(|v| v.as_str()),
             Some("shares_names")
         );
+    }
+
+    #[test]
+    fn clear_document_entity_rows_prunes_entities_without_mentions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("v.sqlite");
+        let c = open_sqlite(&p).expect("open");
+        insert_document_row(
+            &c,
+            "d1",
+            "/a.pdf",
+            "A",
+            "pdf",
+            "h",
+            None,
+            "indexed",
+            None,
+            None,
+        )
+        .expect("d1");
+        insert_document_row(
+            &c,
+            "d2",
+            "/b.pdf",
+            "B",
+            "pdf",
+            "h",
+            None,
+            "indexed",
+            None,
+            None,
+        )
+        .expect("d2");
+        insert_chunk_row(&c, "c1", "d1", 0, None, None, "Ada", 1, "h1", "body", "[]", None)
+            .expect("c1");
+        insert_chunk_row(&c, "c2", "d2", 0, None, None, "Ada", 1, "h2", "body", "[]", None)
+            .expect("c2");
+        c.execute_batch(
+            "
+            INSERT INTO entities(id, label, name, normalized, doc_count, mention_count)
+            VALUES
+              ('e_only_d1', 'person', 'Only', 'only', 1, 1),
+              ('e_shared', 'person', 'Ada', 'ada', 2, 2);
+            INSERT INTO mentions(entity_id, chunk_id, document_id, start, end) VALUES
+              ('e_only_d1', 'c1', 'd1', 0, 4),
+              ('e_shared', 'c1', 'd1', 0, 3),
+              ('e_shared', 'c2', 'd2', 0, 3);
+            ",
+        )
+        .expect("seed");
+        clear_document_entity_rows(&c, "d1").expect("clear");
+        let leftover: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM entities e
+                 WHERE NOT EXISTS (SELECT 1 FROM mentions m WHERE m.entity_id = e.id)",
+                [],
+                |r| r.get(0),
+            )
+            .expect("orphan count");
+        assert_eq!(leftover, 0);
+        let only: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE id = 'e_only_d1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("only");
+        assert_eq!(only, 0);
+        let shared_docs: i64 = c
+            .query_row(
+                "SELECT doc_count FROM entities WHERE id = 'e_shared'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("shared");
+        assert_eq!(shared_docs, 1);
     }
 }

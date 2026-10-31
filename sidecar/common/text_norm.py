@@ -11,6 +11,32 @@ _WS_RE = re.compile(r"\s+")
 _SOFT_HYPHEN = "\u00ad"
 _LINE_END_HYPHEN_RE = re.compile(r"(\w)-\s*\n\s*(\w)")
 
+_SPACING_ACCENTS = {
+    chr(a): chr(b)
+    for a, b in (
+        (0x00B4, 0x0301),
+        (0x0060, 0x0300),
+        (0x00A8, 0x0308),
+        (0x02C7, 0x030C),
+        (0x02C6, 0x0302),
+        (0x02DC, 0x0303),
+        (0x02D8, 0x0306),
+        (0x02D9, 0x0307),
+        (0x02DA, 0x030A),
+        (0x02DD, 0x030B),
+    )
+}
+_ACCENT_BEFORE_LETTER_RE = re.compile(
+    "([" + "".join(_SPACING_ACCENTS) + r"])([^\W\d_])"
+)
+
+
+def fix_pdf_accents(text: str) -> str:
+    return _ACCENT_BEFORE_LETTER_RE.sub(
+        lambda m: m.group(2) + _SPACING_ACCENTS[m.group(1)], text
+    )
+
+
 _MONTHS = {
     "january": 1,
     "jan": 1,
@@ -146,3 +172,8 @@ def normalize_search_text(text: str) -> str:
     s = s.replace(_SOFT_HYPHEN, "")
     s = _LINE_END_HYPHEN_RE.sub(r"\1\2", s)
     return s
+
+
+def normalize_pdf_text(text: str) -> str:
+    """PDF spacing accents, then the shared search-text normalisation."""
+    return normalize_search_text(fix_pdf_accents(text or ""))

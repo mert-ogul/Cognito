@@ -450,7 +450,8 @@ def hhem_scores_bounded(
             out[i] = score
             scored += 1
         except Exception:
-            out[i] = None
+            log.exception("hhem predict failed for pair %s", i)
+            out[i] = float("nan")
     return out
 
 

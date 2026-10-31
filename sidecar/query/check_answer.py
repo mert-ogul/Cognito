@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from typing import Any
@@ -13,6 +14,7 @@ _ASCII_LETTER_RATIO = 0.6
 _PASSAGE_CAP = 2000
 _QUOTE_SKIPS = 2
 _WORD_RE = re.compile(r"[^\W_]+")
+_TOKEN_RE = re.compile(r"[^\W_]+(?:[-'][^\W_]+)*")
 
 _LIGATURES = str.maketrans(
     {
@@ -47,7 +49,6 @@ _NUMBER_RE = re.compile(
     r"\b(?:\d{1,4}[-/]\d{1,2}[-/]\d{1,4}|\d+(?:\.\d+)?(?:st|nd|rd|th)?)\b",
     re.IGNORECASE,
 )
-_MULTI_NAME_RE = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b")
 
 
 def normalize_evidence_text(text: str) -> str:
@@ -86,14 +87,46 @@ def quote_in_passage(quote: str, passage: str) -> bool:
     return False
 
 
+_MATH_SPAN_RE = re.compile(r"\$\$[\s\S]*?\$\$|\$[^$]*\$")
+
+
 def looks_like_formula(text: str) -> bool:
-    if "$" in text or "\\" in text:
-        return True
-    words = evidence_words(text)
+    s = text or ""
+    without = _MATH_SPAN_RE.sub(" ", s)
+    remaining = evidence_words(without)
+    if sum(1 for w in remaining if len(w) >= 3 and w.isalpha()) >= 4:
+        return False
+    words = evidence_words(s)
     if not words:
         return True
     plain = sum(1 for w in words if len(w) >= 3 and w.isalpha())
     return plain * 2 < len(words)
+
+
+def numbers_supported(sentence: str, evidence: list[str]) -> bool:
+    numbers, _names = claims_in_sentence(sentence)
+    text = " ".join(normalize_evidence_text(e).lower() for e in evidence)
+    return all(normalize_evidence_text(n).lower() in text for n in numbers)
+
+
+def claims_in_sentence(sentence: str) -> tuple[list[str], list[str]]:
+    numbers = [m.group(0) for m in _NUMBER_RE.finditer(sentence)]
+    names: list[str] = []
+    for i, word in enumerate(_TOKEN_RE.findall(sentence)):
+        if any(c.isdigit() for c in word):
+            continue
+        if (word.isupper() and len(word) >= 2) or (i > 0 and word[0].isupper()):
+            names.append(word)
+    return numbers, names
+
+
+def claims_supported(sentence: str, evidence: list[str]) -> bool:
+    numbers, names = claims_in_sentence(sentence)
+    text = " ".join(normalize_evidence_text(e).lower() for e in evidence)
+    words = set(evidence_words(" ".join(evidence)))
+    if any(normalize_evidence_text(n).lower() not in text for n in numbers):
+        return False
+    return all(all(w in words for w in evidence_words(n)) for n in names)
 
 
 def _ascii_letter_ratio(text: str) -> float:
@@ -111,6 +144,14 @@ def _mostly_english(a: str, b: str) -> bool:
     )
 
 
+def _passage_evidence(p: dict[str, Any]) -> str:
+    title = str(p.get("title") or "").strip()
+    text = str(p.get("text") or "")
+    if title:
+        return f"{title}\n{text}"
+    return text
+
+
 def _passage_by_index(passages: list[dict[str, Any]]) -> dict[int, str]:
     out: dict[int, str] = {}
     for p in passages:
@@ -118,109 +159,86 @@ def _passage_by_index(passages: list[dict[str, Any]]) -> dict[int, str]:
             idx = int(p["index"])
         except (KeyError, TypeError, ValueError):
             continue
-        out[idx] = str(p.get("text") or "")
+        out[idx] = _passage_evidence(p)
     return out
 
 
-def _claims_in_sentence(sentence: str) -> list[str]:
-    claims: list[str] = []
-    for m in _NUMBER_RE.finditer(sentence or ""):
-        claims.append(m.group(0))
-    for m in _MULTI_NAME_RE.finditer(sentence or ""):
-        claims.append(m.group(1))
-    return claims
-
-
-def _claim_supported(claim: str, haystacks: list[str]) -> bool:
-    needle = normalize_evidence_text(claim).lower()
-    if not needle:
-        return True
-    for h in haystacks:
-        if needle in normalize_evidence_text(h).lower():
-            return True
-    return False
+def _resolve_quote(
+    qtext: str, source: int, by_idx: dict[int, str]
+) -> dict[str, Any] | None:
+    passage = by_idx.get(source)
+    if passage is not None and quote_in_passage(qtext, passage):
+        return {"source": source, "text": qtext}
+    if looks_like_formula(qtext):
+        return {"source": source, "text": qtext, "formula": True}
+    for other_idx, other_text in by_idx.items():
+        if other_idx == source:
+            continue
+        if quote_in_passage(qtext, other_text):
+            return {"source": other_idx, "text": qtext}
+    return None
 
 
 def check_answer(app_data: str, passages: list[dict], draft: dict) -> dict:
     answerable = bool(draft.get("answerable"))
+    if not answerable:
+        return {"notFound": True, "sentences": []}
     answer = draft.get("answer") or []
     if not answer:
         return {"notFound": True, "sentences": []}
 
     by_idx = _passage_by_index(passages)
-    raw_quotes = draft.get("quotes") or []
-    valid_quotes: list[dict[str, Any] | None] = []
-    for q in raw_quotes:
-        try:
-            source = int(q.get("source"))
-        except (TypeError, ValueError, AttributeError):
-            valid_quotes.append(None)
-            continue
-        qtext = str(q.get("text") or "")
-        passage = by_idx.get(source)
-        if passage is None:
-            valid_quotes.append(None)
-            continue
-        if quote_in_passage(qtext, passage):
-            valid_quotes.append({"source": source, "text": qtext})
-            continue
-        if looks_like_formula(qtext):
-            valid_quotes.append({"source": source, "text": qtext, "formula": True})
-            continue
-        valid_quotes.append(None)
-
     sentences_out: list[dict[str, Any]] = []
-    any_ok = False
     hhem_jobs: list[tuple[int, str, str]] = []
 
     for sent in answer:
         text = str(sent.get("sentence") or sent.get("text") or "")
-        q_indexes = sent.get("quotes") or []
         kept: list[dict[str, Any]] = []
-        for qi in q_indexes:
-            try:
-                i = int(qi)
-            except (TypeError, ValueError):
+        for q in sent.get("quotes") or []:
+            if not isinstance(q, dict):
                 continue
-            if 0 <= i < len(valid_quotes) and valid_quotes[i] is not None:
-                kept.append(valid_quotes[i])  # type: ignore[arg-type]
+            try:
+                source = int(q.get("source"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            resolved = _resolve_quote(str(q.get("text") or ""), source, by_idx)
+            if resolved is not None:
+                kept.append(resolved)
         sources = sorted({int(q["source"]) for q in kept})
         quote_texts = [str(q["text"]) for q in kept]
         passage_texts = [by_idx[s] for s in sources if s in by_idx]
         haystacks = quote_texts + passage_texts
 
-        formula_sentence = looks_like_formula(text)
-        formula_only = bool(kept) and all(bool(q.get("formula")) for q in kept)
-        if formula_sentence or formula_only:
-            sentences_out.append(
-                {
-                    "text": text,
-                    "status": "unchecked",
-                    "sources": sources,
-                    "reason": "formula",
-                }
-            )
-            any_ok = True
+        if looks_like_formula(text):
+            if len(kept) >= 1 and numbers_supported(text, haystacks):
+                sentences_out.append(
+                    {
+                        "text": text,
+                        "status": "unchecked",
+                        "sources": sources,
+                        "reason": "formula",
+                    }
+                )
+            else:
+                sentences_out.append(
+                    {"text": text, "status": "unsupported", "sources": sources}
+                )
             continue
 
-        ok_quotes = len(kept) >= 1
-        claims = _claims_in_sentence(text)
-        ok_claims = all(_claim_supported(c, haystacks) for c in claims)
-        status = "unsupported"
-        reason: str | None = None
-        if ok_quotes and ok_claims:
+        if len(kept) >= 1 and claims_supported(text, haystacks):
+            status = "supported"
+            reason: str | None = None
             premise = " ".join(t[:_PASSAGE_CAP] for t in passage_texts)
             if _mostly_english(premise, text):
                 hhem_jobs.append((len(sentences_out), premise, text))
-                status = "pending"
-            else:
-                status = "unchecked"
-                reason = "language"
-                any_ok = True
-        row: dict[str, Any] = {"text": text, "status": status, "sources": sources}
-        if reason:
-            row["reason"] = reason
-        sentences_out.append(row)
+            row: dict[str, Any] = {"text": text, "status": status, "sources": sources}
+            if reason:
+                row["reason"] = reason
+            sentences_out.append(row)
+        else:
+            sentences_out.append(
+                {"text": text, "status": "unsupported", "sources": sources}
+            )
 
     if hhem_jobs:
         scores = hhem_scores_bounded(app_data, [(j, s) for _i, j, s in hhem_jobs])
@@ -228,20 +246,14 @@ def check_answer(app_data: str, passages: list[dict], draft: dict) -> dict:
             if score is None:
                 sentences_out[idx]["status"] = "unchecked"
                 sentences_out[idx]["reason"] = "budget"
-                any_ok = True
-            elif float(score) >= _HHEM_MIN:
-                sentences_out[idx]["status"] = "supported"
-                any_ok = True
-            else:
-                sentences_out[idx]["status"] = "unsupported"
+            elif isinstance(score, float) and math.isnan(score):
+                sentences_out[idx]["status"] = "unchecked"
+                sentences_out[idx]["reason"] = "error"
+            elif float(score) < _HHEM_MIN:
+                sentences_out[idx]["status"] = "unchecked"
+                sentences_out[idx]["reason"] = "weak"
 
-    for s in sentences_out:
-        if s["status"] == "pending":
-            s["status"] = "unchecked"
-            s["reason"] = "budget"
-            any_ok = True
-
-    if not answerable:
-        return {"notFound": True, "sentences": sentences_out}
-
-    return {"notFound": not any_ok, "sentences": sentences_out}
+    any_shown = any(
+        s["status"] in ("supported", "unchecked") for s in sentences_out
+    )
+    return {"notFound": not any_shown, "sentences": sentences_out}

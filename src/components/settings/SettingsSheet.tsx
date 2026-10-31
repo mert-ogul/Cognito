@@ -14,6 +14,8 @@ import {
   setVault,
   updateSettings,
 } from "@/lib/tauri";
+import { useChatIntentStore } from "@/stores/chatIntentStore";
+import { useMainViewStore } from "@/stores/mainViewStore";
 import { getVersion } from "@tauri-apps/api/app";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
@@ -91,6 +93,12 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     void qc.invalidateQueries({ queryKey: ["documents"] });
   };
 
+  const afterLibraryReset = () => {
+    void qc.invalidateQueries();
+    useChatIntentStore.getState().bumpLibraryReset();
+    useMainViewStore.getState().showConversation();
+  };
+
   const settingsPayload = () => ({
     vaultPath: data?.vaultPath ?? null,
     chatModel: chat,
@@ -165,16 +173,21 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
           extraEntityLabels: alsoFind,
         });
         await rebuildIndex(embed.trim());
+        afterLibraryReset();
       } else if (confirm === "rebuild") {
         await rebuildIndex();
+        afterLibraryReset();
       } else if (confirm === "change-folder" && pendingFolder) {
         await setVault(pendingFolder);
+        afterLibraryReset();
       } else if (confirm === "remove-library") {
         await clearLibrary();
+        afterLibraryReset();
+      } else {
+        invalidate();
       }
       setPendingFolder(null);
       setConfirm(null);
-      invalidate();
     } catch (e) {
       setActionError(String(e));
     } finally {

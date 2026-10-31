@@ -231,7 +231,9 @@ describe("ChatPanel", () => {
     renderChat();
     await sendPrompt("ask");
     expect(await screen.findByText("Timed out claim.")).toBeInTheDocument();
-    expect(screen.getByText("Some sentences couldn't be checked.")).toBeInTheDocument();
+    expect(
+      screen.getByText("This couldn't be checked against the sources."),
+    ).toBeInTheDocument();
     expect(screen.queryByText("Not checked")).toBeNull();
   });
 
@@ -257,7 +259,7 @@ describe("ChatPanel", () => {
     await sendPrompt("ask");
     expect(
       await screen.findByText(
-        "Formulas are shown as written by the model; compare them with the page images below.",
+        "Rewritten from the PDF text. Open source 1 to compare it with the page.",
       ),
     ).toBeInTheDocument();
   });
@@ -279,11 +281,12 @@ describe("ChatPanel", () => {
     expect(screen.getByText("Searching all documents")).toBeInTheDocument();
   });
 
-  it("shows passages before the answer", async () => {
+  it("shows only the status line while writing, then collapsed sources", async () => {
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
       e2eEmit("chat-stage", {
         messageId,
-        stage: "passages",
+        stage: "writing",
+        detail: "Writing the answer",
         citations: [cite(1, "One", "/vault/one.pdf")],
       });
       await new Promise((r) => setTimeout(r, 20));
@@ -298,9 +301,10 @@ describe("ChatPanel", () => {
     });
     renderChat();
     await sendPrompt("ask");
-    expect(await screen.findByText("Sources")).toBeInTheDocument();
-    expect(screen.getByText("Writing the answer")).toBeInTheDocument();
+    expect(await screen.findByText("Writing the answer")).toBeInTheDocument();
+    expect(screen.queryByText(/Sources ·/)).toBeNull();
     expect(await screen.findByText("Final answer body.")).toBeInTheDocument();
+    expect(screen.getByText("Sources · 1")).toBeInTheDocument();
   });
 
   it("shows notFound passages with title and page separate from snippet", async () => {
@@ -328,6 +332,11 @@ describe("ChatPanel", () => {
     expect(
       await screen.findByText("Your documents don't answer this."),
     ).toBeInTheDocument();
+    const disclosure = screen.getByText("Closest passages").closest("details");
+    expect(disclosure).not.toBeNull();
+    expect(disclosure).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("Closest passages"));
+    expect(disclosure).toHaveAttribute("open");
     expect(screen.getByText("Closest Paper")).toBeInTheDocument();
     expect(screen.getByText("p. 3")).toBeInTheDocument();
     const btn = screen.getByRole("button", { name: /Closest Paper/ });
@@ -337,7 +346,7 @@ describe("ChatPanel", () => {
     expect(btn.textContent).not.toMatch(/Closest Paperp\./);
   });
 
-  it("shows unconfirmed answer disclosure when notFound has sentences", async () => {
+  it("hides model text when notFound even if sentences were sent", async () => {
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
       e2eEmit("chat-final", {
         messageId,
@@ -356,12 +365,8 @@ describe("ChatPanel", () => {
     expect(
       await screen.findByText("Your documents don't answer this."),
     ).toBeInTheDocument();
-    const disclosure = screen.getByText("Show the unconfirmed answer").closest("details");
-    expect(disclosure).not.toBeNull();
-    expect(disclosure).not.toHaveAttribute("open");
-    expect(disclosure?.textContent).toMatch(/Drafted but unconfirmed/);
-    fireEvent.click(screen.getByText("Show the unconfirmed answer"));
-    expect(disclosure).toHaveAttribute("open");
+    expect(screen.queryByText("Show the unconfirmed answer")).toBeNull();
+    expect(screen.queryByText("Drafted but unconfirmed.")).toBeNull();
   });
 
   it("suggestion link sets scope and resends the question", async () => {
@@ -511,8 +516,17 @@ describe("ChatPanel", () => {
     );
     await sendPrompt("ask");
     expect(await screen.findByLabelText("Source 2")).toBeInTheDocument();
-    expect(screen.getByText("Sources")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Two, p. 3" })).toBeInTheDocument();
+    expect(screen.getByText("Sources · 1")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Sources · 1"));
+    expect(screen.getByText("Two")).toBeInTheDocument();
+    expect(screen.getByText("p. 3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Two/ })).toBeInTheDocument();
+    expect(screen.getByText("Show 1 more passage")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Sources · 1"));
+    expect(screen.queryByText("Two")).toBeNull();
+    expect(screen.queryByText("Show 1 more passage")).toBeNull();
+    fireEvent.click(screen.getByText("Sources · 1"));
+    expect(screen.getByText("Two")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Source 2"));
     await waitFor(() => {
       expect(getDocumentPreview).toHaveBeenCalledWith("d2", "c2");

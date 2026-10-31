@@ -15,6 +15,7 @@ import {
 } from "@/lib/tauri";
 import { useTauriEvent } from "@/lib/tauri-events";
 import { cn } from "@/lib/utils";
+import { useChatIntentStore } from "@/stores/chatIntentStore";
 import { useMainViewStore } from "@/stores/mainViewStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -132,9 +133,9 @@ export function LibraryPanel() {
       setActionError(null);
     },
     onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["health"] });
-      void qc.invalidateQueries({ queryKey: ["settings"] });
-      void qc.invalidateQueries({ queryKey: ["documents"] });
+      void qc.invalidateQueries();
+      useChatIntentStore.getState().bumpLibraryReset();
+      useMainViewStore.getState().showConversation();
     },
     onError: (error) => {
       setActionError(String(error));

@@ -15,41 +15,39 @@ use serde_json::{json, Value};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
-const SYSTEM_PROMPT: &str = "Answer only from the numbered passages. First copy up to four short, exact sentences you rely on. Then answer the question in plain, natural sentences built only from those quotes, and list the quotes each sentence uses. Write formulas in LaTeX between $ or $$. If the passages don't answer the question, set answerable to false and leave both lists empty.";
+const SYSTEM_PROMPT: &str = "Answer only from the numbered passages. For each answer sentence, first copy one to three short, exact passages it relies on, with their passage numbers, then write the sentence from them. Don't repeat a fact in two sentences. Write every sentence in words. Use LaTeX only for real formulas, never for plain numbers, percentages or units: write 81.5%, not $81.5\\%$. Inside JSON strings, write each LaTeX backslash twice. Write formulas in LaTeX between $ or $$. Formulas in the passages come from PDF text and are often garbled; rewrite them as clean LaTeX. For example, h = σ(W x̃ + b) becomes $h = \\sigma(W\\tilde{x} + b)$. Each passage starts with its document's title. If the question asks about a specific paper, person or thing and the passages are about a different one, set answerable to false. If the passages don't answer the question, set answerable to false and leave the answer list empty.";
 
 fn answer_format_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
             "answerable": { "type": "boolean" },
-            "quotes": {
-                "type": "array",
-                "maxItems": 4,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "source": { "type": "integer" },
-                        "text": { "type": "string" }
-                    },
-                    "required": ["source", "text"]
-                }
-            },
             "answer": {
                 "type": "array",
+                "maxItems": 5,
                 "items": {
                     "type": "object",
                     "properties": {
-                        "sentence": { "type": "string" },
                         "quotes": {
                             "type": "array",
-                            "items": { "type": "integer" }
-                        }
+                            "minItems": 1,
+                            "maxItems": 3,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "source": { "type": "integer" },
+                                    "text": { "type": "string" }
+                                },
+                                "required": ["source", "text"]
+                            }
+                        },
+                        "sentence": { "type": "string" }
                     },
-                    "required": ["sentence", "quotes"]
+                    "required": ["quotes", "sentence"]
                 }
             }
         },
-        "required": ["answerable", "quotes", "answer"]
+        "required": ["answerable", "answer"]
     })
 }
 
@@ -63,15 +61,14 @@ pub struct DraftQuote {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftAnswerItem {
+    pub quotes: Vec<DraftQuote>,
     pub sentence: String,
-    pub quotes: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroundedDraft {
     pub answerable: bool,
-    pub quotes: Vec<DraftQuote>,
     pub answer: Vec<DraftAnswerItem>,
 }
 
@@ -106,7 +103,53 @@ pub fn reduce_history(history: &[ChatTurn], n_pairs: usize) -> Vec<ChatTurn> {
         .collect()
 }
 
-/// Parse model JSON and reject answerable drafts whose sentences lack quote indexes.
+/// Undo JSON control-character decoding that broke LaTeX (`\t` → tab, etc.).
+pub fn repair_latex_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\t' => out.push_str("\\t"),
+            '\u{000c}' => out.push_str("\\f"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\r' => out.push_str("\\r"),
+            '\n' => {
+                if chars.peek().is_some_and(|n| n.is_ascii_alphabetic()) {
+                    out.push_str("\\n");
+                } else {
+                    out.push(' ');
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn sentence_word_key(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn dedupe_answer_sentences(mut draft: GroundedDraft) -> GroundedDraft {
+    let mut seen = std::collections::HashSet::new();
+    draft
+        .answer
+        .retain(|item| seen.insert(sentence_word_key(&item.sentence)));
+    draft
+}
+
+/// Parse model JSON; answerable drafts with no quoted sentences become unanswerable.
 pub fn parse_grounded_answer(raw: &str) -> Result<GroundedDraft, String> {
     let trimmed = raw.trim();
     let draft = match serde_json::from_str::<GroundedDraft>(trimmed) {
@@ -120,20 +163,25 @@ pub fn parse_grounded_answer(raw: &str) -> Result<GroundedDraft, String> {
             extracted.ok_or_else(|| format!("grounded answer JSON: {e}"))?
         }
     };
-    validate_draft(draft)
+    Ok(validate_draft(dedupe_answer_sentences(repair_draft_sentences(draft))))
 }
 
-fn validate_draft(draft: GroundedDraft) -> Result<GroundedDraft, String> {
+fn repair_draft_sentences(mut draft: GroundedDraft) -> GroundedDraft {
+    for item in &mut draft.answer {
+        item.sentence = repair_latex_escapes(&item.sentence);
+    }
+    draft
+}
+
+fn validate_draft(mut draft: GroundedDraft) -> GroundedDraft {
     if draft.answerable {
-        for (i, item) in draft.answer.iter().enumerate() {
-            if item.quotes.is_empty() {
-                return Err(format!(
-                    "answer sentence {i} has no quote indexes while answerable is true"
-                ));
-            }
+        let any_quoted = draft.answer.iter().any(|item| !item.quotes.is_empty());
+        if !any_quoted {
+            draft.answerable = false;
+            draft.answer.clear();
         }
     }
-    Ok(draft)
+    draft
 }
 
 fn emit_stage(
@@ -211,7 +259,6 @@ fn build_generation_messages(
 fn unanswerable_draft() -> GroundedDraft {
     GroundedDraft {
         answerable: false,
-        quotes: vec![],
         answer: vec![],
     }
 }
@@ -617,7 +664,10 @@ async fn finish_grounded_answer(
         messages,
         answer_format_schema(),
         |acc| {
-            let draft_now = ollama_stream::draft_sentences_from_partial(acc);
+            let draft_now: Vec<String> = ollama_stream::draft_sentences_from_partial(acc)
+                .into_iter()
+                .map(|s| repair_latex_escapes(&s))
+                .collect();
             if draft_now.len() > emitted_draft_len {
                 emitted_draft_len = draft_now.len();
                 emit_stage(&app_write, &mid_write, "writing", None, None, draft_now);
@@ -688,7 +738,7 @@ async fn finish_grounded_answer(
             } else {
                 c.text.as_str()
             };
-            json!({ "index": idx, "text": body })
+            json!({ "index": idx, "title": c.title, "text": body })
         })
         .collect();
 
@@ -743,6 +793,24 @@ async fn finish_grounded_answer(
         timings.generation_ms,
         timings.check_ms
     );
+    #[cfg(debug_assertions)]
+    {
+        eprintln!("chat draft json: {raw}");
+        for (i, item) in draft.answer.iter().enumerate() {
+            let status = sentences
+                .get(i)
+                .map(|s| s.status.as_str())
+                .unwrap_or("");
+            let reason = sentences
+                .get(i)
+                .and_then(|s| s.reason.as_deref())
+                .unwrap_or("");
+            eprintln!(
+                "chat sentence {i} status={status} reason={reason} quotes={}",
+                item.quotes.len()
+            );
+        }
+    }
 
     emit_final(
         &app,
@@ -768,31 +836,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_rejects_answerable_sentence_without_quotes() {
+    fn repair_latex_escapes_restores_commands() {
+        assert_eq!(
+            repair_latex_escapes(&format!("$81.5{}ext{{{}extperthousand}}$", '\t', '\t')),
+            r"$81.5\text{\textperthousand}$"
+        );
+        assert_eq!(
+            repair_latex_escapes(&format!("${}rac{{1}}{{2}}$", '\u{000c}')),
+            r"$\frac{1}{2}$"
+        );
+        assert_eq!(
+            repair_latex_escapes(&format!("${}eta$", '\u{0008}')),
+            r"$\beta$"
+        );
+        assert_eq!(
+            repair_latex_escapes(&format!("${}abla$", '\n')),
+            r"$\nabla$"
+        );
+    }
+
+    #[test]
+    fn parse_dedupes_identical_sentences() {
         let raw = r#"{
             "answerable": true,
-            "quotes": [{"source": 1, "text": "hello"}],
-            "answer": [{"sentence": "Hello.", "quotes": []}]
+            "answer": [
+                {"quotes": [{"source": 1, "text": "a"}], "sentence": "GCN reaches 81.5% on Cora."},
+                {"quotes": [{"source": 2, "text": "b"}], "sentence": "GCN reaches 81.5% on Cora!"}
+            ]
         }"#;
-        let err = parse_grounded_answer(raw).unwrap_err();
-        assert!(err.contains("no quote indexes"), "{err}");
+        let d = parse_grounded_answer(raw).unwrap();
+        assert_eq!(d.answer.len(), 1);
+        assert_eq!(d.answer[0].sentence, "GCN reaches 81.5% on Cora.");
+    }
+
+    #[test]
+    fn parse_marks_unanswerable_when_no_sentence_has_quotes() {
+        let raw = r#"{
+            "answerable": true,
+            "answer": [{"quotes": [], "sentence": "Hello."}]
+        }"#;
+        let d = parse_grounded_answer(raw).unwrap();
+        assert!(!d.answerable);
+        assert!(d.answer.is_empty());
+    }
+
+    #[test]
+    fn parse_keeps_answerable_when_some_sentences_lack_quotes() {
+        let raw = r#"{
+            "answerable": true,
+            "answer": [
+                {"quotes": [{"source": 1, "text": "hello"}], "sentence": "Hello."},
+                {"quotes": [], "sentence": "Extra."}
+            ]
+        }"#;
+        let d = parse_grounded_answer(raw).unwrap();
+        assert!(d.answerable);
+        assert_eq!(d.answer.len(), 2);
+        assert!(d.answer[1].quotes.is_empty());
     }
 
     #[test]
     fn parse_accepts_answerable_with_quotes() {
         let raw = r#"{
             "answerable": true,
-            "quotes": [{"source": 1, "text": "hello"}],
-            "answer": [{"sentence": "Hello.", "quotes": [0]}]
+            "answer": [{
+                "quotes": [{"source": 1, "text": "hello"}],
+                "sentence": "Hello."
+            }]
         }"#;
         let d = parse_grounded_answer(raw).unwrap();
         assert!(d.answerable);
-        assert_eq!(d.answer[0].quotes, vec![0]);
+        assert_eq!(d.answer[0].quotes.len(), 1);
+        assert_eq!(d.answer[0].quotes[0].source, 1);
+        assert_eq!(d.answer[0].quotes[0].text, "hello");
     }
 
     #[test]
     fn parse_allows_unanswerable_empty() {
-        let raw = r#"{"answerable": false, "quotes": [], "answer": []}"#;
+        let raw = r#"{"answerable": false, "answer": []}"#;
         let d = parse_grounded_answer(raw).unwrap();
         assert!(!d.answerable);
         assert!(d.answer.is_empty());

@@ -113,38 +113,98 @@ const unwrapParagraph = {
   p: ({ children }: { children?: ReactNode }) => <>{children}</>,
 };
 
+async function enrichCitations(citations: CitationItem[]): Promise<CitationItem[]> {
+  return Promise.all(
+    citations.map(async (c) => {
+      if (c.regions && c.regions.length > 0) return c;
+      try {
+        const prev = await getDocumentPreview(c.documentId, c.chunkId);
+        const regions: PageRegion[] | null | undefined = prev.regions;
+        if (!regions?.length && !prev.path) return c;
+        return {
+          ...c,
+          regions: regions?.length ? regions : c.regions,
+          path: prev.path || c.path,
+          pageStart: prev.pageStart ?? c.pageStart,
+          pageEnd: prev.pageEnd ?? c.pageEnd,
+        };
+      } catch {
+        return c;
+      }
+    }),
+  );
+}
+
+function PassageCard({
+  citation: c,
+  query,
+  onCite,
+  maxLines = 2,
+  cropOnly = false,
+}: {
+  citation: CitationItem;
+  query: string;
+  onCite: (c: CitationItem) => void;
+  maxLines?: number;
+  /** Crop without the raw snippet under it; trimmed preview follows. */
+  cropOnly?: boolean;
+}) {
+  const title = (c.title || "").trim() || fileName(c.path);
+  const page = pageLabel(c.pageStart, c.pageEnd);
+  const snippet = clampSnippetToMatch(c.snippet || "", query, maxLines);
+  return (
+    <li>
+      <button
+        type="button"
+        className="w-full space-y-1 text-left text-muted hover:text-text"
+        onClick={() => onCite(c)}
+      >
+        <p className="text-muted">
+          <span>{title}</span>
+          {page ? (
+            <>
+              <span aria-hidden="true"> · </span>
+              <span>{page}</span>
+            </>
+          ) : null}
+        </p>
+        {c.regions && c.regions.length > 0 && c.documentId ? (
+          <SourceQuoteOrThumb
+            path={c.path}
+            regions={c.regions}
+            quote={cropOnly ? "" : c.snippet}
+            documentId={c.documentId}
+            title={title}
+          />
+        ) : null}
+        {snippet ? <p className="text-muted">{snippet}</p> : null}
+      </button>
+    </li>
+  );
+}
+
 function SourcesList({
   citations,
+  citedIndexes,
+  query,
   onCite,
 }: {
   citations: CitationItem[];
+  citedIndexes: Set<number>;
+  query: string;
   onCite: (c: CitationItem) => void;
 }) {
   const [enriched, setEnriched] = useState<CitationItem[]>(citations);
+  const [expanded, setExpanded] = useState(false);
+  const [showMore, setShowMore] = useState(false);
 
   useEffect(() => {
     setEnriched(citations);
+    setExpanded(false);
+    setShowMore(false);
     let cancelled = false;
     void (async () => {
-      const next = await Promise.all(
-        citations.map(async (c) => {
-          if (c.regions && c.regions.length > 0) return c;
-          try {
-            const prev = await getDocumentPreview(c.documentId, c.chunkId);
-            const regions: PageRegion[] | null | undefined = prev.regions;
-            if (!regions?.length && !prev.path) return c;
-            return {
-              ...c,
-              regions: regions?.length ? regions : c.regions,
-              path: prev.path || c.path,
-              pageStart: prev.pageStart ?? c.pageStart,
-              pageEnd: prev.pageEnd ?? c.pageEnd,
-            };
-          } catch {
-            return c;
-          }
-        }),
-      );
+      const next = await enrichCitations(citations);
       if (!cancelled) setEnriched(next);
     })();
     return () => {
@@ -153,33 +213,70 @@ function SourcesList({
   }, [citations]);
 
   if (citations.length === 0) return null;
+
+  const cited = enriched.filter((c) => citedIndexes.has(c.index));
+  const rest = enriched.filter((c) => !citedIndexes.has(c.index));
+  const filterByCite = citedIndexes.size > 0;
+  const primary = filterByCite ? cited : enriched;
+  const extras = filterByCite ? rest : [];
+  const count = primary.length > 0 ? primary.length : citations.length;
+
   return (
     <div className="space-y-2">
-      <p className="text-muted">Sources</p>
-      <ol className="list-decimal space-y-2 pl-5 text-muted">
-        {enriched.map((c) => (
-          <li key={`${c.chunkId}-${c.index}`} className="space-y-1">
-            {c.regions && c.regions.length > 0 && c.documentId ? (
-              <SourceQuoteOrThumb
-                path={c.path}
-                regions={c.regions}
-                quote={c.snippet}
-                documentId={c.documentId}
-                title={(c.title || "").trim() || fileName(c.path)}
-              />
+      <button
+        type="button"
+        className="text-left text-muted hover:text-text"
+        onClick={() => {
+          setExpanded((open) => {
+            if (open) setShowMore(false);
+            return !open;
+          });
+        }}
+      >
+        Sources · {count}
+      </button>
+      {expanded ? (
+        <>
+          {primary.length > 0 ? (
+            <ul className="space-y-3">
+              {primary.map((c) => (
+                <PassageCard
+                  key={`${c.chunkId}-${c.index}`}
+                  citation={c}
+                  query={query}
+                  onCite={onCite}
+                  maxLines={2}
+                  cropOnly
+                />
+              ))}
+            </ul>
+          ) : null}
+          {extras.length > 0 ? (
+            showMore ? (
+              <ul className="space-y-3">
+                {extras.map((c) => (
+                  <PassageCard
+                    key={`${c.chunkId}-${c.index}`}
+                    citation={c}
+                    query={query}
+                    onCite={onCite}
+                    maxLines={2}
+                    cropOnly
+                  />
+                ))}
+              </ul>
             ) : (
-              <p className="text-muted">{c.snippet}</p>
-            )}
-            <button
-              type="button"
-              className="text-left text-muted hover:text-text"
-              onClick={() => onCite(c)}
-            >
-              {citationSourceLabel(c)}
-            </button>
-          </li>
-        ))}
-      </ol>
+              <button
+                type="button"
+                className="text-left text-muted hover:text-text"
+                onClick={() => setShowMore(true)}
+              >
+                Show {extras.length} more passage{extras.length === 1 ? "" : "s"}
+              </button>
+            )
+          ) : null}
+        </>
+      ) : null}
     </div>
   );
 }
@@ -193,31 +290,14 @@ function ClosestPassages({
   query: string;
   onCite: (c: CitationItem) => void;
 }) {
-  const [enriched, setEnriched] = useState<CitationItem[]>(citations);
+  const closest = citations.slice(0, 2);
+  const [enriched, setEnriched] = useState<CitationItem[]>(closest);
 
   useEffect(() => {
-    setEnriched(citations);
+    setEnriched(closest);
     let cancelled = false;
     void (async () => {
-      const next = await Promise.all(
-        citations.map(async (c) => {
-          if (c.regions && c.regions.length > 0) return c;
-          try {
-            const prev = await getDocumentPreview(c.documentId, c.chunkId);
-            const regions: PageRegion[] | null | undefined = prev.regions;
-            if (!regions?.length && !prev.path) return c;
-            return {
-              ...c,
-              regions: regions?.length ? regions : c.regions,
-              path: prev.path || c.path,
-              pageStart: prev.pageStart ?? c.pageStart,
-              pageEnd: prev.pageEnd ?? c.pageEnd,
-            };
-          } catch {
-            return c;
-          }
-        }),
-      );
+      const next = await enrichCitations(closest);
       if (!cancelled) setEnriched(next);
     })();
     return () => {
@@ -225,44 +305,23 @@ function ClosestPassages({
     };
   }, [citations]);
 
-  if (citations.length === 0) return null;
+  if (closest.length === 0) return null;
   return (
-    <ul className="space-y-3">
-      {enriched.map((c) => {
-        const title = (c.title || "").trim() || fileName(c.path);
-        const page = pageLabel(c.pageStart, c.pageEnd);
-        const snippet = clampSnippetToMatch(c.snippet || "", query);
-        return (
-          <li key={`${c.chunkId}-${c.index}`}>
-            <button
-              type="button"
-              className="w-full space-y-1 text-left text-muted hover:text-text"
-              onClick={() => onCite(c)}
-            >
-              <p className="text-muted">
-                <span>{title}</span>
-                {page ? (
-                  <>
-                    <span aria-hidden="true"> · </span>
-                    <span>{page}</span>
-                  </>
-                ) : null}
-              </p>
-              {snippet ? <p className="text-muted">{snippet}</p> : null}
-              {c.regions && c.regions.length > 0 && c.documentId ? (
-                <SourceQuoteOrThumb
-                  path={c.path}
-                  regions={c.regions}
-                  quote={c.snippet}
-                  documentId={c.documentId}
-                  title={title}
-                />
-              ) : null}
-            </button>
-          </li>
-        );
-      })}
-    </ul>
+    <details>
+      <summary className="cursor-pointer text-muted">Closest passages</summary>
+      <ul className="mt-2 space-y-3">
+        {enriched.map((c) => (
+          <PassageCard
+            key={`${c.chunkId}-${c.index}`}
+            citation={c}
+            query={query}
+            onCite={onCite}
+            maxLines={2}
+            cropOnly
+          />
+        ))}
+      </ul>
+    </details>
   );
 }
 
@@ -321,28 +380,38 @@ function AnswerParagraph({
   sentences,
   citations,
   onCite,
-  muted,
 }: {
   sentences: AnswerSentence[];
   citations: CitationItem[];
   onCite: (c: CitationItem) => void;
-  muted?: boolean;
 }) {
-  const hasFormula = sentences.some((s) => s.reason === "formula");
-  const hasUnchecked = sentences.some((s) => s.status === "unchecked");
+  const formula = sentences.find((s) => s.reason === "formula");
+  const formulaSource = formula?.sources?.[0];
+  const weak = sentences.some((s) => s.reason === "weak");
+  const unchecked = sentences.filter(
+    (s) => s.status === "unchecked" && s.reason !== "formula" && s.reason !== "weak",
+  );
+  const uncheckedNote = weak
+    ? "Parts of this couldn't be fully checked against the sources."
+    : unchecked.length === 0
+      ? null
+      : sentences.length === 1
+        ? "This couldn't be checked against the sources."
+        : "Some sentences couldn't be checked.";
   return (
-    <div className={cn("space-y-1", muted && "text-muted")}>
-      <div className={cn("answer font-read text-[15px] leading-[1.6]", muted ? "text-muted" : "text-text")}>
+    <div className="space-y-1">
+      <div className="answer font-read text-[15px] leading-[1.6] text-text">
         {sentences.map((s, i) => (
           <SentenceInline key={i} sentence={s} citations={citations} onCite={onCite} />
         ))}
       </div>
-      {hasFormula ? (
+      {formula && formulaSource != null ? (
         <p className="text-[12px] text-muted">
-          Formulas are shown as written by the model; compare them with the page images below.
+          Rewritten from the PDF text. Open source {formulaSource} to compare it with the
+          page.
         </p>
-      ) : hasUnchecked ? (
-        <p className="text-[12px] text-muted">Some sentences couldn&apos;t be checked.</p>
+      ) : uncheckedNote ? (
+        <p className="text-[12px] text-muted">{uncheckedNote}</p>
       ) : null}
     </div>
   );
@@ -372,35 +441,19 @@ export function AssistantMessage({
           ? message.stageDetail || "Writing the answer"
           : null;
 
-  const draftSentences: AnswerSentence[] = (message.draft ?? []).map((text) => ({
-    text,
-    status: "unchecked",
-    sources: [],
-  }));
-  const showDraft =
-    (stage === "writing" || stage === "checking") && draftSentences.length > 0;
   const showFinal = stage === "done" && (message.sentences?.length ?? 0) > 0;
+  const writing =
+    stage === "passages" ||
+    stage === "ranking" ||
+    stage === "writing" ||
+    stage === "checking";
 
   if (message.notFound) {
     const searchSuggestions = message.suggestions ?? [];
-    const drafted = message.sentences ?? [];
     return (
       <div className="space-y-3">
         <p className="text-muted">Your documents don&apos;t answer this.</p>
         <ClosestPassages citations={citations} query={query} onCite={onCite} />
-        {drafted.length > 0 ? (
-          <details>
-            <summary className="cursor-pointer text-muted">Show the unconfirmed answer</summary>
-            <div className="mt-2">
-              <AnswerParagraph
-                sentences={drafted}
-                citations={citations}
-                onCite={onCite}
-                muted
-              />
-            </div>
-          </details>
-        ) : null}
         {searchSuggestions.length > 0 ? (
           <ul className="space-y-1">
             {searchSuggestions.map((s) => (
@@ -420,10 +473,14 @@ export function AssistantMessage({
     );
   }
 
-  if (showFinal || showDraft || statusLine || citations.length > 0) {
+  if (writing && !showFinal) {
+    return statusLine ? <p className="text-muted">{statusLine}</p> : null;
+  }
+
+  if (showFinal) {
     return (
       <div className="space-y-3">
-        {message.scopeTitle && showFinal ? (
+        {message.scopeTitle ? (
           <p className="text-muted">
             Answered from {message.scopeTitle}{" "}
             <Button
@@ -436,23 +493,21 @@ export function AssistantMessage({
             </Button>
           </p>
         ) : null}
-        {showFinal ? (
-          <AnswerParagraph
-            sentences={message.sentences ?? []}
+        <AnswerParagraph
+          sentences={message.sentences ?? []}
+          citations={citations}
+          onCite={onCite}
+        />
+        {citations.length > 0 ? (
+          <SourcesList
             citations={citations}
+            citedIndexes={
+              new Set((message.sentences ?? []).flatMap((s) => s.sources ?? []))
+            }
+            query={query}
             onCite={onCite}
           />
-        ) : showDraft ? (
-          <AnswerParagraph
-            sentences={draftSentences}
-            citations={citations}
-            onCite={onCite}
-            muted
-          />
-        ) : statusLine ? (
-          <p className="text-muted">{statusLine}</p>
         ) : null}
-        {citations.length > 0 ? <SourcesList citations={citations} onCite={onCite} /> : null}
       </div>
     );
   }

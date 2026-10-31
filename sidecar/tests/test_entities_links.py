@@ -149,6 +149,22 @@ def test_date_normalisation() -> None:
     assert normalize_date("15 January 2020") == "2020-01-15"
     assert normalize_date("Jan 2020") == "2020-01"
     assert normalize_date("not a date") is None
+
+
+def test_merge_keeps_year_from_unparsed_date() -> None:
+    spans = [
+        {
+            "label": "date",
+            "text": "21 Ekim 1999",
+            "start": 0,
+            "end": 12,
+            "score": 0.9,
+        }
+    ]
+    merged = merge_within_doc(spans)
+    assert len(merged) == 1
+    assert merged[0]["normalized"] == "1999"
+    assert merged[0]["name"] == "1999"
     assert normalize_name("  The Cora  ") == "cora"
     assert normalize_name('"GCN"') == "gcn"
 
