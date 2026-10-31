@@ -14,7 +14,11 @@ pub fn path_string(path: &Path) -> String {
 /// Sorted PDF/Word/Markdown paths under `root`, at most `limit` files.
 pub fn collect_import_paths_bounded(root: &Path, limit: usize) -> CognitoResult<Vec<PathBuf>> {
     let mut paths = Vec::new();
-    for entry in WalkDir::new(root).max_depth(64).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(root)
+        .max_depth(64)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if !entry.file_type().is_file() {
             continue;
         }

@@ -6,12 +6,10 @@ use crate::db::sqlite;
 use super::run_blocking;
 
 #[tauri::command]
-pub async fn rebuild_connections(
-    state: tauri::State<'_, SharedState>,
-) -> Result<(), String> {
+pub async fn rebuild_connections(state: tauri::State<'_, SharedState>) -> Result<(), String> {
     let st = (*state).clone();
     run_blocking(state, move |st| {
-        st.with_sqlite(|c| sqlite::requeue_all_entities(c))?;
+        st.with_sqlite(sqlite::requeue_all_entities)?;
         Ok(())
     })
     .await?;
@@ -23,10 +21,7 @@ pub async fn rebuild_connections(
 pub async fn get_entities_index(
     state: tauri::State<'_, SharedState>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    run_blocking(state, |st| {
-        st.with_sqlite(|c| sqlite::list_entities_index(c))
-    })
-    .await
+    run_blocking(state, |st| st.with_sqlite(sqlite::list_entities_index)).await
 }
 
 #[tauri::command]
@@ -55,8 +50,5 @@ pub async fn get_related_documents(
 pub async fn get_connections_timeline(
     state: tauri::State<'_, SharedState>,
 ) -> Result<serde_json::Value, String> {
-    run_blocking(state, |st| {
-        st.with_sqlite(|c| sqlite::connections_timeline(c))
-    })
-    .await
+    run_blocking(state, |st| st.with_sqlite(sqlite::connections_timeline)).await
 }

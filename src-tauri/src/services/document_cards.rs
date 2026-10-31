@@ -69,7 +69,9 @@ fn normalize_field_name(name: &str) -> String {
 /// Allowed field names for a card type. `None` means keep all fields (capped at 5).
 pub fn allowed_fields_for_type(card_type: &str) -> Option<&'static [&'static str]> {
     match card_type {
-        "paper" => Some(&["authors", "venue", "year", "methods", "datasets", "findings"]),
+        "paper" => Some(&[
+            "authors", "venue", "year", "methods", "datasets", "findings",
+        ]),
         "article" => Some(&["authors", "venue", "year", "findings"]),
         "report" => Some(&["author", "period", "findings", "recommendations"]),
         "contract" | "agreement" => Some(&[
@@ -88,9 +90,9 @@ pub fn allowed_fields_for_type(card_type: &str) -> Option<&'static [&'static str
             "deadline",
         ]),
         "cv" => Some(&["person", "education", "roles", "skills"]),
-        "invoice" | "receipt" => {
-            Some(&["issuer", "customer", "total", "currency", "due date", "items"])
-        }
+        "invoice" | "receipt" => Some(&[
+            "issuer", "customer", "total", "currency", "due date", "items",
+        ]),
         "manual" => Some(&["product", "tasks covered"]),
         "presentation" => Some(&["event", "topics"]),
         "form" | "notes" | "book" | "other" => None,
@@ -127,7 +129,11 @@ fn item_has_quotes(item: &Value) -> bool {
 
 /// Drop summary / fact / field items that carry no quotes.
 pub fn drop_unquoted_items(items: &[Value]) -> Vec<Value> {
-    items.iter().filter(|v| item_has_quotes(v)).cloned().collect()
+    items
+        .iter()
+        .filter(|v| item_has_quotes(v))
+        .cloned()
+        .collect()
 }
 
 fn quote_items_schema() -> Value {
@@ -423,7 +429,7 @@ pub fn build_and_store_card(state: &SharedState, document_id: &str) -> CognitoRe
     let full = chunks.join("\n\n");
     let clipped = take_head_tail_words(&full);
     let passages = number_passages(&clipped);
-    let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
+    let settings = state.with_sqlite(sqlite::load_settings)?;
     let model = settings.background_model.clone();
 
     let raw = if mock_llm_enabled() {
@@ -448,12 +454,9 @@ pub fn build_and_store_card(state: &SharedState, document_id: &str) -> CognitoRe
         let schema = card_response_schema();
         let state_for_interrupt = state.clone();
         let content = tauri::async_runtime::block_on(async {
-            ollama_stream::chat_completion_json_interruptible(
-                &model,
-                messages,
-                schema,
-                || state_for_interrupt.chat_in_flight.load(Ordering::SeqCst) > 0,
-            )
+            ollama_stream::chat_completion_json_interruptible(&model, messages, schema, || {
+                state_for_interrupt.chat_in_flight.load(Ordering::SeqCst) > 0
+            })
             .await
         });
         let content = match content {
@@ -465,7 +468,8 @@ pub fn build_and_store_card(state: &SharedState, document_id: &str) -> CognitoRe
             .map_err(|e| CognitoError::Sidecar(format!("card JSON: {e}")))?
     };
 
-    let card_type = normalize_card_type(raw.get("type").and_then(|t| t.as_str()).unwrap_or("other"));
+    let card_type =
+        normalize_card_type(raw.get("type").and_then(|t| t.as_str()).unwrap_or("other"));
     let card_title = raw
         .get("title")
         .and_then(|t| t.as_str())
@@ -550,8 +554,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 

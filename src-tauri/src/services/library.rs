@@ -50,9 +50,8 @@ pub fn reset(state: &SharedState) -> CognitoResult<()> {
 pub fn switch_vault(state: &SharedState, folder: &str) -> CognitoResult<Vec<PathBuf>> {
     let vault = vault::ensure_vault_path(folder)?;
     let paths = vault::collect_import_paths_bounded(&vault, vault::slots_remaining(0))?;
-    let doc_n: i64 = state.with_sqlite(|c| {
-        Ok(c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?)
-    })?;
+    let doc_n: i64 = state
+        .with_sqlite(|c| Ok(c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?))?;
     if doc_n > 0 {
         reset(state)?;
     }
@@ -69,14 +68,16 @@ pub fn forget(state: &SharedState) -> CognitoResult<()> {
 
 /// Validates vault path and lists files for rebuild without mutating the library.
 pub fn plan_rebuild(state: &SharedState) -> CognitoResult<(PathBuf, Vec<PathBuf>)> {
-    let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
+    let settings = state.with_sqlite(sqlite::load_settings)?;
     let vault_str = settings
         .vault_path
         .ok_or_else(|| CognitoError::Vault("Configure a vault folder first.".into()))?;
     let vault = vault::ensure_vault_path(&vault_str)?;
     let paths = vault::collect_import_paths_bounded(&vault, vault::slots_remaining(0))?;
     if paths.is_empty() {
-        return Err(CognitoError::Vault("No PDF, Word or Markdown files found.".into()));
+        return Err(CognitoError::Vault(
+            "No PDF, Word or Markdown files found.".into(),
+        ));
     }
     Ok((vault, paths))
 }
@@ -107,16 +108,7 @@ mod tests {
         state
             .with_sqlite(|c| {
                 sqlite::insert_document_row(
-                    c,
-                    "d1",
-                    "/a.md",
-                    "A",
-                    "markdown",
-                    "h",
-                    None,
-                    "indexed",
-                    None,
-                    None,
+                    c, "d1", "/a.md", "A", "markdown", "h", None, "indexed", None, None,
                 )?;
                 sqlite::insert_chunk_row(
                     c, "c1", "d1", 0, None, None, "Ada", 1, "h1", "body", "[]", None,
@@ -139,11 +131,9 @@ mod tests {
 
         state
             .with_sqlite(|c| {
-                let ents: i64 =
-                    c.query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))?;
+                let ents: i64 = c.query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))?;
                 assert_eq!(ents, 0);
-                let docs: i64 =
-                    c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+                let docs: i64 = c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(docs, 0);
                 Ok(())
             })

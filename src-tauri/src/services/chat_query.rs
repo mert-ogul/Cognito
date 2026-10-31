@@ -163,7 +163,9 @@ pub fn parse_grounded_answer(raw: &str) -> Result<GroundedDraft, String> {
             extracted.ok_or_else(|| format!("grounded answer JSON: {e}"))?
         }
     };
-    Ok(validate_draft(dedupe_answer_sentences(repair_draft_sentences(draft))))
+    Ok(validate_draft(dedupe_answer_sentences(
+        repair_draft_sentences(draft),
+    )))
 }
 
 fn repair_draft_sentences(mut draft: GroundedDraft) -> GroundedDraft {
@@ -206,11 +208,7 @@ fn emit_stage(
     );
 }
 
-async fn sidecar_request(
-    state: &SharedState,
-    method: &str,
-    params: Value,
-) -> CognitoResult<Value> {
+async fn sidecar_request(state: &SharedState, method: &str, params: Value) -> CognitoResult<Value> {
     let state = state.clone();
     let method = method.to_string();
     tauri::async_runtime::spawn_blocking(move || {
@@ -314,7 +312,7 @@ pub async fn run_chat_query(
 ) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
     let app_data = vault::path_string(&state.data_dir);
-    let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
+    let settings = state.with_sqlite(sqlite::load_settings)?;
     let hist_for_retrieval = reduce_history(&history, 2);
 
     let prep = match sidecar_request(
@@ -402,10 +400,7 @@ pub async fn run_chat_query(
         .get("queryEmbeddingFailed")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
-    let profile_matches = prep
-        .get("profileMatches")
-        .cloned()
-        .unwrap_or(json!([]));
+    let profile_matches = prep.get("profileMatches").cloned().unwrap_or(json!([]));
     let labels = prep.get("labels").cloned().unwrap_or(json!([]));
     let normalised_question = prep
         .get("normalisedQuestion")
@@ -417,10 +412,7 @@ pub async fn run_chat_query(
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string();
-    let candidate_counts = prep
-        .get("candidateCounts")
-        .cloned()
-        .unwrap_or(json!({}));
+    let candidate_counts = prep.get("candidateCounts").cloned().unwrap_or(json!({}));
     let prep_trace = prep.get("trace").cloned();
     let explicit_scope = !scope_ids.is_empty();
 
@@ -472,23 +464,19 @@ pub async fn run_chat_query(
         {
             Ok(v) => v,
             Err(e) => {
-                emit_final(
-                    &state,
-                    &app,
-                    &{
-                        let mut r = ChatFinalResult::failure(
-                            message_id.clone(),
-                            conversation_id.clone(),
-                            e.to_string(),
-                        );
-                        r.scope_ids = result_scope_ids;
-                        r.timings = Some(ChatTimings {
-                            retrieval_ms,
-                            ..ChatTimings::default()
-                        });
-                        r
-                    },
-                );
+                emit_final(&state, &app, &{
+                    let mut r = ChatFinalResult::failure(
+                        message_id.clone(),
+                        conversation_id.clone(),
+                        e.to_string(),
+                    );
+                    r.scope_ids = result_scope_ids;
+                    r.timings = Some(ChatTimings {
+                        retrieval_ms,
+                        ..ChatTimings::default()
+                    });
+                    r
+                });
                 return Ok(());
             }
         }
@@ -499,10 +487,7 @@ pub async fn run_chat_query(
         .get("notFound")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
-    let rerank_ms = ranked
-        .get("rerankMs")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(0);
+    let rerank_ms = ranked.get("rerankMs").and_then(|x| x.as_u64()).unwrap_or(0);
     let rerank_scored = ranked
         .get("rerankScored")
         .and_then(|x| x.as_u64())
@@ -539,10 +524,7 @@ pub async fn run_chat_query(
         .into_iter()
         .filter_map(|v| serde_json::from_value(v).ok())
         .collect();
-    let trace = ranked
-        .get("trace")
-        .cloned()
-        .or(prep_trace);
+    let trace = ranked.get("trace").cloned().or(prep_trace);
 
     let early = not_found || (query_embedding_failed && citations.is_empty());
     let early_mode = if query_embedding_failed && citations.is_empty() {
@@ -589,8 +571,9 @@ pub async fn run_related_query(
 ) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
     let app_data = vault::path_string(&state.data_dir);
-    let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
-    let (name_a, name_b) = state.with_sqlite(|c| sqlite::entity_names(c, &entity_id_a, &entity_id_b))?;
+    let settings = state.with_sqlite(sqlite::load_settings)?;
+    let (name_a, name_b) =
+        state.with_sqlite(|c| sqlite::entity_names(c, &entity_id_a, &entity_id_b))?;
     let query = format!("How are {name_a} and {name_b} related?");
 
     let prep = match sidecar_request(
@@ -747,13 +730,7 @@ async fn finish_grounded_answer(
             if draft_now.len() > emitted_draft_len {
                 emitted_draft_len = draft_now.len();
                 emit_stage(
-                    &app_write,
-                    &mid_write,
-                    &cid_write,
-                    "writing",
-                    None,
-                    None,
-                    draft_now,
+                    &app_write, &mid_write, &cid_write, "writing", None, None, draft_now,
                 );
             }
         },
@@ -762,18 +739,14 @@ async fn finish_grounded_answer(
     {
         Ok(s) => s,
         Err(e) => {
-            emit_final(
-                &state,
-                &app,
-                &{
-                    let mut r = ChatFinalResult::failure(message_id, conversation_id, e);
-                    r.citations = citations;
-                    r.scope_title = scope_title;
-                    r.scope_ids = result_scope_ids;
-                    r.timings = Some(timings);
-                    r
-                },
-            );
+            emit_final(&state, &app, &{
+                let mut r = ChatFinalResult::failure(message_id, conversation_id, e);
+                r.citations = citations;
+                r.scope_title = scope_title;
+                r.scope_ids = result_scope_ids;
+                r.timings = Some(timings);
+                r
+            });
             return Ok(());
         }
     };
@@ -782,18 +755,14 @@ async fn finish_grounded_answer(
     let draft = match parse_grounded_answer(&raw) {
         Ok(d) => d,
         Err(e) => {
-            emit_final(
-                &state,
-                &app,
-                &{
-                    let mut r = ChatFinalResult::failure(message_id, conversation_id, e);
-                    r.citations = citations;
-                    r.scope_title = scope_title;
-                    r.scope_ids = result_scope_ids;
-                    r.timings = Some(timings);
-                    r
-                },
-            );
+            emit_final(&state, &app, &{
+                let mut r = ChatFinalResult::failure(message_id, conversation_id, e);
+                r.citations = citations;
+                r.scope_title = scope_title;
+                r.scope_ids = result_scope_ids;
+                r.timings = Some(timings);
+                r
+            });
             return Ok(());
         }
     };
@@ -843,19 +812,14 @@ async fn finish_grounded_answer(
     {
         Ok(v) => v,
         Err(e) => {
-            emit_final(
-                &state,
-                &app,
-                &{
-                    let mut r =
-                        ChatFinalResult::failure(message_id, conversation_id, e.to_string());
-                    r.citations = citations;
-                    r.scope_title = scope_title;
-                    r.scope_ids = result_scope_ids;
-                    r.timings = Some(timings);
-                    r
-                },
-            );
+            emit_final(&state, &app, &{
+                let mut r = ChatFinalResult::failure(message_id, conversation_id, e.to_string());
+                r.citations = citations;
+                r.scope_title = scope_title;
+                r.scope_ids = result_scope_ids;
+                r.timings = Some(timings);
+                r
+            });
             return Ok(());
         }
     };
@@ -886,10 +850,7 @@ async fn finish_grounded_answer(
     {
         eprintln!("chat draft json: {raw}");
         for (i, item) in draft.answer.iter().enumerate() {
-            let status = sentences
-                .get(i)
-                .map(|s| s.status.as_str())
-                .unwrap_or("");
+            let status = sentences.get(i).map(|s| s.status.as_str()).unwrap_or("");
             let reason = sentences
                 .get(i)
                 .and_then(|s| s.reason.as_deref())

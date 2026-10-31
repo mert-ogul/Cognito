@@ -13,7 +13,6 @@ use tauri::AppHandle;
 use tauri::Emitter;
 use uuid::Uuid;
 
-
 fn emit_job(
     app: Option<&AppHandle>,
     job_id: &str,
@@ -56,11 +55,7 @@ fn sidecar_purge(state: &SharedState, sqlite_path: &Path, ids: &[String]) -> Cog
     })
 }
 
-fn remove_existing_doc(
-    state: &SharedState,
-    sqlite_path: &Path,
-    path: &str,
-) -> CognitoResult<()> {
+fn remove_existing_doc(state: &SharedState, sqlite_path: &Path, path: &str) -> CognitoResult<()> {
     let Some(oid) = state.with_sqlite(|conn| sqlite::document_id_including_removed(conn, path))?
     else {
         return Ok(());
@@ -102,7 +97,7 @@ fn parse_batch(state: &SharedState, vault: &Path, batch: &[PathBuf]) -> CognitoR
             let mut items: Vec<Value> = Vec::new();
             let mut errors: Vec<Value> = Vec::new();
             for path in batch {
-                match parse_documents_rpc(state, vault, &[path.clone()]) {
+                match parse_documents_rpc(state, vault, std::slice::from_ref(path)) {
                     Ok(v) => {
                         if let Some(its) = v.get("items").and_then(|x| x.as_array()) {
                             items.extend(its.iter().cloned());
@@ -112,7 +107,9 @@ fn parse_batch(state: &SharedState, vault: &Path, batch: &[PathBuf]) -> CognitoR
                         }
                     }
                     Err(e) => {
-                        errors.push(json!({ "path": vault::path_string(path), "error": e.to_string() }));
+                        errors.push(
+                            json!({ "path": vault::path_string(path), "error": e.to_string() }),
+                        );
                     }
                 }
             }
@@ -183,9 +180,10 @@ fn insert_parse_errors(conn: &rusqlite::Connection, errors: &[Value]) -> Cognito
 }
 
 fn page_count_opt(v: &Value) -> Option<i64> {
-    v.get("pageCount")
-        .and_then(|x| x.as_i64())
-        .or_else(|| v.get("pageCount").and_then(|x| x.as_u64().map(|u| u as i64)))
+    v.get("pageCount").and_then(|x| x.as_i64()).or_else(|| {
+        v.get("pageCount")
+            .and_then(|x| x.as_u64().map(|u| u as i64))
+    })
 }
 
 /// `true` = counted as completed (indexed or idempotent skip); `false` = failed row recorded.
@@ -216,7 +214,7 @@ fn process_one_parsed(
         return Ok(true);
     }
     remove_existing_doc(state, sqlite_path, path)?;
-    let chunked = chunk_items(state, &[parsed.clone()])?;
+    let chunked = chunk_items(state, std::slice::from_ref(parsed))?;
     let items = chunked
         .get("items")
         .and_then(|x| x.as_array())
@@ -238,8 +236,7 @@ fn process_one_parsed(
         .unwrap_or("markdown");
     let doc_id = Uuid::new_v4().to_string();
     let embed_payload = state.with_sqlite(|conn| {
-        let tx = conn
-            .unchecked_transaction()?;
+        let tx = conn.unchecked_transaction()?;
         let scan_status = parsed
             .get("scanStatus")
             .and_then(|x| x.as_str())
@@ -264,17 +261,11 @@ fn process_one_parsed(
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            let c_hash = ch
-                .get("contentHash")
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
+            let c_hash = ch.get("contentHash").and_then(|x| x.as_str()).unwrap_or("");
             let tok = ch.get("tokenCount").and_then(|x| x.as_i64()).unwrap_or(1);
             let ps = ch.get("pageStart").and_then(|x| x.as_i64());
             let pe = ch.get("pageEnd").and_then(|x| x.as_i64());
-            let role = ch
-                .get("role")
-                .and_then(|x| x.as_str())
-                .unwrap_or("body");
+            let role = ch.get("role").and_then(|x| x.as_str()).unwrap_or("body");
             let labels = match ch.get("labels") {
                 None => "[]".to_string(),
                 Some(Value::String(s)) => s.clone(),
@@ -317,8 +308,7 @@ fn process_one_parsed(
                 "title": title,
             });
             if let Some(ht) = heading_trail {
-                item
-                    .as_object_mut()
+                item.as_object_mut()
                     .expect("embed item object")
                     .insert("headingTrail".into(), json!(ht));
             }
@@ -331,14 +321,7 @@ fn process_one_parsed(
         state.with_sqlite(|conn| sqlite::mark_document_indexed(conn, &doc_id))?;
         return Ok(true);
     }
-    let emb = embed_items_rpc(
-        state,
-        sqlite_path,
-        embed,
-        chat,
-        &doc_id,
-        embed_payload,
-    )?;
+    let emb = embed_items_rpc(state, sqlite_path, embed, chat, &doc_id, embed_payload)?;
     let failed = emb
         .get("failed")
         .and_then(|x| x.as_array())
@@ -420,13 +403,7 @@ pub fn run_import_job(
                 path_hint,
                 None,
             );
-            let r = process_one_parsed(
-                &state,
-                &sqlite_path,
-                &embed_model,
-                &chat_model,
-                p,
-            );
+            let r = process_one_parsed(&state, &sqlite_path, &embed_model, &chat_model, p);
             match r {
                 Ok(true) => done += 1,
                 Ok(false) => failed += 1,
@@ -518,13 +495,7 @@ pub fn run_single_file(
         .cloned()
         .unwrap_or_default();
     if let Some(p) = items.first() {
-        process_one_parsed(
-            state,
-            &sqlite_path,
-            embed_model,
-            chat_model,
-            p,
-        )?;
+        process_one_parsed(state, &sqlite_path, embed_model, chat_model, p)?;
     }
     emit_job(
         app,
@@ -545,8 +516,8 @@ pub fn run_single_file(
 mod tests {
     use super::*;
     use crate::app::state::AppState;
-    use crate::services::file_watcher;
     use crate::services::background_worker;
+    use crate::services::file_watcher;
     use crate::sidecar::SidecarPool;
     use std::sync::mpsc;
     use std::sync::Arc;
@@ -572,8 +543,7 @@ mod tests {
         .expect("write note.md");
 
         let broken_path = vault.path().join("broken.pdf");
-        std::fs::write(&broken_path, "This is not a real PDF file.")
-            .expect("write broken.pdf");
+        std::fs::write(&broken_path, "This is not a real PDF file.").expect("write broken.pdf");
 
         let sidecar_cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sidecar");
         let main_py = sidecar_cwd.join("main.py");
@@ -664,12 +634,11 @@ mod tests {
         );
         state
             .with_sqlite(|conn| {
-                let entities_status: String = conn
-                    .query_row(
-                        "SELECT entities_status FROM documents WHERE path = ?1",
-                        [&note_s],
-                        |r| r.get(0),
-                    )?;
+                let entities_status: String = conn.query_row(
+                    "SELECT entities_status FROM documents WHERE path = ?1",
+                    [&note_s],
+                    |r| r.get(0),
+                )?;
                 assert_eq!(entities_status, "ok");
                 Ok(())
             })
@@ -684,15 +653,13 @@ mod tests {
         crate::services::library::reset(&state).expect("reset");
         state
             .with_sqlite(|conn| {
-                let n: i64 = conn
-                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+                let n: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(n, 0);
-                let vec_n: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_embeddings'",
-                        [],
-                        |r| r.get(0),
-                    )?;
+                let vec_n: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_embeddings'",
+                    [],
+                    |r| r.get(0),
+                )?;
                 assert_eq!(vec_n, 0);
                 assert!(sqlite::get_setting(conn, "index_embed_model")?.is_none());
                 Ok(())
@@ -720,12 +687,11 @@ mod tests {
             .expect("rebuild import");
         state
             .with_sqlite(|conn| {
-                let note_status: String = conn
-                    .query_row(
-                        "SELECT status FROM documents WHERE path = ?1",
-                        [&note_s],
-                        |r| r.get(0),
-                    )?;
+                let note_status: String = conn.query_row(
+                    "SELECT status FROM documents WHERE path = ?1",
+                    [&note_s],
+                    |r| r.get(0),
+                )?;
                 assert_eq!(note_status, "indexed");
                 Ok(())
             })
@@ -782,26 +748,23 @@ mod tests {
 
         state
             .with_sqlite(|conn| {
-                let note_n: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM documents WHERE path = ?1",
-                        [&note_s],
-                        |r| r.get(0),
-                    )?;
-                let broken_n: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM documents WHERE path = ?1",
-                        [&broken_s],
-                        |r| r.get(0),
-                    )?;
+                let note_n: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM documents WHERE path = ?1",
+                    [&note_s],
+                    |r| r.get(0),
+                )?;
+                let broken_n: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM documents WHERE path = ?1",
+                    [&broken_s],
+                    |r| r.get(0),
+                )?;
                 assert_eq!(note_n, 1);
                 assert_eq!(broken_n, 1);
-                let note_status: String = conn
-                    .query_row(
-                        "SELECT status FROM documents WHERE path = ?1",
-                        [&note_s],
-                        |r| r.get(0),
-                    )?;
+                let note_status: String = conn.query_row(
+                    "SELECT status FROM documents WHERE path = ?1",
+                    [&note_s],
+                    |r| r.get(0),
+                )?;
                 assert_eq!(note_status, "indexed");
                 Ok(())
             })
@@ -825,12 +788,11 @@ mod tests {
         .expect("reindex note");
         state
             .with_sqlite(|conn| {
-                let (status, estat): (String, String) = conn
-                    .query_row(
-                        "SELECT status, entities_status FROM documents WHERE path = ?1",
-                        [&note_s],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )?;
+                let (status, estat): (String, String) = conn.query_row(
+                    "SELECT status, entities_status FROM documents WHERE path = ?1",
+                    [&note_s],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
                 assert_eq!(status, "indexed");
                 assert_eq!(estat, "pending");
                 Ok(())
@@ -839,27 +801,25 @@ mod tests {
         let _ = background_worker::process_pending(&state, None);
         state
             .with_sqlite(|conn| {
-                let estat: String = conn
-                    .query_row(
-                        "SELECT entities_status FROM documents WHERE path = ?1",
-                        [&note_s],
-                        |r| r.get(0),
-                    )?;
+                let estat: String = conn.query_row(
+                    "SELECT entities_status FROM documents WHERE path = ?1",
+                    [&note_s],
+                    |r| r.get(0),
+                )?;
                 assert_eq!(estat, "ok");
                 Ok(())
             })
             .expect("assert reindex entities ok");
 
         std::fs::remove_file(&note_abs).expect("delete note.md");
-        file_watcher::handle_watch_paths(&state, None, &[note_abs.clone()]);
+        file_watcher::handle_watch_paths(&state, None, std::slice::from_ref(&note_abs));
         state
             .with_sqlite(|conn| {
-                let status: String = conn
-                    .query_row(
-                        "SELECT status FROM documents WHERE path = ?1",
-                        [&note_s],
-                        |r| r.get(0),
-                    )?;
+                let status: String = conn.query_row(
+                    "SELECT status FROM documents WHERE path = ?1",
+                    [&note_s],
+                    |r| r.get(0),
+                )?;
                 assert_eq!(status, "removed");
                 Ok(())
             })
@@ -872,18 +832,14 @@ mod tests {
             "Folder B note about Meridian Labs.\n\nSecond paragraph.\n\nThird paragraph.\n",
         )
         .expect("write only-b.md");
-        let b_paths = crate::services::library::switch_vault(
-            &state,
-            &vault_b.path().to_string_lossy(),
-        )
-        .expect("switch_vault");
+        let b_paths =
+            crate::services::library::switch_vault(&state, &vault_b.path().to_string_lossy())
+                .expect("switch_vault");
         state
             .with_sqlite(|conn| {
-                let n: i64 = conn
-                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+                let n: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(n, 0, "switch_vault must clear documents");
-                let vp = sqlite::get_setting(conn, "vault_path")?
-                    .expect("vault_path after switch");
+                let vp = sqlite::get_setting(conn, "vault_path")?.expect("vault_path after switch");
                 assert_eq!(PathBuf::from(&vp), vault_b.path());
                 Ok(())
             })
@@ -893,9 +849,7 @@ mod tests {
             b_paths[0].file_name().and_then(|n| n.to_str()),
             Some("only-b.md")
         );
-        let b_abs = b_note
-            .canonicalize()
-            .unwrap_or_else(|_| b_note.clone());
+        let b_abs = b_note.canonicalize().unwrap_or_else(|_| b_note.clone());
 
         let (tx_b, rx_b) = mpsc::channel();
         let st_b = state.clone();
@@ -918,11 +872,10 @@ mod tests {
             .expect("B import");
         state
             .with_sqlite(|conn| {
-                let n: i64 = conn
-                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+                let n: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(n, 1);
-                let path: String = conn
-                    .query_row("SELECT path FROM documents", [], |r| r.get(0))?;
+                let path: String =
+                    conn.query_row("SELECT path FROM documents", [], |r| r.get(0))?;
                 assert_eq!(path, vault::path_string(&b_abs));
                 Ok(())
             })
@@ -935,11 +888,13 @@ mod tests {
             })
             .expect("bad vault_path");
         let rebuild_err = crate::services::library::plan_rebuild(&state);
-        assert!(rebuild_err.is_err(), "rebuild with missing vault must error");
+        assert!(
+            rebuild_err.is_err(),
+            "rebuild with missing vault must error"
+        );
         state
             .with_sqlite(|conn| {
-                let n: i64 = conn
-                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+                let n: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(n, 1, "failed rebuild must leave documents");
                 Ok(())
             })
@@ -948,8 +903,7 @@ mod tests {
         crate::services::library::forget(&state).expect("forget");
         state
             .with_sqlite(|conn| {
-                let n: i64 = conn
-                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+                let n: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(n, 0);
                 assert!(sqlite::get_setting(conn, "vault_path")?.is_none());
                 Ok(())

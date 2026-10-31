@@ -15,6 +15,7 @@ import {
 } from "@/lib/tauri";
 import { useTauriEvent } from "@/lib/tauri-events";
 import { cn } from "@/lib/utils";
+import { fileName } from "@/lib/format";
 import { useChatIntentStore } from "@/stores/chatIntentStore";
 import { useMainViewStore } from "@/stores/mainViewStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -24,10 +25,6 @@ import engravedLight from "@/assets/branding/cognito-engraved-light.svg";
 
 type SortKey = "title" | "type" | "date" | "pages";
 
-function fileName(path: string): string {
-  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return i >= 0 ? path.slice(i + 1) : path;
-}
 
 function folderName(path: string | null | undefined): string {
   if (!path) return "";

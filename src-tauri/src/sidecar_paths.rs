@@ -167,18 +167,12 @@ mod tests {
             let venv = cwd.join(".venv/Scripts");
             fs::create_dir_all(&venv).unwrap();
             fs::write(venv.join("python.exe"), b"").unwrap();
-            assert_eq!(
-                resolve_python_executable(cwd),
-                venv.join("python.exe")
-            );
+            assert_eq!(resolve_python_executable(cwd), venv.join("python.exe"));
 
             let py_dir = cwd.join("python");
             fs::create_dir_all(&py_dir).unwrap();
             fs::write(py_dir.join("python.exe"), b"").unwrap();
-            assert_eq!(
-                resolve_python_executable(cwd),
-                py_dir.join("python.exe")
-            );
+            assert_eq!(resolve_python_executable(cwd), py_dir.join("python.exe"));
         }
     }
 

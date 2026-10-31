@@ -16,6 +16,7 @@ import { useMainViewStore } from "@/stores/mainViewStore";
 import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
+import { fileName, pageLabel } from "@/lib/format";
 
 type Tab = "index" | "timeline";
 
@@ -85,20 +86,7 @@ function timelineYear(date: string): string {
   return m ? m[1] : "Unknown";
 }
 
-function fileName(path: string): string {
-  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return i >= 0 ? path.slice(i + 1) : path;
-}
 
-function pageLabel(pageStart: number | null | undefined, pageEnd: number | null | undefined): string | null {
-  if (pageStart != null && pageEnd != null && pageEnd !== pageStart) {
-    return `pp. ${pageStart}-${pageEnd}`;
-  }
-  if (pageStart != null) {
-    return `p. ${pageStart}`;
-  }
-  return null;
-}
 
 export function ConnectionsPanel() {
   const [tab, setTab] = useState<Tab>("index");

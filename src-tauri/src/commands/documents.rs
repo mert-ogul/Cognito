@@ -27,7 +27,7 @@ fn parse_regions_json(raw: Option<String>) -> Option<Value> {
 
 fn encode_base64(data: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
@@ -138,10 +138,10 @@ fn render_document_image(
         "app_data": state.data_dir.to_string_lossy(),
     });
     if let Some(r) = rect {
-        params.as_object_mut().expect("params object").insert(
-            "rect".into(),
-            json!([r.x0, r.y0, r.x1, r.y1]),
-        );
+        params
+            .as_object_mut()
+            .expect("params object")
+            .insert("rect".into(), json!([r.x0, r.y0, r.x1, r.y1]));
     }
     let _ = state.sidecar.with_session(|s| s.request(method, params))?;
     if !cache_path.is_file() {
@@ -154,7 +154,7 @@ fn render_document_image(
 pub async fn list_documents(
     state: tauri::State<'_, SharedState>,
 ) -> Result<Vec<DocumentRow>, String> {
-    run_blocking(state, |st| st.with_sqlite(|c| sqlite::list_documents(c))).await
+    run_blocking(state, |st| st.with_sqlite(sqlite::list_documents)).await
 }
 
 #[tauri::command]
@@ -172,7 +172,7 @@ pub async fn get_document_card(
 pub async fn get_suggested_questions(
     state: tauri::State<'_, SharedState>,
 ) -> Result<Vec<SuggestedQuestion>, String> {
-    run_blocking(state, |st| st.with_sqlite(|c| sqlite::get_suggested_questions(c))).await
+    run_blocking(state, |st| st.with_sqlite(sqlite::get_suggested_questions)).await
 }
 
 #[tauri::command]
@@ -357,7 +357,7 @@ pub(crate) fn maybe_rebuild_stale_index_format(app: AppHandle, state: SharedStat
             state.index_format_updating.store(false, Ordering::SeqCst);
             return;
         }
-        let settings = match state.with_sqlite(|c| sqlite::load_settings(c)) {
+        let settings = match state.with_sqlite(sqlite::load_settings) {
             Ok(s) => s,
             Err(_) => {
                 state.index_format_updating.store(false, Ordering::SeqCst);
@@ -383,10 +383,10 @@ pub async fn import_documents(
     state: tauri::State<'_, SharedState>,
     folder: Option<String>,
 ) -> Result<String, String> {
-    let guard = try_lock_import(&*state)?;
+    let guard = try_lock_import(&state)?;
     let job_id = Uuid::new_v4().to_string();
     let settings = state
-        .with_sqlite(|c| sqlite::load_settings(c))
+        .with_sqlite(sqlite::load_settings)
         .map_err(|e| e.to_string())?;
     let vault_str = settings
         .vault_path
@@ -400,7 +400,7 @@ pub async fn import_documents(
         vault.clone()
     };
     let active = state
-        .with_sqlite(|c| sqlite::count_active_documents(c))
+        .with_sqlite(sqlite::count_active_documents)
         .map_err(|e| e.to_string())?;
     let slots = crate::vault::slots_remaining(active);
     if slots == 0 {
@@ -428,10 +428,10 @@ pub async fn retry_failed_import(
     app: AppHandle,
     state: tauri::State<'_, SharedState>,
 ) -> Result<String, String> {
-    let guard = try_lock_import(&*state)?;
+    let guard = try_lock_import(&state)?;
     let job_id = Uuid::new_v4().to_string();
     let settings = state
-        .with_sqlite(|c| sqlite::load_settings(c))
+        .with_sqlite(sqlite::load_settings)
         .map_err(|e| e.to_string())?;
     let vault_str = settings
         .vault_path
@@ -439,7 +439,7 @@ pub async fn retry_failed_import(
         .ok_or_else(|| "Configure a vault folder first.".to_string())?;
     let vault = PathBuf::from(&vault_str);
     let entities_n = state
-        .with_sqlite(|c| sqlite::requeue_failed_entities(c))
+        .with_sqlite(sqlite::requeue_failed_entities)
         .map_err(|e| e.to_string())?;
     let paths_str = state
         .with_sqlite(|c| sqlite::failed_document_paths(c, 100))
@@ -471,16 +471,16 @@ pub async fn rebuild_index(
     state: tauri::State<'_, SharedState>,
     embed_model: Option<String>,
 ) -> Result<String, String> {
-    let guard = try_lock_import(&*state)?;
-    let (vault, paths) = library::plan_rebuild(&*state).map_err(|e| e.to_string())?;
+    let guard = try_lock_import(&state)?;
+    let (vault, paths) = library::plan_rebuild(&state).map_err(|e| e.to_string())?;
     if let Some(ref model) = embed_model {
         state
             .with_sqlite(|c| sqlite::upsert_setting(c, "embed_model", model))
             .map_err(|e| e.to_string())?;
     }
-    library::reset(&*state).map_err(|e| e.to_string())?;
+    library::reset(&state).map_err(|e| e.to_string())?;
     let settings = state
-        .with_sqlite(|c| sqlite::load_settings(c))
+        .with_sqlite(sqlite::load_settings)
         .map_err(|e| e.to_string())?;
     let job_id = Uuid::new_v4().to_string();
     spawn_import_thread(

@@ -106,19 +106,27 @@ impl AppState {
     where
         F: FnOnce(&SqlConn) -> CognitoResult<T>,
     {
-        let mut g = self.sql.lock().map_err(|e| CognitoError::Database(e.to_string()))?;
+        let mut g = self
+            .sql
+            .lock()
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
         if g.is_none() {
             let c = sqlite::open_sqlite(&self.sqlite_path)?;
             *g = Some(c);
         }
-        let conn = g.as_ref().ok_or_else(|| CognitoError::Database("sqlite".into()))?;
+        let conn = g
+            .as_ref()
+            .ok_or_else(|| CognitoError::Database("sqlite".into()))?;
         f(conn)
     }
 
     /// Drop the cached connection so the next `with_sqlite` reopens after another process
     /// changed the schema (for example the sidecar dropping `chunk_embeddings`).
     pub fn invalidate_sqlite(&self) -> CognitoResult<()> {
-        let mut g = self.sql.lock().map_err(|e| CognitoError::Database(e.to_string()))?;
+        let mut g = self
+            .sql
+            .lock()
+            .map_err(|e| CognitoError::Database(e.to_string()))?;
         *g = None;
         Ok(())
     }

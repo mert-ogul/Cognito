@@ -13,7 +13,12 @@ import numpy as np
 from rapidfuzz import fuzz
 
 from common.model_store import extract_spans_batch, mock_models_enabled
-from common.sqlite_vec_util import connect_with_vec, mock_embed_enabled, table_dimension
+from common.sqlite_vec_util import (
+    connect_with_vec,
+    mock_embed_enabled,
+    require_sqlite_path,
+    table_dimension,
+)
 from common.text_norm import normalize_date, normalize_name
 from query.entity_labels import labels_for_document
 
@@ -465,7 +470,7 @@ def _upsert_alias(con: sqlite3.Connection, entity_id: str, alias: str) -> None:
 
 
 def rpc_purge_document_entities(params: dict[str, Any]) -> dict[str, Any]:
-    sqlite_path = str(_param(params, "sqlitePath", "sqlite_path"))
+    sqlite_path = require_sqlite_path(_param(params, "sqlitePath", "sqlite_path"))
     document_id = str(_param(params, "documentId", "document_id"))
     con = sqlite3.connect(sqlite_path)
     try:
@@ -513,9 +518,7 @@ def _commit_document_mentions(
         normalized = str(it["normalized"])
         eid = _entity_id(label.lower(), normalized)
         entity_ids.add(eid)
-        row = con.execute(
-            "SELECT id, name FROM entities WHERE id = ?", (eid,)
-        ).fetchone()
+        row = con.execute("SELECT id, name FROM entities WHERE id = ?", (eid,)).fetchone()
         if row:
             if len(name) > len(str(row[1] or "")):
                 con.execute(
@@ -574,12 +577,10 @@ def _commit_document_mentions(
 
 
 def rpc_extract_entities(params: dict[str, Any]) -> dict[str, Any]:
-    sqlite_path = str(_param(params, "sqlitePath", "sqlite_path"))
+    sqlite_path = require_sqlite_path(_param(params, "sqlitePath", "sqlite_path"))
     document_id = str(_param(params, "documentId", "document_id"))
     app_data = str(_param(params, "app_data", "appData") or "")
-    extra_labels = [
-        str(x).strip() for x in (_param(params, "labels") or []) if str(x).strip()
-    ]
+    extra_labels = [str(x).strip() for x in (_param(params, "labels") or []) if str(x).strip()]
     chunk_offset = int(_param(params, "chunkOffset", "chunk_offset", default=0) or 0)
     chunk_limit = int(
         _param(params, "chunkLimit", "chunk_limit", default=_CHUNK_LIMIT) or _CHUNK_LIMIT
@@ -744,9 +745,7 @@ def _load_docs_for_links(con: sqlite3.Connection) -> list[dict[str, Any]]:
     return docs
 
 
-def _mean_pool_doc_vectors(
-    sqlite_path: str, doc_ids: list[str]
-) -> np.ndarray | None:
+def _mean_pool_doc_vectors(sqlite_path: str, doc_ids: list[str]) -> np.ndarray | None:
     con = connect_with_vec(sqlite_path)
     try:
         dim = table_dimension(con)
@@ -796,13 +795,7 @@ def _mock_similar_links(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     }
                 )
                 if (
-                    len(
-                        [
-                            x
-                            for x in links
-                            if x["source_id"] == sid and x["kind"] == "similar"
-                        ]
-                    )
+                    len([x for x in links if x["source_id"] == sid and x["kind"] == "similar"])
                     >= _SIMILAR_TOP_K
                 ):
                     break
@@ -810,7 +803,7 @@ def _mock_similar_links(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
-    sqlite_path = str(_param(params, "sqlitePath", "sqlite_path"))
+    sqlite_path = require_sqlite_path(_param(params, "sqlitePath", "sqlite_path"))
 
     con = sqlite3.connect(sqlite_path)
     try:

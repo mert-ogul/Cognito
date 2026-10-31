@@ -15,9 +15,15 @@ from common.sqlite_vec_util import (
     ensure_chunk_embedding_table,
     insert_chunk_embedding,
     mock_embed_enabled,
+    require_sqlite_path,
     table_dimension,
 )
-from ingestion.chunking import chunk_semantic, estimate_tokens, extract_chunk_labels, hash_chunk_text
+from ingestion.chunking import (
+    chunk_semantic,
+    estimate_tokens,
+    extract_chunk_labels,
+    hash_chunk_text,
+)
 from ingestion.parsing import parse_file
 
 _EMBED_BATCH = 32
@@ -52,9 +58,7 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
             trail = " > ".join(t for t in ch.heading_trail if t)
             role = ch.role if ch.role in ("body", "references") else "body"
             labels = extract_chunk_labels(ch.text)
-            regions_json = (
-                json.dumps(ch.regions) if ch.regions else None
-            )
+            regions_json = json.dumps(ch.regions) if ch.regions else None
             chunks.append(
                 {
                     "ordinal": ord_i,
@@ -79,9 +83,7 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
     return {"items": out}
 
 
-def _embed_document_text(
-    model: str, title: str, heading_trail: str | None, text: str
-) -> str:
+def _embed_document_text(model: str, title: str, heading_trail: str | None, text: str) -> str:
     _, doc_prefix = embed_prefixes(model)
     parts = [doc_prefix + (title or "").strip()]
     trail = (heading_trail or "").strip()
@@ -92,7 +94,7 @@ def _embed_document_text(
 
 
 def rpc_embed_chunks(params: dict[str, Any]) -> dict[str, Any]:
-    sqlite_path = str(params["sqlitePath"])
+    sqlite_path = require_sqlite_path(params.get("sqlitePath"))
     model = str(params["embedModel"])
     items = params["items"]
     con = connect_with_vec(sqlite_path)
@@ -135,7 +137,7 @@ def rpc_embed_chunks(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def rpc_purge_chunk_embeddings(params: dict[str, Any]) -> dict[str, Any]:
-    sqlite_path = str(params["sqlitePath"])
+    sqlite_path = require_sqlite_path(params.get("sqlitePath"))
     ids = [str(x) for x in params.get("chunkIds", [])]
     if not ids:
         return {"ok": True}
@@ -151,7 +153,7 @@ def rpc_purge_chunk_embeddings(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def rpc_reset_index(params: dict[str, Any]) -> dict[str, Any]:
-    sqlite_path = str(params["sqlitePath"])
+    sqlite_path = require_sqlite_path(params.get("sqlitePath"))
     con = connect_with_vec(sqlite_path)
     try:
         con.execute("DROP TABLE IF EXISTS chunk_embeddings")

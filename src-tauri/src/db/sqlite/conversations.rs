@@ -62,9 +62,8 @@ pub fn conversation_title(text: &str) -> String {
 }
 
 pub fn list_conversations(conn: &Connection) -> CognitoResult<Vec<ConversationListItem>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title, updated_at FROM conversations ORDER BY updated_at DESC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, title, updated_at FROM conversations ORDER BY updated_at DESC")?;
     let rows = stmt.query_map([], |r| {
         Ok(ConversationListItem {
             id: r.get(0)?,
@@ -165,12 +164,11 @@ pub fn append_turn(
     assistant_id: &str,
 ) -> CognitoResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
-    let next_pos: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM chat_messages WHERE conversation_id = ?1",
-            [conversation_id],
-            |r| r.get(0),
-        )?;
+    let next_pos: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM chat_messages WHERE conversation_id = ?1",
+        [conversation_id],
+        |r| r.get(0),
+    )?;
     let msg_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM chat_messages WHERE conversation_id = ?1",
         [conversation_id],

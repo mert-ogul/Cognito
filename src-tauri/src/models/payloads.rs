@@ -200,14 +200,6 @@ pub struct CitationItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // reserved; grounded chat emits stages + final instead
-pub struct ChatStreamEvent {
-    pub message_id: String,
-    pub token: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ChatStageEvent {
     pub message_id: String,
     pub conversation_id: String,

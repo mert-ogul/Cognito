@@ -14,6 +14,8 @@
     "test:unit": "vitest run",
     "test:e2e": "CI=1 playwright test",
     "test": "npm run test:unit && npm run test:py",
+    "typecheck": "tsc --noEmit",
+    "lint:py": "cd sidecar && uv run ruff check && uv run ruff format --check",
     "benchmark:import": "cd sidecar && uv run python scripts/benchmark_import.py",
     "eval": "cd sidecar && uv run python scripts/eval_retrieval.py"
   },

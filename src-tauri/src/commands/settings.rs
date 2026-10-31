@@ -7,10 +7,8 @@ use std::path::PathBuf;
 use super::run_blocking;
 
 #[tauri::command]
-pub async fn get_settings(
-    state: tauri::State<'_, SharedState>,
-) -> Result<SettingsPayload, String> {
-    run_blocking(state, |st| st.with_sqlite(|c| sqlite::load_settings(c))).await
+pub async fn get_settings(state: tauri::State<'_, SharedState>) -> Result<SettingsPayload, String> {
+    run_blocking(state, |st| st.with_sqlite(sqlite::load_settings)).await
 }
 
 #[tauri::command]
@@ -20,13 +18,13 @@ pub async fn update_settings(
 ) -> Result<(), String> {
     let st = (*state).clone();
     let prev = st
-        .with_sqlite(|c| sqlite::load_settings(c))
+        .with_sqlite(sqlite::load_settings)
         .map_err(|e| e.to_string())?;
     let index_embed = st
         .with_sqlite(|c| sqlite::get_setting(c, "index_embed_model"))
         .map_err(|e| e.to_string())?;
     let active = st
-        .with_sqlite(|c| sqlite::count_active_documents(c))
+        .with_sqlite(sqlite::count_active_documents)
         .map_err(|e| e.to_string())?;
     if let Some(ref indexed) = index_embed {
         if payload.embed_model != *indexed && active > 0 {

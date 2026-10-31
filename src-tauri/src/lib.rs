@@ -72,7 +72,7 @@ pub fn run() {
                 *wg = Some(reload_tx.clone());
             }
             file_watcher::spawn_background(state.clone(), app.handle().clone(), reload_rx);
-            if let Ok(s) = state.with_sqlite(|c| sqlite::load_settings(c)) {
+            if let Ok(s) = state.with_sqlite(sqlite::load_settings) {
                 if let Some(vp) = s.vault_path {
                     let _ = reload_tx.send(Some(PathBuf::from(vp)));
                 }

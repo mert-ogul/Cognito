@@ -44,13 +44,7 @@ pub async fn send_chat_query(
     let user_id = Uuid::new_v4().to_string();
     state
         .with_sqlite(|c| {
-            sqlite::conversations::append_turn(
-                c,
-                &conversation_id,
-                &user_id,
-                &query,
-                &message_id,
-            )
+            sqlite::conversations::append_turn(c, &conversation_id, &user_id, &query, &message_id)
         })
         .map_err(|e| e.to_string())?;
     let st = state.inner().clone();
@@ -106,13 +100,7 @@ pub async fn send_related_query(
     let user_id = Uuid::new_v4().to_string();
     state
         .with_sqlite(|c| {
-            sqlite::conversations::append_turn(
-                c,
-                &conversation_id,
-                &user_id,
-                &query,
-                &message_id,
-            )
+            sqlite::conversations::append_turn(c, &conversation_id, &user_id, &query, &message_id)
         })
         .map_err(|e| e.to_string())?;
     let st = state.inner().clone();
@@ -147,7 +135,7 @@ pub async fn list_conversations(
     state: tauri::State<'_, SharedState>,
 ) -> Result<Vec<sqlite::conversations::ConversationListItem>, String> {
     super::run_blocking(state, |st| {
-        st.with_sqlite(|c| sqlite::conversations::list_conversations(c))
+        st.with_sqlite(sqlite::conversations::list_conversations)
     })
     .await
 }

@@ -15,7 +15,18 @@ MOCK_EMBED_ENV = "COGNITO_MOCK_EMBED"
 VEC_DIM = MOCK_EMBED_DIM
 
 
+def require_sqlite_path(path: str | None) -> str:
+    """Reject missing paths so sqlite3.connect never creates a file named 'None'."""
+    if path is None or (isinstance(path, str) and not path.strip()) or path == "None":
+        raise ValueError(
+            "SQLite path is missing. Pass a real vault.sqlite path "
+            "(not None); str(None) would open a file named 'None'."
+        )
+    return path
+
+
 def connect_with_vec(path: str) -> sqlite3.Connection:
+    path = require_sqlite_path(path)
     con = sqlite3.connect(path)
     con.execute("PRAGMA foreign_keys = ON")
     con.enable_load_extension(True)
@@ -56,9 +67,7 @@ def insert_chunk_embedding(con: sqlite3.Connection, chunk_id: str, vec: list[flo
         raise ValueError("chunk_embeddings table is missing")
     n = len(vec)
     if n != dim:
-        raise ValueError(
-            f"embedding has {n} values but the index uses {dim}; rebuild the index"
-        )
+        raise ValueError(f"embedding has {n} values but the index uses {dim}; rebuild the index")
     blob = sqlite_vec.serialize_float32(list(vec))
     con.execute(
         "INSERT INTO chunk_embeddings(embedding, chunk_id) VALUES (?, ?)",
