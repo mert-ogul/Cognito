@@ -210,6 +210,7 @@ pub struct ChatStreamEvent {
 #[serde(rename_all = "camelCase")]
 pub struct ChatStageEvent {
     pub message_id: String,
+    pub conversation_id: String,
     pub stage: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citations: Option<Vec<CitationItem>>,
@@ -257,6 +258,7 @@ pub struct ScopeSuggestion {
 #[serde(rename_all = "camelCase")]
 pub struct ChatFinalResult {
     pub message_id: String,
+    pub conversation_id: String,
     #[serde(default)]
     pub citations: Vec<CitationItem>,
     pub retrieval_mode: String,
@@ -279,9 +281,14 @@ pub struct ChatFinalResult {
 }
 
 impl ChatFinalResult {
-    pub fn failure(message_id: impl Into<String>, error: impl Into<String>) -> Self {
+    pub fn failure(
+        message_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Self {
         Self {
             message_id: message_id.into(),
+            conversation_id: conversation_id.into(),
             citations: Vec::new(),
             retrieval_mode: "error".into(),
             error: Some(error.into()),
@@ -340,6 +347,7 @@ mod chat_payload_tests {
         };
         let f = ChatFinalResult {
             message_id: "m1".into(),
+            conversation_id: "conv1".into(),
             citations: vec![c],
             retrieval_mode: "hybrid".into(),
             error: None,

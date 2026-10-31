@@ -101,6 +101,12 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     useMainViewStore.getState().showConversation();
   };
 
+  const afterRebuild = () => {
+    void qc.invalidateQueries({ queryKey: ["settings"] });
+    void qc.invalidateQueries({ queryKey: ["health"] });
+    void qc.invalidateQueries({ queryKey: ["documents"] });
+  };
+
   const settingsPayload = () => ({
     vaultPath: data?.vaultPath ?? null,
     chatModel: chat,
@@ -175,10 +181,10 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
           extraEntityLabels: alsoFind,
         });
         await rebuildIndex(embed.trim());
-        afterLibraryReset();
+        afterRebuild();
       } else if (confirm === "rebuild") {
         await rebuildIndex();
-        afterLibraryReset();
+        afterRebuild();
       } else if (confirm === "change-folder" && pendingFolder) {
         await setVault(pendingFolder);
         afterLibraryReset();

@@ -9,6 +9,7 @@ import rehypeKatex from "rehype-katex";
 import { SidePane } from "@/components/layout/SidePane";
 import { e2eEmit } from "@/lib/tauri-events";
 import {
+  createConversation,
   getDocumentPreview,
   getSuggestedQuestions,
   listDocuments,
@@ -17,6 +18,7 @@ import {
 } from "@/lib/tauri";
 import type { CitationItem, DocumentRow } from "@/lib/tauri";
 import { useChatIntentStore } from "@/stores/chatIntentStore";
+import { useConversationStore } from "@/stores/conversationStore";
 import { useSidePaneStore } from "@/stores/sidePaneStore";
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
@@ -24,6 +26,14 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
   return {
     ...actual,
     sendChatQuery: vi.fn(),
+    createConversation: vi.fn(async (title: string) => ({
+      id: "conv-1",
+      title,
+      updatedAt: "2026-01-01T00:00:00Z",
+    })),
+    getConversation: vi.fn(async () => null),
+    listConversations: vi.fn(async () => []),
+    deleteConversation: vi.fn(async () => {}),
     warmChatModel: vi.fn(async () => {}),
     prepareModels: vi.fn(async () => ({ ready: true, models: [], totalSizeBytes: 0 })),
     getModelsStatus: vi.fn(async () => ({ ready: true, models: [], totalSizeBytes: 0 })),
@@ -170,6 +180,7 @@ describe("answer math", () => {
 describe("ChatPanel", () => {
   beforeEach(() => {
     vi.mocked(sendChatQuery).mockReset();
+    vi.mocked(createConversation).mockReset();
     vi.mocked(getDocumentPreview).mockReset();
     vi.mocked(listDocuments).mockReset();
     vi.mocked(prepareModels).mockReset();
@@ -177,6 +188,11 @@ describe("ChatPanel", () => {
     vi.mocked(listDocuments).mockResolvedValue([]);
     vi.mocked(prepareModels).mockResolvedValue({ ready: true, models: [], totalSizeBytes: 0 });
     vi.mocked(getSuggestedQuestions).mockResolvedValue([]);
+    vi.mocked(createConversation).mockImplementation(async (title: string) => ({
+      id: "conv-1",
+      title,
+      updatedAt: "2026-01-01T00:00:00Z",
+    }));
     useSidePaneStore.setState({
       open: false,
       mode: "connections",
@@ -187,6 +203,11 @@ describe("ChatPanel", () => {
       pendingScope: [],
       pendingQuestion: null,
       pendingRelated: null,
+    });
+    useConversationStore.setState({
+      activeId: null,
+      busyMessageId: null,
+      busyConversationId: null,
     });
   });
 
@@ -282,6 +303,10 @@ describe("ChatPanel", () => {
   });
 
   it("shows only the status line while writing, then collapsed sources", async () => {
+    let releaseFinal!: () => void;
+    const finalGate = new Promise<void>((resolve) => {
+      releaseFinal = resolve;
+    });
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
       e2eEmit("chat-stage", {
         messageId,
@@ -289,7 +314,7 @@ describe("ChatPanel", () => {
         detail: "Writing the answer",
         citations: [cite(1, "One", "/vault/one.pdf")],
       });
-      await new Promise((r) => setTimeout(r, 20));
+      await finalGate;
       e2eEmit("chat-final", {
         messageId,
         citations: [cite(1, "One", "/vault/one.pdf")],
@@ -303,6 +328,7 @@ describe("ChatPanel", () => {
     await sendPrompt("ask");
     expect(await screen.findByText("Writing the answer")).toBeInTheDocument();
     expect(screen.queryByText(/Sources ·/)).toBeNull();
+    releaseFinal();
     expect(await screen.findByText("Final answer body.")).toBeInTheDocument();
     expect(screen.getByText("Sources · 1")).toBeInTheDocument();
   });
@@ -561,6 +587,7 @@ describe("ChatPanel", () => {
         expect.any(String),
         expect.any(Array),
         ["a"],
+        "conv-1",
       ),
     );
   });
@@ -602,8 +629,23 @@ describe("ChatPanel", () => {
         expect.any(String),
         expect.any(Array),
         [],
+        "conv-1",
       ),
     );
+  });
+
+  it("ignores chat-final for another conversation", async () => {
+    useConversationStore.setState({ activeId: "conv-open" });
+    renderChat();
+    e2eEmit("chat-final", {
+      messageId: "other-asst",
+      conversationId: "conv-other",
+      citations: [],
+      sentences: [{ text: "Other chat answer.", status: "supported", sources: [] }],
+      notFound: false,
+      error: null,
+    });
+    expect(screen.queryByText("Other chat answer.")).toBeNull();
   });
 
   it("suggested question sets input and scope", async () => {

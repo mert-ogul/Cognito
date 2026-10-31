@@ -57,6 +57,14 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
     getDocumentCard: vi.fn(async () => null),
     getSuggestedQuestions: vi.fn(async () => []),
     sendChatQuery: vi.fn(async () => "mid"),
+    listConversations: vi.fn(async () => []),
+    createConversation: vi.fn(async (title: string) => ({
+      id: "conv-1",
+      title,
+      updatedAt: "2026-01-01T00:00:00Z",
+    })),
+    getConversation: vi.fn(async () => null),
+    deleteConversation: vi.fn(async () => {}),
     warmChatModel: vi.fn(async () => {}),
   };
 });

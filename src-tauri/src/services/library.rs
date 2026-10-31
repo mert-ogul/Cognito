@@ -38,6 +38,7 @@ pub fn reset(state: &SharedState) -> CognitoResult<()> {
     state.with_sqlite(|c| {
         sqlite::delete_all_documents(c)?;
         sqlite::empty_connection_tables(c)?;
+        sqlite::conversations::delete_all_conversations(c)?;
         sqlite::clear_setting(c, "index_embed_model")?;
         Ok(())
     })?;
@@ -154,5 +155,69 @@ mod tests {
             .filter(|e| e.path().is_file())
             .collect();
         assert!(left.is_empty(), "page_cache should be empty");
+    }
+
+    #[test]
+    fn switch_vault_and_forget_remove_conversations() {
+        let data = tempfile::tempdir().expect("data");
+        let sidecar_cwd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sidecar");
+        let main_py = sidecar_cwd.join("main.py");
+        let log_path = data.path().join("logs").join("sidecar.log");
+        fs::create_dir_all(log_path.parent().unwrap()).expect("logs");
+        let pool = SidecarPool::new(main_py, sidecar_cwd, log_path, data.path().to_path_buf());
+        let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
+        let _ = state.sidecar.ensure();
+
+        let vault_a = data.path().join("vault_a");
+        fs::create_dir_all(&vault_a).expect("vault_a");
+        fs::write(vault_a.join("a.md"), "# A\n").expect("a.md");
+
+        state
+            .with_sqlite(|c| {
+                sqlite::upsert_setting(c, "vault_path", &vault::path_string(&vault_a))?;
+                sqlite::insert_document_row(
+                    c,
+                    "d1",
+                    &vault::path_string(&vault_a.join("a.md")),
+                    "A",
+                    "markdown",
+                    "h",
+                    None,
+                    "indexed",
+                    None,
+                    None,
+                )?;
+                let conv = sqlite::conversations::create_conversation(c, "Keep me?")?;
+                sqlite::conversations::append_turn(c, &conv.id, "u1", "Keep me?", "m1")?;
+                Ok(())
+            })
+            .expect("seed");
+
+        let vault_b = data.path().join("vault_b");
+        fs::create_dir_all(&vault_b).expect("vault_b");
+        fs::write(vault_b.join("b.md"), "# B\n").expect("b.md");
+        switch_vault(&state, &vault::path_string(&vault_b)).expect("switch");
+        state
+            .with_sqlite(|c| {
+                let n = sqlite::conversations::list_conversations(c)?.len();
+                assert_eq!(n, 0);
+                Ok(())
+            })
+            .expect("after switch");
+
+        state
+            .with_sqlite(|c| {
+                let _ = sqlite::conversations::create_conversation(c, "Again")?;
+                Ok(())
+            })
+            .expect("reseed");
+        forget(&state).expect("forget");
+        state
+            .with_sqlite(|c| {
+                let n = sqlite::conversations::list_conversations(c)?.len();
+                assert_eq!(n, 0);
+                Ok(())
+            })
+            .expect("after forget");
     }
 }

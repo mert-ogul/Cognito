@@ -187,6 +187,7 @@ fn validate_draft(mut draft: GroundedDraft) -> GroundedDraft {
 fn emit_stage(
     app: &AppHandle,
     message_id: &str,
+    conversation_id: &str,
     stage: &str,
     citations: Option<Vec<CitationItem>>,
     detail: Option<String>,
@@ -196,6 +197,7 @@ fn emit_stage(
         CHAT_STAGE,
         &ChatStageEvent {
             message_id: message_id.to_string(),
+            conversation_id: conversation_id.to_string(),
             stage: stage.to_string(),
             citations,
             detail,
@@ -218,7 +220,45 @@ async fn sidecar_request(
     .map_err(|e| crate::errors::CognitoError::Sidecar(e.to_string()))?
 }
 
-fn emit_final(app: &AppHandle, result: &ChatFinalResult) {
+fn assistant_content_and_status(result: &ChatFinalResult) -> (String, &'static str) {
+    if let Some(err) = &result.error {
+        return (err.clone(), "error");
+    }
+    let content = result
+        .sentences
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (content, "done")
+}
+
+fn assistant_payload(result: &ChatFinalResult) -> Value {
+    json!({
+        "citations": result.citations,
+        "sentences": result.sentences,
+        "notFound": result.not_found,
+        "scopeTitle": result.scope_title,
+        "suggestions": result.suggestions,
+        "error": result.error,
+    })
+}
+
+/// Persist the assistant row, then emit. A save failure is logged; the event still fires.
+pub fn emit_final(state: &SharedState, app: &AppHandle, result: &ChatFinalResult) {
+    let (content, status) = assistant_content_and_status(result);
+    let payload = assistant_payload(result);
+    if let Err(e) = state.with_sqlite(|c| {
+        sqlite::conversations::finish_assistant_message(
+            c,
+            &result.message_id,
+            status,
+            &content,
+            Some(&payload),
+        )
+    }) {
+        eprintln!("chat save failed for {}: {e}", result.message_id);
+    }
     let _ = app.emit(CHAT_FINAL, result);
 }
 
@@ -268,6 +308,7 @@ pub async fn run_chat_query(
     app: AppHandle,
     query: String,
     message_id: String,
+    conversation_id: String,
     history: Vec<ChatTurn>,
     scope_ids: Vec<String>,
 ) -> CognitoResult<()> {
@@ -294,8 +335,13 @@ pub async fn run_chat_query(
         Ok(p) => p,
         Err(e) => {
             emit_final(
+                &state,
                 &app,
-                &ChatFinalResult::failure(message_id.clone(), e.to_string()),
+                &ChatFinalResult::failure(
+                    message_id.clone(),
+                    conversation_id.clone(),
+                    e.to_string(),
+                ),
             );
             return Ok(());
         }
@@ -322,7 +368,15 @@ pub async fn run_chat_query(
         .take(5)
         .filter_map(|v| serde_json::from_value(v.clone()).ok())
         .collect();
-    emit_stage(&app, &message_id, "passages", Some(preview), None, vec![]);
+    emit_stage(
+        &app,
+        &message_id,
+        &conversation_id,
+        "passages",
+        Some(preview),
+        None,
+        vec![],
+    );
 
     let mut scope_chosen = prep
         .get("scopeChosen")
@@ -373,6 +427,7 @@ pub async fn run_chat_query(
     emit_stage(
         &app,
         &message_id,
+        &conversation_id,
         "ranking",
         None,
         Some("Ranking passages".into()),
@@ -418,16 +473,21 @@ pub async fn run_chat_query(
             Ok(v) => v,
             Err(e) => {
                 emit_final(
+                    &state,
                     &app,
                     &{
-                    let mut r = ChatFinalResult::failure(message_id.clone(), e.to_string());
-                    r.scope_ids = result_scope_ids;
-                    r.timings = Some(ChatTimings {
-                        retrieval_ms,
-                        ..ChatTimings::default()
-                    });
-                    r
-                },
+                        let mut r = ChatFinalResult::failure(
+                            message_id.clone(),
+                            conversation_id.clone(),
+                            e.to_string(),
+                        );
+                        r.scope_ids = result_scope_ids;
+                        r.timings = Some(ChatTimings {
+                            retrieval_ms,
+                            ..ChatTimings::default()
+                        });
+                        r
+                    },
                 );
                 return Ok(());
             }
@@ -502,6 +562,7 @@ pub async fn run_chat_query(
         app,
         query,
         message_id,
+        conversation_id,
         history,
         citations,
         early,
@@ -524,6 +585,7 @@ pub async fn run_related_query(
     entity_id_a: String,
     entity_id_b: String,
     message_id: String,
+    conversation_id: String,
 ) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
     let app_data = vault::path_string(&state.data_dir);
@@ -547,8 +609,13 @@ pub async fn run_related_query(
         Ok(p) => p,
         Err(e) => {
             emit_final(
+                &state,
                 &app,
-                &ChatFinalResult::failure(message_id.clone(), e.to_string()),
+                &ChatFinalResult::failure(
+                    message_id.clone(),
+                    conversation_id.clone(),
+                    e.to_string(),
+                ),
             );
             return Ok(());
         }
@@ -558,6 +625,7 @@ pub async fn run_related_query(
     emit_stage(
         &app,
         &message_id,
+        &conversation_id,
         "passages",
         Some(citations.clone()),
         None,
@@ -566,6 +634,7 @@ pub async fn run_related_query(
     emit_stage(
         &app,
         &message_id,
+        &conversation_id,
         "ranking",
         None,
         Some("Ranking passages".into()),
@@ -577,6 +646,7 @@ pub async fn run_related_query(
         app,
         query,
         message_id,
+        conversation_id,
         vec![],
         citations,
         empty,
@@ -598,6 +668,7 @@ async fn finish_grounded_answer(
     app: AppHandle,
     query: String,
     message_id: String,
+    conversation_id: String,
     history: Vec<ChatTurn>,
     citations: Vec<CitationItem>,
     early_not_found: bool,
@@ -615,6 +686,7 @@ async fn finish_grounded_answer(
     emit_stage(
         &app,
         &message_id,
+        &conversation_id,
         "passages",
         Some(citations.clone()),
         None,
@@ -627,9 +699,11 @@ async fn finish_grounded_answer(
             timings.retrieval_ms, timings.rerank_ms, timings.rerank_scored
         );
         emit_final(
+            &state,
             &app,
             &ChatFinalResult {
                 message_id,
+                conversation_id,
                 citations,
                 retrieval_mode: early_mode.into(),
                 error: None,
@@ -648,6 +722,7 @@ async fn finish_grounded_answer(
     emit_stage(
         &app,
         &message_id,
+        &conversation_id,
         "writing",
         None,
         Some("Quoting the sources".into()),
@@ -658,6 +733,7 @@ async fn finish_grounded_answer(
     let gen_started = Instant::now();
     let app_write = app.clone();
     let mid_write = message_id.clone();
+    let cid_write = conversation_id.clone();
     let mut emitted_draft_len = 0usize;
     let raw = match ollama_stream::chat_completion_json_streaming(
         chat_model,
@@ -670,7 +746,15 @@ async fn finish_grounded_answer(
                 .collect();
             if draft_now.len() > emitted_draft_len {
                 emitted_draft_len = draft_now.len();
-                emit_stage(&app_write, &mid_write, "writing", None, None, draft_now);
+                emit_stage(
+                    &app_write,
+                    &mid_write,
+                    &cid_write,
+                    "writing",
+                    None,
+                    None,
+                    draft_now,
+                );
             }
         },
     )
@@ -679,9 +763,10 @@ async fn finish_grounded_answer(
         Ok(s) => s,
         Err(e) => {
             emit_final(
+                &state,
                 &app,
                 &{
-                    let mut r = ChatFinalResult::failure(message_id, e);
+                    let mut r = ChatFinalResult::failure(message_id, conversation_id, e);
                     r.citations = citations;
                     r.scope_title = scope_title;
                     r.scope_ids = result_scope_ids;
@@ -698,9 +783,10 @@ async fn finish_grounded_answer(
         Ok(d) => d,
         Err(e) => {
             emit_final(
+                &state,
                 &app,
                 &{
-                    let mut r = ChatFinalResult::failure(message_id, e);
+                    let mut r = ChatFinalResult::failure(message_id, conversation_id, e);
                     r.citations = citations;
                     r.scope_title = scope_title;
                     r.scope_ids = result_scope_ids;
@@ -723,6 +809,7 @@ async fn finish_grounded_answer(
     emit_stage(
         &app,
         &message_id,
+        &conversation_id,
         "checking",
         None,
         Some(format!("Checking {n_sentences} sentences")),
@@ -757,9 +844,11 @@ async fn finish_grounded_answer(
         Ok(v) => v,
         Err(e) => {
             emit_final(
+                &state,
                 &app,
                 &{
-                    let mut r = ChatFinalResult::failure(message_id, e.to_string());
+                    let mut r =
+                        ChatFinalResult::failure(message_id, conversation_id, e.to_string());
                     r.citations = citations;
                     r.scope_title = scope_title;
                     r.scope_ids = result_scope_ids;
@@ -813,9 +902,11 @@ async fn finish_grounded_answer(
     }
 
     emit_final(
+        &state,
         &app,
         &ChatFinalResult {
             message_id,
+            conversation_id,
             citations,
             retrieval_mode: success_mode.into(),
             error: None,

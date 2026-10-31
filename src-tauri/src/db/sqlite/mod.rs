@@ -1,5 +1,7 @@
 //! SQLite vault access and migrations.
 
+pub mod conversations;
+
 use crate::errors::CognitoResult;
 use crate::models::{DocumentCardPayload, DocumentRow, SettingsPayload, SuggestedQuestion};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -23,6 +25,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (14, include_str!("../../../migrations/014_background_model_default.sql")),
     (15, include_str!("../../../migrations/015_drop_map_tables.sql")),
     (16, include_str!("../../../migrations/016_drop_schema_migrations.sql")),
+    (17, include_str!("../../../migrations/017_conversations.sql")),
 ];
 
 /// Bump when embedding text format or retrieval index layout changes.
@@ -1502,7 +1505,7 @@ mod tests {
             let v: i32 = c
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .expect("uv");
-            assert_eq!(v, 16);
+            assert_eq!(v, 17);
             assert_eq!(INDEX_FORMAT_VERSION, 7);
             let has_topics: i32 = c
                 .query_row(

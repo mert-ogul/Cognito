@@ -6,6 +6,12 @@ import {
 } from "@/components/chat/AssistantMessage";
 import { Button } from "@/components/ui/button";
 import {
+  conversationTitle,
+  storedMessageToChatMessage,
+  type ChatMessage,
+} from "@/lib/chatMessage";
+import {
+  createConversation,
   getDocumentPreview,
   getSuggestedQuestions,
   listDocuments,
@@ -19,34 +25,24 @@ import {
   type CitationItem,
   type DocumentRow,
   type SuggestedQuestion,
+  getConversation,
 } from "@/lib/tauri";
 import { useTauriEvent } from "@/lib/tauri-events";
 import { cn } from "@/lib/utils";
 import { useChatIntentStore, type ScopeDoc } from "@/stores/chatIntentStore";
 import { useCitedRegionsStore } from "@/stores/citedRegionsStore";
+import { useConversationStore } from "@/stores/conversationStore";
 import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 export { citationSourceLabel, normalizeAnswerMath };
 
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  citations?: CitationItem[];
-  sentences?: AnswerSentence[];
-  draft?: string[];
-  notFound?: boolean;
-  scopeTitle?: string | null;
-  suggestions?: ScopeSearchSuggestion[];
-  error?: string;
-  stage?: "passages" | "ranking" | "writing" | "checking" | "done";
-  stageDetail?: string;
-};
-
 type Props = {
   health: AppHealth | undefined;
+  loadConversationId?: string | null;
+  newChatEpoch?: number;
+  onStartedNewChat?: () => void;
 };
 
 function formatModelBytes(n: number): string {
@@ -86,16 +82,28 @@ function atToken(value: string, cursor: number): { start: number; query: string 
   return { start: before.length - m[0].length, query: m[1] ?? "" };
 }
 
-export function ChatPanel({ health }: Props) {
+export function ChatPanel({
+  health,
+  loadConversationId = null,
+  newChatEpoch = 0,
+  onStartedNewChat,
+}: Props) {
   const queryClient = useQueryClient();
   const openPassage = useSidePaneStore((s) => s.openPassage);
   const addCitedRegions = useCitedRegionsStore((s) => s.addRegions);
   const consumeIntent = useChatIntentStore((s) => s.consumeIntent);
   const pendingRelated = useChatIntentStore((s) => s.pendingRelated);
   const libraryResetEpoch = useChatIntentStore((s) => s.libraryResetEpoch);
+  const activeId = useConversationStore((s) => s.activeId);
+  const setActiveId = useConversationStore((s) => s.setActiveId);
+  const busyMessageId = useConversationStore((s) => s.busyMessageId);
+  const busyConversationId = useConversationStore((s) => s.busyConversationId);
+  const setBusy = useConversationStore((s) => s.setBusy);
+  const clearBusyIf = useConversationStore((s) => s.clearBusyIf);
+  const resetActive = useConversationStore((s) => s.resetActive);
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [busyId, setBusyId] = useState<string | null>(null);
   const [retryUserText, setRetryUserText] = useState<string | null>(null);
   const [scopeDocs, setScopeDocs] = useState<ScopeDoc[]>([]);
   const [libraryDocs, setLibraryDocs] = useState<DocumentRow[]>([]);
@@ -122,6 +130,10 @@ export function ChatPanel({ health }: Props) {
     !!health?.vaultConfigured &&
     !!health?.checkingModelsReady;
 
+  const anyBusy = !!busyMessageId;
+  const otherChatBusy =
+    !!busyConversationId && !!activeId && busyConversationId !== activeId;
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -137,17 +149,52 @@ export function ChatPanel({ health }: Props) {
     const el = scrollRef.current;
     if (!el || !stickToBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages, busyId]);
+  }, [messages, busyMessageId]);
 
-  useEffect(() => {
-    if (libraryResetEpoch === 0) return;
+  const clearLocalChat = useCallback(() => {
     setMessages([]);
-    setBusyId(null);
     setRetryUserText(null);
     setScopeDocs([]);
     lastSentRef.current = null;
     lastSentScopeRef.current = [];
-  }, [libraryResetEpoch]);
+  }, []);
+
+  const startNewChat = useCallback(() => {
+    setActiveId(null);
+    clearLocalChat();
+    onStartedNewChat?.();
+  }, [clearLocalChat, onStartedNewChat, setActiveId]);
+
+  useEffect(() => {
+    if (libraryResetEpoch === 0) return;
+    resetActive();
+    clearLocalChat();
+    void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+  }, [libraryResetEpoch, resetActive, clearLocalChat, queryClient]);
+
+  const lastNewEpochRef = useRef(0);
+  useEffect(() => {
+    if (newChatEpoch === 0 || newChatEpoch === lastNewEpochRef.current) return;
+    lastNewEpochRef.current = newChatEpoch;
+    startNewChat();
+  }, [newChatEpoch, startNewChat]);
+
+  useEffect(() => {
+    if (!loadConversationId) return;
+    let cancelled = false;
+    void getConversation(loadConversationId).then((detail) => {
+      if (cancelled || !detail) return;
+      setActiveId(detail.id);
+      setMessages(detail.messages.map(storedMessageToChatMessage));
+      setRetryUserText(null);
+      setScopeDocs([]);
+      lastSentRef.current = null;
+      lastSentScopeRef.current = [];
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadConversationId, setActiveId]);
 
   useLayoutEffect(() => {
     const el = textareaRef.current;
@@ -178,8 +225,20 @@ export function ChatPanel({ health }: Props) {
     }
   }, [consumeIntent]);
 
+  const ensureConversation = useCallback(
+    async (firstText: string): Promise<string> => {
+      const existing = useConversationStore.getState().activeId;
+      if (existing) return existing;
+      const created = await createConversation(conversationTitle(firstText));
+      setActiveId(created.id);
+      void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      return created.id;
+    },
+    [queryClient, setActiveId],
+  );
+
   useEffect(() => {
-    if (!pendingRelated || busyId) return;
+    if (!pendingRelated || anyBusy) return;
     const related = useChatIntentStore.getState().consumeRelated();
     if (!related) return;
     const query = `How are ${related.nameA} and ${related.nameB} related?`;
@@ -192,19 +251,30 @@ export function ChatPanel({ health }: Props) {
       { id: userId, role: "user", text: query },
       { id: assistantId, role: "assistant", text: "" },
     ]);
-    setBusyId(assistantId);
-    setInput("");
-    void sendRelatedQuery(related.entityIdA, related.entityIdB, assistantId).catch((e) => {
-      const msg = String(e);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId && m.role === "assistant" ? { ...m, error: msg } : m,
-        ),
-      );
-      setBusyId(null);
-      setRetryUserText(query);
-    });
-  }, [pendingRelated, busyId]);
+    void (async () => {
+      try {
+        const conversationId = await ensureConversation(query);
+        setBusy(assistantId, conversationId);
+        setInput("");
+        await sendRelatedQuery(
+          related.entityIdA,
+          related.entityIdB,
+          assistantId,
+          conversationId,
+        );
+        void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      } catch (e) {
+        const msg = String(e);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId && m.role === "assistant" ? { ...m, error: msg } : m,
+          ),
+        );
+        clearBusyIf(assistantId);
+        setRetryUserText(query);
+      }
+    })();
+  }, [pendingRelated, anyBusy, ensureConversation, setBusy, clearBusyIf, queryClient]);
 
   useEffect(() => {
     if (!ready || messages.length > 0) {
@@ -272,6 +342,7 @@ export function ChatPanel({ health }: Props) {
 
   useTauriEvent<{
     messageId: string;
+    conversationId?: string;
     stage: string;
     citations?: CitationItem[] | null;
     detail?: string | null;
@@ -285,6 +356,10 @@ export function ChatPanel({ health }: Props) {
       stage !== "writing" &&
       stage !== "checking"
     ) {
+      return;
+    }
+    const openId = useConversationStore.getState().activeId;
+    if (p.conversationId && openId && p.conversationId !== openId) {
       return;
     }
     setMessages((prev) =>
@@ -304,6 +379,7 @@ export function ChatPanel({ health }: Props) {
 
   useTauriEvent<{
     messageId: string;
+    conversationId?: string;
     citations: CitationItem[];
     sentences?: AnswerSentence[];
     notFound?: boolean;
@@ -312,7 +388,12 @@ export function ChatPanel({ health }: Props) {
     error?: string | null;
   }>("chat-final", (ev) => {
     const p = ev.payload;
-    setBusyId(null);
+    clearBusyIf(p.messageId);
+    void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+    const openId = useConversationStore.getState().activeId;
+    if (p.conversationId && openId && p.conversationId !== openId) {
+      return;
+    }
     if (p.error) {
       setRetryUserText(lastSentRef.current);
     } else {
@@ -348,25 +429,38 @@ export function ChatPanel({ health }: Props) {
   });
 
   const openCitation = useCallback(
-    async (c: CitationItem) => {
-      const prev = await getDocumentPreview(c.documentId, c.chunkId);
-      const start = prev.pageStart ?? c.pageStart;
-      const end = prev.pageEnd ?? c.pageEnd;
-      const regions = (prev.regions?.length ? prev.regions : c.regions) ?? null;
-      const path = prev.path || c.path;
-      const page = start ?? regions?.[0]?.page;
-      addCitedRegions(prev.documentId, regions);
-      openPassage({
-        documentId: prev.documentId,
-        title: (c.title || "").trim() || fileName(c.path),
-        pageLabel: pageLabel(start, end),
-        text: prev.text,
-        highlight: prev.highlightSnippet ?? c.snippet,
-        path,
-        page: page ?? undefined,
-        pageCount: null,
-        regions,
-      });
+    async (c: CitationItem, assistantId: string) => {
+      try {
+        const prev = await getDocumentPreview(c.documentId, c.chunkId);
+        const start = prev.pageStart ?? c.pageStart;
+        const end = prev.pageEnd ?? c.pageEnd;
+        const regions = (prev.regions?.length ? prev.regions : c.regions) ?? null;
+        const path = prev.path || c.path;
+        const page = start ?? regions?.[0]?.page;
+        addCitedRegions(prev.documentId, regions);
+        openPassage({
+          documentId: prev.documentId,
+          title: (c.title || "").trim() || fileName(c.path),
+          pageLabel: pageLabel(start, end),
+          text: prev.text,
+          highlight: prev.highlightSnippet ?? c.snippet,
+          path,
+          page: page ?? undefined,
+          pageCount: null,
+          regions,
+        });
+      } catch (e) {
+        const msg = String(e).toLowerCase();
+        if (msg.includes("not found")) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, sourceChanged: true } : m,
+            ),
+          );
+          return;
+        }
+        throw e;
+      }
     },
     [addCitedRegions, openPassage],
   );
@@ -385,7 +479,7 @@ export function ChatPanel({ health }: Props) {
   const sendWithText = useCallback(
     async (q: string, scopeOverride?: ScopeDoc[]) => {
       const query = q.trim();
-      if (!query || !ready || busyId) return;
+      if (!query || !ready || anyBusy) return;
       const scopes = scopeOverride ?? scopeDocs;
       setRetryUserText(null);
       lastSentRef.current = query;
@@ -405,14 +499,17 @@ export function ChatPanel({ health }: Props) {
         { id: userId, role: "user", text: query },
         { id: assistantId, role: "assistant", text: "" },
       ]);
-      setBusyId(assistantId);
       try {
+        const conversationId = await ensureConversation(query);
+        setBusy(assistantId, conversationId);
         await sendChatQuery(
           query,
           assistantId,
           history,
           scopes.map((d) => d.id),
+          conversationId,
         );
+        void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       } catch (e) {
         const msg = String(e);
         setMessages((prev) =>
@@ -420,11 +517,20 @@ export function ChatPanel({ health }: Props) {
             m.id === assistantId && m.role === "assistant" ? { ...m, error: msg } : m,
           ),
         );
-        setBusyId(null);
+        clearBusyIf(assistantId);
         setRetryUserText(query);
       }
     },
-    [ready, busyId, messages, scopeDocs],
+    [
+      ready,
+      anyBusy,
+      messages,
+      scopeDocs,
+      ensureConversation,
+      setBusy,
+      clearBusyIf,
+      queryClient,
+    ],
   );
 
   const send = useCallback(async () => {
@@ -437,14 +543,6 @@ export function ChatPanel({ health }: Props) {
     if (!retryUserText) return;
     await sendWithText(retryUserText, lastSentScopeRef.current);
   }, [retryUserText, sendWithText]);
-
-  const newChat = useCallback(() => {
-    setMessages([]);
-    setBusyId(null);
-    setRetryUserText(null);
-    lastSentRef.current = null;
-    lastSentScopeRef.current = [];
-  }, []);
 
   const pickScopeDoc = useCallback(
     (doc: DocumentRow) => {
@@ -515,9 +613,13 @@ export function ChatPanel({ health }: Props) {
       ? "Download checking models to ask questions"
       : health?.warmUpPending
         ? `Loading ${health.chatModel}`
-        : ready
-          ? "Ask about your library"
-          : "Chat unavailable until the model is ready.";
+        : anyBusy
+          ? otherChatBusy
+            ? "Wait for the other chat to finish"
+            : "Ask about your library"
+          : ready
+            ? "Ask about your library"
+            : "Chat unavailable until the model is ready.";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -548,7 +650,7 @@ export function ChatPanel({ health }: Props) {
       <div className="mx-auto flex min-h-0 w-full max-w-[68ch] flex-1 flex-col px-4 pt-8">
         <div className="mb-2 flex min-h-7 justify-end">
           {messages.length > 0 ? (
-            <Button type="button" variant="quiet" onClick={newChat}>
+            <Button type="button" variant="quiet" onClick={startNewChat}>
               New chat
             </Button>
           ) : null}
@@ -576,7 +678,7 @@ export function ChatPanel({ health }: Props) {
             {turns.map(({ user, assistant }) => {
               const waiting =
                 !!assistant &&
-                busyId === assistant.id &&
+                busyMessageId === assistant.id &&
                 !assistant.stage &&
                 !assistant.error &&
                 !assistant.sentences?.length &&
@@ -597,17 +699,24 @@ export function ChatPanel({ health }: Props) {
                   ) : null}
                   {waiting ? <p className="text-muted">Searching your library</p> : null}
                   {assistant && !assistant.error ? (
-                    <AssistantMessage
-                      message={{ ...assistant, role: "assistant" }}
-                      query={user.text}
-                      onCite={(c) => void openCitation(c)}
-                      onAskEverywhere={() => void sendWithText(user.text, [])}
-                      onSearchIn={(s) => {
-                        const scope = [{ id: s.documentId, title: s.title }];
-                        setScopeDocs(scope);
-                        void sendWithText(user.text, scope);
-                      }}
-                    />
+                    <>
+                      <AssistantMessage
+                        message={{ ...assistant, role: "assistant" }}
+                        query={user.text}
+                        onCite={(c) => void openCitation(c, assistant.id)}
+                        onAskEverywhere={() => void sendWithText(user.text, [])}
+                        onSearchIn={(s) => {
+                          const scope = [{ id: s.documentId, title: s.title }];
+                          setScopeDocs(scope);
+                          void sendWithText(user.text, scope);
+                        }}
+                      />
+                      {assistant.sourceChanged ? (
+                        <p className="text-muted">
+                          This source changed when the index was rebuilt.
+                        </p>
+                      ) : null}
+                    </>
                   ) : null}
                 </article>
               );
@@ -668,7 +777,7 @@ export function ChatPanel({ health }: Props) {
             )}
             placeholder={placeholder}
             value={input}
-            disabled={!ready || !!busyId}
+            disabled={!ready || anyBusy}
             onChange={(e) => onInputChange(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape" && scopePickerOpen) {
@@ -688,4 +797,3 @@ export function ChatPanel({ health }: Props) {
     </div>
   );
 }
-
