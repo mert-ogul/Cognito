@@ -96,7 +96,6 @@ export type SettingsPayload = {
   summariseDocuments: boolean;
   extractEntities: boolean;
   extraEntityLabels: string;
-  thoroughReranking: boolean;
 };
 
 export async function getAppHealth(): Promise<AppHealth> {
@@ -209,6 +208,7 @@ export type AnswerSentence = {
   text: string;
   status: string; // supported | unsupported | unchecked
   sources: number[];
+  reason?: string | null;
 };
 
 export type ModelsStatus = {
@@ -246,20 +246,20 @@ export async function getDocumentPreview(
 }
 
 export async function renderPageRegion(
-  path: string,
+  documentId: string,
   page: number,
   rect: { x0: number; y0: number; x1: number; y1: number },
   scale?: number,
 ): Promise<PageRender> {
   if (e2e) {
-    void path;
+    void documentId;
     void page;
     void rect;
     void scale;
     return { pngBase64: TINY_PNG_BASE64, width: 1, height: 1 };
   }
   return invoke("render_page_region", {
-    path,
+    documentId,
     page,
     rect,
     scale: scale ?? null,
@@ -267,18 +267,18 @@ export async function renderPageRegion(
 }
 
 export async function renderDocumentPage(
-  path: string,
+  documentId: string,
   page: number,
   scale?: number,
 ): Promise<PageRender> {
   if (e2e) {
-    void path;
+    void documentId;
     void page;
     void scale;
     return { pngBase64: TINY_PNG_BASE64, width: 1, height: 1 };
   }
   return invoke("render_document_page", {
-    path,
+    documentId,
     page,
     scale: scale ?? null,
   });
@@ -377,11 +377,10 @@ export async function getSettings(): Promise<SettingsPayload> {
       vaultPath: "/fixture",
       chatModel: "qwen3.5:9b",
       embedModel: "qwen3-embedding:0.6b",
-      backgroundModel: "qwen3.5:4b",
+      backgroundModel: "qwen3.5:9b",
       summariseDocuments: true,
       extractEntities: true,
       extraEntityLabels: "",
-      thoroughReranking: false,
     };
   }
   return invoke("get_settings");
@@ -395,7 +394,6 @@ export async function updateSettings(payload: {
   summariseDocuments: boolean;
   extractEntities: boolean;
   extraEntityLabels: string;
-  thoroughReranking: boolean;
 }): Promise<void> {
   if (e2e) {
     return;
@@ -446,34 +444,6 @@ export type EntityDetail = {
   coMentions: EntityCoMention[];
 };
 
-export type ConnectionsMapPoint = {
-  documentId: string;
-  title: string;
-  x: number;
-  y: number;
-  topicId: string | null;
-};
-
-export type ConnectionsMapLink = {
-  sourceId: string;
-  targetId: string;
-  kind: string;
-  weight: number;
-  evidenceChunkId: string | null;
-};
-
-export type ConnectionsTopic = {
-  id: string;
-  name: string;
-  documentIds: string[];
-};
-
-export type ConnectionsMap = {
-  points: ConnectionsMapPoint[];
-  links: ConnectionsMapLink[];
-  topics: ConnectionsTopic[];
-};
-
 export type TimelineItem = {
   kind: "document" | "entity";
   id: string;
@@ -486,6 +456,14 @@ export type TimelineItem = {
 
 export type ConnectionsTimeline = {
   items: TimelineItem[];
+};
+
+export type RelatedDocument = {
+  id: string;
+  title: string;
+  kind: "shares_names" | "mentions" | "similar" | string;
+  kindLabel: string;
+  sharedEntities: string[];
 };
 
 export async function rebuildConnections(): Promise<void> {
@@ -510,11 +488,12 @@ export async function getEntityDetail(entityId: string): Promise<EntityDetail | 
   return invoke("get_entity_detail", { entityId });
 }
 
-export async function getConnectionsMap(): Promise<ConnectionsMap> {
+export async function getRelatedDocuments(documentId: string): Promise<RelatedDocument[]> {
   if (e2e) {
-    return { points: [], links: [], topics: [] };
+    void documentId;
+    return [];
   }
-  return invoke("get_connections_map");
+  return invoke("get_related_documents", { documentId });
 }
 
 export async function getConnectionsTimeline(): Promise<ConnectionsTimeline> {

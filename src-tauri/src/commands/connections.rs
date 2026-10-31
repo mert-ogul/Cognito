@@ -41,11 +41,12 @@ pub async fn get_entity_detail(
 }
 
 #[tauri::command]
-pub async fn get_connections_map(
+pub async fn get_related_documents(
     state: tauri::State<'_, SharedState>,
-) -> Result<serde_json::Value, String> {
-    run_blocking(state, |st| {
-        st.with_sqlite(|c| sqlite::connections_map(c))
+    document_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    run_blocking(state, move |st| {
+        st.with_sqlite(|c| sqlite::list_related_documents(c, &document_id))
     })
     .await
 }

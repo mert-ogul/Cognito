@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -25,7 +27,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("cognito.sidecar")
 
-from common.model_store import download_models, models_status, warm_checking_models
+from common.model_store import download_models, hf_home, unload_gliner, warm_checking_models
 from common.ollama import warm_model
 from ingestion.rpc_entities import (
     rpc_extract_entities,
@@ -60,6 +62,22 @@ def _err(req_id: Any, code: int, message: str) -> None:
     _PROTOCOL_OUT.flush()
 
 
+def _progress_line(payload: dict[str, Any]) -> None:
+    _PROTOCOL_OUT.write(json.dumps(payload) + "\n")
+    _PROTOCOL_OUT.flush()
+
+
+def run_download_models(app_data: str) -> int:
+    os.environ["HF_HOME"] = str(hf_home(app_data))
+    try:
+        download_models(app_data, progress_cb=_progress_line)
+    except Exception as exc:
+        log.exception("download-models failed")
+        _progress_line({"error": str(exc)})
+        return 1
+    return 0
+
+
 def dispatch(method: str, params: dict) -> Any:
     if method == "ping":
         return {"pong": True}
@@ -67,22 +85,11 @@ def dispatch(method: str, params: dict) -> Any:
         chat = params.get("chat_model", "qwen3.5:9b")
         warm_model(chat)
         return {"warmed": True}
-    if method == "models_status":
-        return models_status(
-            str(params["app_data"]),
-            thorough_reranking=bool(params.get("thorough_reranking") or params.get("thoroughReranking")),
-        )
-    if method == "download_models":
-        return download_models(
-            str(params["app_data"]),
-            progress_cb=lambda line: log.info("%s", line),
-            thorough_reranking=bool(params.get("thorough_reranking") or params.get("thoroughReranking")),
-        )
     if method == "warm_checking_models":
-        return warm_checking_models(
-            str(params["app_data"]),
-            thorough_reranking=bool(params.get("thorough_reranking") or params.get("thoroughReranking")),
-        )
+        return warm_checking_models(str(params["app_data"]))
+    if method == "unload_entity_model":
+        unload_gliner()
+        return {"ok": True}
     if method == "check_answer":
         draft = params.get("draft")
         if draft is None:
@@ -129,9 +136,6 @@ def dispatch(method: str, params: dict) -> Any:
             history=hist,
             scope_ids=scope,
             app_data=str(params["app_data"]) if params.get("app_data") is not None else None,
-            thorough_reranking=bool(
-                params.get("thorough_reranking") or params.get("thoroughReranking")
-            ),
             skip_rerank=bool(params.get("skip_rerank") or params.get("skipRerank")),
         )
     if method == "rerank_chat_candidates":
@@ -154,9 +158,6 @@ def dispatch(method: str, params: dict) -> Any:
             str(params["app_data"]),
             str(params.get("query") or ""),
             cands,
-            thorough_reranking=bool(
-                params.get("thorough_reranking") or params.get("thoroughReranking")
-            ),
             sqlite_path=str(params["sqlite_path"])
             if params.get("sqlite_path") is not None
             else None,
@@ -192,7 +193,7 @@ def dispatch(method: str, params: dict) -> Any:
     raise ValueError(f"unknown method: {method}")
 
 
-def main() -> None:
+def main_rpc() -> None:
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -218,6 +219,15 @@ def main() -> None:
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             log.exception("rpc %s failed after %.1f ms", method, elapsed_ms)
             _err(req_id, -32000, str(exc))
+
+
+def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "download-models":
+        parser = argparse.ArgumentParser(prog="main.py download-models")
+        parser.add_argument("--app-data", required=True)
+        args = parser.parse_args(sys.argv[2:])
+        raise SystemExit(run_download_models(args.app_data))
+    main_rpc()
 
 
 if __name__ == "__main__":

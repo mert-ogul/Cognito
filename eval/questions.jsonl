@@ -1,3 +1,13 @@
-{"question": "Equation (2) from Kipf and Welling's GCN paper", "expect_file": "gcn.pdf", "expect_title": "Semi-Supervised Classification with Graph Convolutional Networks"}
+{"question": "Write Equation (2) from Kipf and Welling's GCN paper", "expect_file": "1609.02907v4.pdf", "expect_page": 2}
+{"question": "What classification accuracy does GCN reach on Cora?", "expect_file": "1609.02907v4.pdf", "expect_page": 7}
+{"question": "Which citation network datasets is GCN evaluated on?", "expect_file": "1609.02907v4.pdf", "expect_page": 5}
+{"question": "What negative input slope does the LeakyReLU in graph attention networks use?", "expect_file": "1710.10903v3.pdf", "expect_page": 3}
+{"question": "How many attention heads does the first GAT layer use on Cora?", "expect_file": "1710.10903v3.pdf", "expect_page": 7}
+{"question": "What micro-averaged F1 score does GAT get on PPI?", "expect_file": "1710.10903v3.pdf", "expect_page": 8}
+{"question": "What is the degree exponent of the actor collaboration network?", "expect_file": "9910332v1.pdf", "expect_page": 3}
+{"question": "What degree exponent does the scale-free model produce in simulations?", "expect_file": "9910332v1.pdf", "expect_page": 5}
+{"question": "Which two mechanisms does the Barabási-Albert model combine?", "expect_file": "9910332v1.pdf"}
+{"question": "Which theorem guarantees that the GNN state equations have a unique solution?", "expect_file": "Scarselli-2009.pdf", "expect_page": 4}
 {"question": "What is the capital of Mars?", "expect_file": null}
-{"question": "Example third question", "expect_file": "example.pdf", "expect_page": 1}
+{"question": "Who won the 2022 FIFA World Cup?", "expect_file": null}
+{"question": "What learning rate was used to train the Barabási-Albert model?", "expect_file": null}

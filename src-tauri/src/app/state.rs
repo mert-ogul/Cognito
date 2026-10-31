@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-/// Background phi4-mini (chat model) warm-up status separate from Ollama daemon health.
+/// Chat-model warm-up status separate from Ollama daemon health.
 pub type ChatWarmResult = Result<(), String>;
 
 pub struct AppState {

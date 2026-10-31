@@ -38,7 +38,7 @@ pub fn run() {
             let logs_dir = data_dir.join("logs");
             std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
             let log_path = logs_dir.join("sidecar.log");
-            let pool = SidecarPool::new(main_py, cwd, log_path.clone());
+            let pool = SidecarPool::new(main_py, cwd, log_path.clone(), data_dir.clone());
             let state: SharedState = Arc::new(AppState::new(data_dir.clone(), pool));
             state
                 .with_sqlite(|_| Ok(()))
@@ -107,7 +107,7 @@ pub fn run() {
             commands::rebuild_connections,
             commands::get_entities_index,
             commands::get_entity_detail,
-            commands::get_connections_map,
+            commands::get_related_documents,
             commands::get_connections_timeline,
         ]);
     let app = builder

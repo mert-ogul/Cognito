@@ -2,6 +2,7 @@
 
 use crate::app::state::SharedState;
 use crate::db::sqlite;
+use crate::services::checking_models::models_status_local;
 use serde_json::json;
 use std::time::Duration;
 
@@ -43,28 +44,14 @@ pub fn spawn_warm_checking_models(state: SharedState) {
     std::thread::spawn(move || {
         // Let the chat-model warm and UI settle first.
         std::thread::sleep(Duration::from_secs(2));
-        let thorough = state
-            .with_sqlite(|c| sqlite::load_settings(c))
-            .map(|s| s.thorough_reranking)
-            .unwrap_or(false);
         let app_data = state.data_dir.to_string_lossy().into_owned();
-        let status = state.sidecar.with_session(|s| {
-            s.request(
-                "models_status",
-                json!({ "app_data": app_data.clone(), "thorough_reranking": thorough }),
-            )
-        });
-        let ready = status
-            .ok()
-            .and_then(|v| v.get("ready").and_then(|x| x.as_bool()))
-            .unwrap_or(false);
-        if !ready {
+        if !models_status_local(&state.data_dir).ready {
             return;
         }
         let _ = state.sidecar.with_session(|s| {
             s.request(
                 "warm_checking_models",
-                json!({ "app_data": app_data, "thorough_reranking": thorough }),
+                json!({ "app_data": app_data }),
             )
         });
     });

@@ -7,6 +7,10 @@ use walkdir::WalkDir;
 pub const MAX_FIRST_IMPORT: usize = 100;
 pub const IMPORT_BATCH: usize = 20;
 
+pub fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 /// Sorted PDF/Word/Markdown paths under `root`, at most `limit` files.
 pub fn collect_import_paths_bounded(root: &Path, limit: usize) -> CognitoResult<Vec<PathBuf>> {
     let mut paths = Vec::new();

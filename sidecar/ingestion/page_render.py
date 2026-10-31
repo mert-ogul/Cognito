@@ -1,9 +1,8 @@
-"""Render PDF page / region clips to PNG with a disk cache."""
+"""Render PDF page / region clips to PNG; Rust owns cache keys, Python evicts LRU."""
 
 from __future__ import annotations
 
 import base64
-import hashlib
 import os
 import time
 from pathlib import Path
@@ -24,22 +23,6 @@ def _cache_limit_bytes() -> int:
         return max(0, int(raw))
     except ValueError:
         return _DEFAULT_MAX_CACHE_BYTES
-
-
-def _file_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
-def _cache_key(path: Path, page: int, rect: list[float] | None, scale: float) -> str:
-    mtime = _file_mtime(path)
-    rect_part = ""
-    if rect is not None and len(rect) >= 4:
-        rect_part = f"{rect[0]:.4f},{rect[1]:.4f},{rect[2]:.4f},{rect[3]:.4f}"
-    raw = f"{path.resolve()}|{mtime}|{page}|{rect_part}|{scale:.4f}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _touch(path: Path) -> None:
@@ -85,34 +68,17 @@ def _effective_scale(page: fitz.Page, scale: float, clip: fitz.Rect | None) -> f
     return s
 
 
-def _render(
+def _render_to_path(
     path: Path,
     page: int,
     rect: list[float] | None,
     scale: float,
-    cache_dir: Path,
+    out_path: Path,
     *,
     max_cache_bytes: int | None = None,
 ) -> dict[str, Any]:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    key = _cache_key(path, page, rect, scale)
-    cached = cache_dir / f"{key}.png"
-    if cached.is_file():
-        _touch(cached)
-        data = cached.read_bytes()
-        # Recover dimensions from pixmap header via fitz if needed; use image size.
-        doc = fitz.open(stream=data, filetype="png")
-        try:
-            w = int(doc[0].rect.width)
-            h = int(doc[0].rect.height)
-        finally:
-            doc.close()
-        return {
-            "pngBase64": base64.b64encode(data).decode("ascii"),
-            "width": w,
-            "height": h,
-            "cacheKey": key,
-        }
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     doc = fitz.open(path)
     try:
@@ -132,13 +98,14 @@ def _render(
     finally:
         doc.close()
 
-    cached.write_bytes(png)
-    _evict_lru(cache_dir, max_cache_bytes)
+    out_path.write_bytes(png)
+    _touch(out_path)
+    _evict_lru(out_path.parent, max_cache_bytes)
     return {
         "pngBase64": base64.b64encode(png).decode("ascii"),
         "width": width,
         "height": height,
-        "cacheKey": key,
+        "outPath": str(out_path),
     }
 
 
@@ -147,35 +114,50 @@ def render_region(
     page: int,
     rect: list[float],
     scale: float = _DEFAULT_SCALE,
-    cache_dir: str | Path | None = None,
+    out_path: str | Path | None = None,
     *,
     max_cache_bytes: int | None = None,
 ) -> dict[str, Any]:
-    p = Path(path)
-    if cache_dir is None:
-        raise ValueError("cache_dir required")
-    return _render(p, int(page), list(rect), float(scale), Path(cache_dir), max_cache_bytes=max_cache_bytes)
+    if out_path is None:
+        raise ValueError("out_path required")
+    return _render_to_path(
+        Path(path),
+        int(page),
+        list(rect),
+        float(scale),
+        Path(out_path),
+        max_cache_bytes=max_cache_bytes,
+    )
 
 
 def render_page(
     path: str | Path,
     page: int,
     scale: float = _DEFAULT_SCALE,
-    cache_dir: str | Path | None = None,
+    out_path: str | Path | None = None,
     *,
     max_cache_bytes: int | None = None,
 ) -> dict[str, Any]:
-    p = Path(path)
-    if cache_dir is None:
-        raise ValueError("cache_dir required")
-    return _render(p, int(page), None, float(scale), Path(cache_dir), max_cache_bytes=max_cache_bytes)
+    if out_path is None:
+        raise ValueError("out_path required")
+    return _render_to_path(
+        Path(path),
+        int(page),
+        None,
+        float(scale),
+        Path(out_path),
+        max_cache_bytes=max_cache_bytes,
+    )
+
+
+def _out_path_from_params(params: dict[str, Any]) -> Path:
+    raw = params.get("outPath") or params.get("out_path")
+    if not raw:
+        raise ValueError("outPath required")
+    return Path(str(raw))
 
 
 def rpc_render_region(params: dict[str, Any]) -> dict[str, Any]:
-    app_data = params.get("app_data") or params.get("appData")
-    if not app_data:
-        raise ValueError("app_data required")
-    cache_dir = Path(str(app_data)) / "cache" / "pages"
     rect = params.get("rect")
     if not isinstance(rect, list) or len(rect) < 4:
         raise ValueError("rect required")
@@ -187,16 +169,12 @@ def rpc_render_region(params: dict[str, Any]) -> dict[str, Any]:
         int(params["page"]),
         [float(x) for x in rect[:4]],
         scale,
-        cache_dir,
+        _out_path_from_params(params),
         max_cache_bytes=max_cache,
     )
 
 
 def rpc_render_page(params: dict[str, Any]) -> dict[str, Any]:
-    app_data = params.get("app_data") or params.get("appData")
-    if not app_data:
-        raise ValueError("app_data required")
-    cache_dir = Path(str(app_data)) / "cache" / "pages"
     scale = float(params.get("scale") or _DEFAULT_SCALE)
     max_bytes = params.get("max_cache_bytes")
     max_cache = int(max_bytes) if max_bytes is not None else None
@@ -204,6 +182,6 @@ def rpc_render_page(params: dict[str, Any]) -> dict[str, Any]:
         str(params["path"]),
         int(params["page"]),
         scale,
-        cache_dir,
+        _out_path_from_params(params),
         max_cache_bytes=max_cache,
     )

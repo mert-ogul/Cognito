@@ -6,6 +6,7 @@ use crate::errors::{CognitoError, CognitoResult};
 use crate::services::ollama_stream;
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 const HEAD_WORDS: usize = 2500;
 const TAIL_WORDS: usize = 300;
@@ -343,11 +344,9 @@ fn check_item_supported(
     if text.trim().is_empty() || quotes.is_empty() {
         return Ok(false);
     }
-    let quote_indexes: Vec<u32> = (0..quotes.len() as u32).collect();
     let draft = json!({
         "answerable": true,
-        "quotes": quotes,
-        "answer": [{ "sentence": text, "quotes": quote_indexes }]
+        "answer": [{ "quotes": quotes, "sentence": text }]
     });
     let passage_vals: Vec<Value> = passages
         .iter()
@@ -372,7 +371,7 @@ fn check_item_supported(
     Ok(sentences.iter().any(|s| {
         s.get("status")
             .and_then(|st| st.as_str())
-            .map(|st| st == "supported")
+            .map(|st| st == "supported" || st == "unchecked")
             .unwrap_or(false)
     }))
 }
@@ -442,15 +441,26 @@ pub fn build_and_store_card(state: &SharedState, document_id: &str) -> CognitoRe
             "\nPassages:\n{}",
             format_passages_for_prompt(&passages)
         ));
-        let content = tauri::async_runtime::block_on(ollama_stream::chat_completion_json(
-            &model,
-            vec![
-                json!({ "role": "system", "content": SYSTEM_PROMPT }),
-                json!({ "role": "user", "content": user }),
-            ],
-            card_response_schema(),
-        ))
-        .map_err(CognitoError::Sidecar)?;
+        let messages = vec![
+            json!({ "role": "system", "content": SYSTEM_PROMPT }),
+            json!({ "role": "user", "content": user }),
+        ];
+        let schema = card_response_schema();
+        let state_for_interrupt = state.clone();
+        let content = tauri::async_runtime::block_on(async {
+            ollama_stream::chat_completion_json_interruptible(
+                &model,
+                messages,
+                schema,
+                || state_for_interrupt.chat_in_flight.load(Ordering::SeqCst) > 0,
+            )
+            .await
+        });
+        let content = match content {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(CognitoError::Sidecar(e)),
+            Err(()) => return Err(CognitoError::InterruptedByChat),
+        };
         serde_json::from_str(&content)
             .map_err(|e| CognitoError::Sidecar(format!("card JSON: {e}")))?
     };
@@ -532,7 +542,20 @@ pub fn build_and_store_card(state: &SharedState, document_id: &str) -> CognitoRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::state::{AppState, SharedState};
+    use crate::db::sqlite;
+    use crate::errors::CognitoError;
+    use crate::sidecar::SidecarPool;
     use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::Ordering;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn drops_unquoted_facts_and_fields() {
@@ -567,5 +590,89 @@ mod tests {
         assert_eq!(email[0]["name"], "sender");
         let other = filter_fields_for_type("other", &fields);
         assert_eq!(other.len(), 4);
+    }
+
+    #[test]
+    fn card_ollama_drops_within_500ms_when_chat_starts() {
+        let _env = ENV_LOCK.lock().expect("env lock");
+        std::env::remove_var("COGNITO_MOCK_LLM");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                thread::sleep(Duration::from_secs(30));
+                let body = br#"{"message":{"content":"{}"}}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        std::env::set_var("OLLAMA_HOST", format!("http://{addr}"));
+
+        let data = tempfile::tempdir().expect("tempdir");
+        let pool = SidecarPool::new(
+            PathBuf::from("/nonexistent/cognito-sidecar/main.py"),
+            PathBuf::from("/nonexistent/cognito-sidecar"),
+            data.path().join("sidecar.log"),
+            data.path().to_path_buf(),
+        );
+        let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
+        state
+            .with_sqlite(|c| {
+                sqlite::upsert_setting(c, "summarise_documents", "true")?;
+                sqlite::upsert_setting(c, "background_model", "test-model")?;
+                sqlite::insert_document_row(
+                    c,
+                    "doc-card-drop",
+                    "/tmp/card-drop.md",
+                    "Card Drop",
+                    "markdown",
+                    "hash",
+                    None,
+                    "indexed",
+                    None,
+                    None,
+                )?;
+                sqlite::insert_chunk_row(
+                    c,
+                    "c-card-drop",
+                    "doc-card-drop",
+                    0,
+                    None,
+                    None,
+                    "Body text for a slow card summarisation request.",
+                    8,
+                    "h",
+                    "body",
+                    "[]",
+                    None,
+                )?;
+                Ok(())
+            })
+            .expect("seed");
+
+        let state_card = state.clone();
+        let card = thread::spawn(move || build_and_store_card(&state_card, "doc-card-drop"));
+        thread::sleep(Duration::from_millis(150));
+        let chat_started = Instant::now();
+        state.chat_in_flight.fetch_add(1, Ordering::SeqCst);
+        let result = card.join().expect("card join");
+        let elapsed = chat_started.elapsed();
+        state.chat_in_flight.fetch_sub(1, Ordering::SeqCst);
+        std::env::remove_var("OLLAMA_HOST");
+        drop(server);
+        assert!(
+            matches!(result, Err(CognitoError::InterruptedByChat)),
+            "expected InterruptedByChat, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "card call took {elapsed:?} after chat started"
+        );
     }
 }

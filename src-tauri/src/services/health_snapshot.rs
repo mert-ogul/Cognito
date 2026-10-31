@@ -1,10 +1,11 @@
 //! Compose [`AppHealth`](crate::models::AppHealth) from local probes and sidecar status.
 
 use crate::db::sqlite;
+use crate::services::checking_models::models_status_local;
 use crate::errors::{CognitoError, CognitoResult};
 use crate::models::AppHealth;
 use crate::services::ollama_stream::ollama_base_url;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -28,40 +29,42 @@ pub(crate) fn missing_configured_models(
         .collect()
 }
 
-async fn probe_ollama(chat_model: &str, embed_model: &str) -> (bool, Vec<String>) {
+fn configured_models_for_health(
+    chat_model: &str,
+    embed_model: &str,
+    background_model: &str,
+) -> Vec<String> {
+    let mut models = vec![chat_model.to_string(), embed_model.to_string()];
+    if background_model != chat_model {
+        models.push(background_model.to_string());
+    }
+    models
+}
+
+async fn probe_ollama(
+    chat_model: &str,
+    embed_model: &str,
+    background_model: &str,
+) -> (bool, Vec<String>) {
+    let configured = configured_models_for_health(chat_model, embed_model, background_model);
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
     {
         Ok(c) => c,
         Err(_) => {
-            return (
-                false,
-                missing_configured_models(
-                    &[chat_model.to_string(), embed_model.to_string()],
-                    &[],
-                ),
-            );
+            return (false, missing_configured_models(&configured, &[]));
         }
     };
     let url = format!("{}/api/tags", ollama_base_url().trim_end_matches('/'));
     let Ok(res) = client.get(&url).send().await else {
-        return (
-            false,
-            missing_configured_models(&[chat_model.to_string(), embed_model.to_string()], &[]),
-        );
+        return (false, missing_configured_models(&configured, &[]));
     };
     if !res.status().is_success() {
-        return (
-            false,
-            missing_configured_models(&[chat_model.to_string(), embed_model.to_string()], &[]),
-        );
+        return (false, missing_configured_models(&configured, &[]));
     }
     let Ok(body) = res.json::<Value>().await else {
-        return (
-            false,
-            missing_configured_models(&[chat_model.to_string(), embed_model.to_string()], &[]),
-        );
+        return (false, missing_configured_models(&configured, &[]));
     };
     let available: Vec<String> = body
         .get("models")
@@ -72,31 +75,12 @@ async fn probe_ollama(chat_model: &str, embed_model: &str) -> (bool, Vec<String>
                 .collect()
         })
         .unwrap_or_default();
-    let missing = missing_configured_models(
-        &[chat_model.to_string(), embed_model.to_string()],
-        &available,
-    );
+    let missing = missing_configured_models(&configured, &available);
     (true, missing)
 }
 
 fn probe_checking_models(state: &crate::app::state::SharedState) -> bool {
-    if std::env::var("COGNITO_MOCK_MODELS").ok().as_deref() == Some("1") {
-        return true;
-    }
-    let app_data = state.data_dir.to_string_lossy().into_owned();
-    let thorough = state
-        .with_sqlite(|c| sqlite::load_settings(c))
-        .map(|s| s.thorough_reranking)
-        .unwrap_or(false);
-    match state.sidecar.with_session(|s| {
-        s.request(
-            "models_status",
-            json!({ "app_data": app_data, "thorough_reranking": thorough }),
-        )
-    }) {
-        Ok(v) => v.get("ready").and_then(|x| x.as_bool()).unwrap_or(false),
-        Err(_) => false,
-    }
+    models_status_local(&state.data_dir).ready
 }
 
 pub async fn read_app_health(
@@ -143,8 +127,12 @@ pub async fn read_app_health(
         checking_models_ready,
     ) = sync;
 
-    let (ollama_reachable, missing_models) =
-        probe_ollama(&settings.chat_model, &settings.embed_model).await;
+    let (ollama_reachable, missing_models) = probe_ollama(
+        &settings.chat_model,
+        &settings.embed_model,
+        &settings.background_model,
+    )
+    .await;
     let ollama_model_ready = ollama_reachable && missing_models.is_empty();
 
     Ok(AppHealth {
@@ -170,24 +158,23 @@ mod tests {
 
     #[test]
     fn missing_models_matches_latest_tag() {
-        let available = vec!["phi4-mini:latest".into(), "nomic-embed-text:latest".into()];
+        let available = vec![
+            "qwen3.5:9b".into(),
+            "qwen3-embedding:0.6b".into(),
+        ];
         assert!(missing_configured_models(
-            &["phi4-mini".into(), "nomic-embed-text".into()],
+            &["qwen3.5:9b".into(), "qwen3-embedding:0.6b".into()],
             &available
         )
         .is_empty());
         assert_eq!(
-            missing_configured_models(&["phi4-mini".into(), "other".into()], &available),
+            missing_configured_models(&["qwen3.5:9b".into(), "other".into()], &available),
             vec!["other".to_string()]
         );
         assert_eq!(
-            missing_configured_models(&["phi4-mini:v2".into()], &available),
-            vec!["phi4-mini:v2".to_string()]
+            missing_configured_models(&["qwen3.5:9b-v2".into()], &available),
+            vec!["qwen3.5:9b-v2".to_string()]
         );
-        assert!(missing_configured_models(
-            &["phi4-mini:latest".into()],
-            &available
-        )
-        .is_empty());
+        assert!(missing_configured_models(&["qwen3.5:9b".into()], &available).is_empty());
     }
 }

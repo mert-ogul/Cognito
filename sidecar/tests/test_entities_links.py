@@ -1,4 +1,4 @@
-"""Entity extraction merges, labels, links, and PCA."""
+"""Entity extraction merges, labels, and document links."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from common.text_norm import normalize_date, normalize_name
 from ingestion.rpc_entities import (
     find_mentions_links,
     merge_within_doc,
-    pca_points,
     rpc_recompute_links,
     similar_links,
 )
@@ -49,17 +48,6 @@ CREATE TABLE IF NOT EXISTS document_links (
   kind TEXT NOT NULL,
   weight REAL NOT NULL,
   evidence_chunk_id TEXT
-);
-CREATE TABLE IF NOT EXISTS topics (
-  id TEXT PRIMARY KEY NOT NULL,
-  name TEXT NOT NULL,
-  document_ids TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS document_points (
-  document_id TEXT PRIMARY KEY NOT NULL,
-  x REAL NOT NULL,
-  y REAL NOT NULL,
-  topic_id TEXT
 );
 """
 
@@ -161,6 +149,22 @@ def test_date_normalisation() -> None:
     assert normalize_date("15 January 2020") == "2020-01-15"
     assert normalize_date("Jan 2020") == "2020-01"
     assert normalize_date("not a date") is None
+
+
+def test_merge_keeps_year_from_unparsed_date() -> None:
+    spans = [
+        {
+            "label": "date",
+            "text": "21 Ekim 1999",
+            "start": 0,
+            "end": 12,
+            "score": 0.9,
+        }
+    ]
+    merged = merge_within_doc(spans)
+    assert len(merged) == 1
+    assert merged[0]["normalized"] == "1999"
+    assert merged[0]["name"] == "1999"
     assert normalize_name("  The Cora  ") == "cora"
     assert normalize_name('"GCN"') == "gcn"
 
@@ -213,24 +217,6 @@ def test_similar_links_threshold() -> None:
     assert ("b", "a") in pair_set
     assert ("a", "c") not in pair_set
     assert ("c", "a") not in pair_set
-
-
-def test_pca_points_stable_for_fixed_vectors() -> None:
-    vecs = np.array(
-        [
-            [1.0, 0.0, 0.0, 0.5],
-            [0.0, 1.0, 0.0, 0.2],
-            [0.5, 0.5, 0.1, 0.0],
-            [0.2, 0.8, 0.3, 0.1],
-        ],
-        dtype=np.float64,
-    )
-    a = pca_points(vecs)
-    b = pca_points(vecs)
-    assert a.shape == (4, 2)
-    np.testing.assert_allclose(a, b)
-    # Not all zeros for this spread.
-    assert np.linalg.norm(a) > 0
 
 
 def test_recompute_links_mock_writes_rows(mock_models: None) -> None:
@@ -305,8 +291,151 @@ def test_recompute_links_mock_writes_rows(mock_models: None) -> None:
         "SELECT source_id, target_id FROM document_links WHERE kind = 'mentions'"
     ).fetchall()
     assert ("d2", "d1") in {(r[0], r[1]) for r in mention_rows}
-    points = con.execute("SELECT document_id, x, y FROM document_points").fetchall()
-    assert len(points) == 2
-    topics = con.execute("SELECT id FROM topics").fetchall()
-    assert len(topics) >= 1
+    similar_rows = con.execute(
+        "SELECT source_id, target_id FROM document_links WHERE kind = 'similar'"
+    ).fetchall()
+    assert len(similar_rows) >= 1
     con.close()
+
+
+def test_windows_stay_under_gliner_token_cap() -> None:
+    from ingestion.rpc_entities import _windows, gliner_token_count
+
+    words = [f"word{i}" for i in range(1200)]
+    text = " ".join(words)
+    windows = _windows(text)
+    assert windows
+    for _start, _end, window in windows:
+        assert gliner_token_count(window) <= 384
+
+
+def test_incremental_extract_matches_single_pass(mock_models: None) -> None:
+    from ingestion.rpc_entities import rpc_extract_entities
+
+    d = tempfile.mkdtemp()
+    sqlite_path = str(Path(d) / "v.sqlite")
+    con = sqlite3.connect(sqlite_path)
+    con.executescript(
+        """
+        CREATE TABLE documents (
+          id TEXT PRIMARY KEY, path TEXT, title TEXT, status TEXT
+        );
+        CREATE TABLE chunks (
+          id TEXT PRIMARY KEY, document_id TEXT, ordinal INT, text TEXT, role TEXT
+        );
+        CREATE TABLE document_cards (
+          document_id TEXT PRIMARY KEY, type TEXT, title TEXT,
+          aliases TEXT, summary TEXT
+        );
+        """
+        + _ENTITIES_DDL
+    )
+    con.execute(
+        "INSERT INTO documents VALUES ('d1','/a.pdf','Cora paper','indexed')"
+    )
+    texts = [
+        "The Cora dataset is used for citation classification in 2017.",
+        "Graph Convolutional Networks (GCN) beat baselines on Cora.",
+        "Later work cites GCN and the Cora dataset again.",
+        "Ada Chen published follow-ups in Cambridge during 2018.",
+        "Meridian Labs funded the Cora study.",
+    ]
+    for i, body in enumerate(texts):
+        con.execute(
+            "INSERT INTO chunks VALUES (?, 'd1', ?, ?, 'body')",
+            (f"c{i}", i, body),
+        )
+    con.execute(
+        "INSERT INTO document_cards VALUES ('d1','paper','Cora paper','[]','[]')"
+    )
+    con.commit()
+    con.close()
+
+    params_base = {
+        "sqlitePath": sqlite_path,
+        "documentId": "d1",
+        "app_data": d,
+        "labels": [],
+    }
+    full = rpc_extract_entities({**params_base, "chunkOffset": 0, "chunkLimit": 100})
+    assert full["done"] is True
+    con = sqlite3.connect(sqlite_path)
+    full_mentions = con.execute(
+        "SELECT entity_id, chunk_id, start, end FROM mentions ORDER BY chunk_id, start, end"
+    ).fetchall()
+    con.execute("DELETE FROM mentions")
+    con.execute("DELETE FROM entity_aliases")
+    con.execute("DELETE FROM entities")
+    con.commit()
+    con.close()
+
+    offset = 0
+    while True:
+        out = rpc_extract_entities(
+            {**params_base, "chunkOffset": offset, "chunkLimit": 2}
+        )
+        if out["done"]:
+            break
+        offset = int(out["nextOffset"])
+    con = sqlite3.connect(sqlite_path)
+    split_mentions = con.execute(
+        "SELECT entity_id, chunk_id, start, end FROM mentions ORDER BY chunk_id, start, end"
+    ).fetchall()
+    con.close()
+    assert split_mentions == full_mentions
+    assert len(full_mentions) >= 1
+
+
+def test_references_without_card_uses_paper_labels(mock_models: None, monkeypatch) -> None:
+    from ingestion import rpc_entities as re
+    from query.entity_labels import labels_for_document
+
+    seen: list[list[str]] = []
+
+    def capture_batch(app_data, texts, labels, threshold=0.5):
+        seen.append(list(labels))
+        return [[] for _ in texts]
+
+    monkeypatch.setattr(re, "extract_spans_batch", capture_batch)
+
+    d = tempfile.mkdtemp()
+    sqlite_path = str(Path(d) / "v.sqlite")
+    con = sqlite3.connect(sqlite_path)
+    con.executescript(
+        """
+        CREATE TABLE documents (
+          id TEXT PRIMARY KEY, path TEXT, title TEXT, status TEXT
+        );
+        CREATE TABLE chunks (
+          id TEXT PRIMARY KEY, document_id TEXT, ordinal INT, text TEXT, role TEXT
+        );
+        CREATE TABLE document_cards (
+          document_id TEXT PRIMARY KEY, type TEXT, title TEXT,
+          aliases TEXT, summary TEXT
+        );
+        """
+        + _ENTITIES_DDL
+    )
+    con.execute("INSERT INTO documents VALUES ('d1','/a.pdf','Untitled','indexed')")
+    con.execute(
+        "INSERT INTO chunks VALUES ('c0','d1',0,'Body about the Cora dataset.','body')"
+    )
+    con.execute(
+        "INSERT INTO chunks VALUES ('c1','d1',1,'1. Prior work.','references')"
+    )
+    con.commit()
+    con.close()
+
+    out = re.rpc_extract_entities(
+        {
+            "sqlitePath": sqlite_path,
+            "documentId": "d1",
+            "app_data": d,
+            "labels": [],
+            "chunkOffset": 0,
+            "chunkLimit": 40,
+        }
+    )
+    assert out["done"] is True
+    assert seen
+    assert seen[0] == labels_for_document("paper", [])

@@ -121,12 +121,8 @@ fn default_true() -> bool {
     true
 }
 
-fn default_false() -> bool {
-    false
-}
-
 fn default_background_model() -> String {
-    "qwen3.5:4b".to_string()
+    "qwen3.5:9b".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,8 +139,6 @@ pub struct SettingsPayload {
     pub extract_entities: bool,
     #[serde(default)]
     pub extra_entity_labels: String,
-    #[serde(default = "default_false")]
-    pub thorough_reranking: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +188,8 @@ pub struct CitationItem {
     pub page_end: Option<i64>,
     pub chunk_id: String,
     pub snippet: String,
+    #[serde(default, skip_serializing)]
+    pub text: String,
     #[serde(default)]
     pub node_ids: Vec<String>,
     #[serde(default)]
@@ -219,6 +215,8 @@ pub struct ChatStageEvent {
     pub citations: Option<Vec<CitationItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draft: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +225,8 @@ pub struct AnswerSentence {
     pub text: String,
     pub status: String,
     pub sources: Vec<u32>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -278,6 +278,24 @@ pub struct ChatFinalResult {
     pub trace: Option<serde_json::Value>,
 }
 
+impl ChatFinalResult {
+    pub fn failure(message_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            message_id: message_id.into(),
+            citations: Vec::new(),
+            retrieval_mode: "error".into(),
+            error: Some(error.into()),
+            not_found: false,
+            sentences: Vec::new(),
+            scope_title: None,
+            scope_ids: Vec::new(),
+            timings: None,
+            suggestions: Vec::new(),
+            trace: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPresence {
@@ -297,7 +315,8 @@ pub struct ModelsStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsProgressEvent {
-    pub line: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
 }
 
 #[cfg(test)]
@@ -314,6 +333,7 @@ mod chat_payload_tests {
             page_end: Some(2),
             chunk_id: "c1".into(),
             snippet: "snip".into(),
+            text: String::new(),
             node_ids: vec!["n1".into()],
             index: 1,
             regions: None,

@@ -79,15 +79,12 @@ def test_render_region_size_and_cache_eviction(tmp_path: Path) -> None:
     doc.close()
 
     cache = tmp_path / "cache"
-    first = render_region(pdf, 1, [10, 10, 100, 80], scale=2, cache_dir=cache)
+    out1 = cache / "doc-hash-p1-s200-aabbcc.png"
+    first = render_region(pdf, 1, [10, 10, 100, 80], scale=2, out_path=out1)
     assert first["width"] > 0 and first["height"] > 0
     raw = base64.b64decode(first["pngBase64"])
     assert raw[:8] == b"\x89PNG\r\n\x1a\n"
-    key_path = cache / f"{first['cacheKey']}.png"
-    assert key_path.is_file()
-
-    second = render_region(pdf, 1, [10, 10, 100, 80], scale=2, cache_dir=cache)
-    assert second["cacheKey"] == first["cacheKey"]
+    assert out1.is_file()
 
     # Force tiny cache and fill with distinct clips so eviction runs.
     for i in range(8):
@@ -96,7 +93,7 @@ def test_render_region_size_and_cache_eviction(tmp_path: Path) -> None:
             1,
             [10 + i, 10, 90 + i, 80],
             scale=2,
-            cache_dir=cache,
+            out_path=cache / f"clip-{i}.png",
             max_cache_bytes=8_000,
         )
     remaining = list(cache.glob("*.png"))
@@ -112,7 +109,7 @@ def test_render_page_caps_width(tmp_path: Path) -> None:
     doc.new_page(width=1000, height=200)
     doc.save(pdf)
     doc.close()
-    out = render_page(pdf, 1, scale=2, cache_dir=tmp_path / "c")
+    out = render_page(pdf, 1, scale=2, out_path=tmp_path / "c" / "page.png")
     assert out["width"] <= 1400
 
 

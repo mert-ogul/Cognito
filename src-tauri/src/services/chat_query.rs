@@ -9,50 +9,45 @@ use crate::models::{
     ScopeSuggestion,
 };
 use crate::services::ollama_stream;
+use crate::vault;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
-fn sp(path: &std::path::Path) -> String {
-    path.to_string_lossy().into_owned()
-}
-
-const SYSTEM_PROMPT: &str = "Answer only from the numbered passages. First copy the exact sentences you rely on, then write the answer from those quotes alone. Every answer sentence points to at least one quote. If the passages don't answer the question, set answerable to false and leave both lists empty. Write formulas in LaTeX.";
+const SYSTEM_PROMPT: &str = "Answer only from the numbered passages. For each answer sentence, first copy one to three short, exact passages it relies on, with their passage numbers, then write the sentence from them. Don't repeat a fact in two sentences. Write every sentence in words. Use LaTeX only for real formulas, never for plain numbers, percentages or units: write 81.5%, not $81.5\\%$. Inside JSON strings, write each LaTeX backslash twice. Write formulas in LaTeX between $ or $$. Formulas in the passages come from PDF text and are often garbled; rewrite them as clean LaTeX. For example, h = σ(W x̃ + b) becomes $h = \\sigma(W\\tilde{x} + b)$. Each passage starts with its document's title. If the question asks about a specific paper, person or thing and the passages are about a different one, set answerable to false. If the passages don't answer the question, set answerable to false and leave the answer list empty.";
 
 fn answer_format_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
             "answerable": { "type": "boolean" },
-            "quotes": {
-                "type": "array",
-                "maxItems": 8,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "source": { "type": "integer" },
-                        "text": { "type": "string" }
-                    },
-                    "required": ["source", "text"]
-                }
-            },
             "answer": {
                 "type": "array",
+                "maxItems": 5,
                 "items": {
                     "type": "object",
                     "properties": {
-                        "sentence": { "type": "string" },
                         "quotes": {
                             "type": "array",
-                            "items": { "type": "integer" }
-                        }
+                            "minItems": 1,
+                            "maxItems": 3,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "source": { "type": "integer" },
+                                    "text": { "type": "string" }
+                                },
+                                "required": ["source", "text"]
+                            }
+                        },
+                        "sentence": { "type": "string" }
                     },
-                    "required": ["sentence", "quotes"]
+                    "required": ["quotes", "sentence"]
                 }
             }
         },
-        "required": ["answerable", "quotes", "answer"]
+        "required": ["answerable", "answer"]
     })
 }
 
@@ -66,20 +61,20 @@ pub struct DraftQuote {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftAnswerItem {
+    pub quotes: Vec<DraftQuote>,
     pub sentence: String,
-    pub quotes: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroundedDraft {
     pub answerable: bool,
-    pub quotes: Vec<DraftQuote>,
     pub answer: Vec<DraftAnswerItem>,
 }
 
 /// Stages emitted before `CHAT_FINAL` for a given early exit.
-pub fn chat_stage_sequence(early_not_found: bool) -> Vec<&'static str> {
+#[cfg(test)]
+fn chat_stage_sequence(early_not_found: bool) -> Vec<&'static str> {
     if early_not_found {
         vec!["passages", "ranking"]
     } else {
@@ -108,7 +103,53 @@ pub fn reduce_history(history: &[ChatTurn], n_pairs: usize) -> Vec<ChatTurn> {
         .collect()
 }
 
-/// Parse model JSON and reject answerable drafts whose sentences lack quote indexes.
+/// Undo JSON control-character decoding that broke LaTeX (`\t` → tab, etc.).
+pub fn repair_latex_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\t' => out.push_str("\\t"),
+            '\u{000c}' => out.push_str("\\f"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\r' => out.push_str("\\r"),
+            '\n' => {
+                if chars.peek().is_some_and(|n| n.is_ascii_alphabetic()) {
+                    out.push_str("\\n");
+                } else {
+                    out.push(' ');
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn sentence_word_key(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn dedupe_answer_sentences(mut draft: GroundedDraft) -> GroundedDraft {
+    let mut seen = std::collections::HashSet::new();
+    draft
+        .answer
+        .retain(|item| seen.insert(sentence_word_key(&item.sentence)));
+    draft
+}
+
+/// Parse model JSON; answerable drafts with no quoted sentences become unanswerable.
 pub fn parse_grounded_answer(raw: &str) -> Result<GroundedDraft, String> {
     let trimmed = raw.trim();
     let draft = match serde_json::from_str::<GroundedDraft>(trimmed) {
@@ -122,20 +163,25 @@ pub fn parse_grounded_answer(raw: &str) -> Result<GroundedDraft, String> {
             extracted.ok_or_else(|| format!("grounded answer JSON: {e}"))?
         }
     };
-    validate_draft(draft)
+    Ok(validate_draft(dedupe_answer_sentences(repair_draft_sentences(draft))))
 }
 
-fn validate_draft(draft: GroundedDraft) -> Result<GroundedDraft, String> {
+fn repair_draft_sentences(mut draft: GroundedDraft) -> GroundedDraft {
+    for item in &mut draft.answer {
+        item.sentence = repair_latex_escapes(&item.sentence);
+    }
+    draft
+}
+
+fn validate_draft(mut draft: GroundedDraft) -> GroundedDraft {
     if draft.answerable {
-        for (i, item) in draft.answer.iter().enumerate() {
-            if item.quotes.is_empty() {
-                return Err(format!(
-                    "answer sentence {i} has no quote indexes while answerable is true"
-                ));
-            }
+        let any_quoted = draft.answer.iter().any(|item| !item.quotes.is_empty());
+        if !any_quoted {
+            draft.answerable = false;
+            draft.answer.clear();
         }
     }
-    Ok(draft)
+    draft
 }
 
 fn emit_stage(
@@ -144,6 +190,7 @@ fn emit_stage(
     stage: &str,
     citations: Option<Vec<CitationItem>>,
     detail: Option<String>,
+    draft: Vec<String>,
 ) {
     let _ = app.emit(
         CHAT_STAGE,
@@ -152,8 +199,23 @@ fn emit_stage(
             stage: stage.to_string(),
             citations,
             detail,
+            draft,
         },
     );
+}
+
+async fn sidecar_request(
+    state: &SharedState,
+    method: &str,
+    params: Value,
+) -> CognitoResult<Value> {
+    let state = state.clone();
+    let method = method.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.sidecar.with_session(|s| s.request(&method, params))
+    })
+    .await
+    .map_err(|e| crate::errors::CognitoError::Sidecar(e.to_string()))?
 }
 
 fn emit_final(app: &AppHandle, result: &ChatFinalResult) {
@@ -182,7 +244,12 @@ fn build_generation_messages(
     let mut passage_block = String::new();
     for c in citations {
         let idx = if c.index == 0 { 1 } else { c.index };
-        passage_block.push_str(&format!("[{idx}] {}\n{}\n\n", c.title, c.snippet));
+        let body = if c.text.is_empty() {
+            c.snippet.as_str()
+        } else {
+            c.text.as_str()
+        };
+        passage_block.push_str(&format!("[{idx}] {}\n{body}\n\n", c.title));
     }
     let user_content = format!("Question: {query}\n\nPassages:\n{passage_block}");
     messages.push(json!({ "role": "user", "content": user_content }));
@@ -192,7 +259,6 @@ fn build_generation_messages(
 fn unanswerable_draft() -> GroundedDraft {
     GroundedDraft {
         answerable: false,
-        quotes: vec![],
         answer: vec![],
     }
 }
@@ -206,43 +272,30 @@ pub async fn run_chat_query(
     scope_ids: Vec<String>,
 ) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
-    let app_data = sp(&state.data_dir);
+    let app_data = vault::path_string(&state.data_dir);
     let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
     let hist_for_retrieval = reduce_history(&history, 2);
-    let thorough = settings.thorough_reranking;
 
-    let prep = match state.sidecar.with_session(|s| {
-        s.request(
-            "prepare_chat_retrieval",
-            json!({
-                "sqlite_path": sp(&sqlite_path),
-                "query": query,
-                "embed_model": settings.embed_model,
-                "history": hist_for_retrieval,
-                "scope_ids": scope_ids,
-                "app_data": app_data,
-                "thorough_reranking": thorough,
-                "skip_rerank": true,
-            }),
-        )
-    }) {
+    let prep = match sidecar_request(
+        &state,
+        "prepare_chat_retrieval",
+        json!({
+            "sqlite_path": vault::path_string(&sqlite_path),
+            "query": query,
+            "embed_model": settings.embed_model,
+            "history": hist_for_retrieval,
+            "scope_ids": scope_ids,
+            "app_data": app_data,
+            "skip_rerank": true,
+        }),
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             emit_final(
                 &app,
-                &ChatFinalResult {
-                    message_id: message_id.clone(),
-                    citations: vec![],
-                    retrieval_mode: "error".into(),
-                    error: Some(e.to_string()),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title: None,
-                    scope_ids: vec![],
-                    timings: None,
-                    suggestions: vec![],
-                    trace: None,
-                },
+                &ChatFinalResult::failure(message_id.clone(), e.to_string()),
             );
             return Ok(());
         }
@@ -269,7 +322,7 @@ pub async fn run_chat_query(
         .take(5)
         .filter_map(|v| serde_json::from_value(v.clone()).ok())
         .collect();
-    emit_stage(&app, &message_id, "passages", Some(preview), None);
+    emit_stage(&app, &message_id, "passages", Some(preview), None, vec![]);
 
     let mut scope_chosen = prep
         .get("scopeChosen")
@@ -323,6 +376,7 @@ pub async fn run_chat_query(
         "ranking",
         None,
         Some("Ranking passages".into()),
+        vec![],
     );
 
     let search_text = prep
@@ -341,46 +395,39 @@ pub async fn run_chat_query(
             "trace": prep_trace.clone().unwrap_or(json!({})),
         })
     } else {
-        match state.sidecar.with_session(|s| {
-            s.request(
-                "rerank_chat_candidates",
-                json!({
-                    "app_data": app_data,
-                    "query": search_text,
-                    "candidates": candidates,
-                    "thorough_reranking": thorough,
-                    "sqlite_path": sp(&sqlite_path),
-                    "embed_model": settings.embed_model,
-                    "profile_matches": profile_matches,
-                    "explicit_scope": explicit_scope,
-                    "labels": labels,
-                    "normalised_question": normalised_question,
-                    "scope_ids": result_scope_ids,
-                    "scope_reason": scope_reason,
-                    "candidate_counts": candidate_counts,
-                }),
-            )
-        }) {
+        match sidecar_request(
+            &state,
+            "rerank_chat_candidates",
+            json!({
+                "app_data": app_data,
+                "query": search_text,
+                "candidates": candidates,
+                "sqlite_path": vault::path_string(&sqlite_path),
+                "embed_model": settings.embed_model,
+                "profile_matches": profile_matches,
+                "explicit_scope": explicit_scope,
+                "labels": labels,
+                "normalised_question": normalised_question,
+                "scope_ids": result_scope_ids,
+                "scope_reason": scope_reason,
+                "candidate_counts": candidate_counts,
+            }),
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 emit_final(
                     &app,
-                    &ChatFinalResult {
-                        message_id: message_id.clone(),
-                        citations: vec![],
-                        retrieval_mode: "error".into(),
-                        error: Some(e.to_string()),
-                        not_found: false,
-                        sentences: vec![],
-                        scope_title: None,
-                        scope_ids: result_scope_ids,
-                        timings: Some(ChatTimings {
-                            retrieval_ms,
-                            ..ChatTimings::default()
-                        }),
-                        suggestions: vec![],
-                        trace: None,
-                    },
+                    &{
+                    let mut r = ChatFinalResult::failure(message_id.clone(), e.to_string());
+                    r.scope_ids = result_scope_ids;
+                    r.timings = Some(ChatTimings {
+                        retrieval_ms,
+                        ..ChatTimings::default()
+                    });
+                    r
+                },
                 );
                 return Ok(());
             }
@@ -479,53 +526,50 @@ pub async fn run_related_query(
     message_id: String,
 ) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
-    let app_data = sp(&state.data_dir);
+    let app_data = vault::path_string(&state.data_dir);
     let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
     let (name_a, name_b) = state.with_sqlite(|c| sqlite::entity_names(c, &entity_id_a, &entity_id_b))?;
     let query = format!("How are {name_a} and {name_b} related?");
 
-    let prep = match state.sidecar.with_session(|s| {
-        s.request(
-            "prepare_related_retrieval",
-            json!({
-                "sqlite_path": sp(&sqlite_path),
-                "entity_id_a": entity_id_a,
-                "entity_id_b": entity_id_b,
-                "embed_model": settings.embed_model,
-                "app_data": app_data,
-            }),
-        )
-    }) {
+    let prep = match sidecar_request(
+        &state,
+        "prepare_related_retrieval",
+        json!({
+            "sqlite_path": vault::path_string(&sqlite_path),
+            "entity_id_a": entity_id_a,
+            "entity_id_b": entity_id_b,
+            "embed_model": settings.embed_model,
+            "app_data": app_data,
+        }),
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             emit_final(
                 &app,
-                &ChatFinalResult {
-                    message_id: message_id.clone(),
-                    citations: vec![],
-                    retrieval_mode: "error".into(),
-                    error: Some(e.to_string()),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title: None,
-                    scope_ids: vec![],
-                    timings: None,
-                    suggestions: vec![],
-                    trace: None,
-                },
+                &ChatFinalResult::failure(message_id.clone(), e.to_string()),
             );
             return Ok(());
         }
     };
 
     let citations = parse_citations(&prep);
-    emit_stage(&app, &message_id, "passages", Some(citations.clone()), None);
+    emit_stage(
+        &app,
+        &message_id,
+        "passages",
+        Some(citations.clone()),
+        None,
+        vec![],
+    );
     emit_stage(
         &app,
         &message_id,
         "ranking",
         None,
         Some("Ranking passages".into()),
+        vec![],
     );
     let empty = citations.is_empty();
     finish_grounded_answer(
@@ -574,6 +618,7 @@ async fn finish_grounded_answer(
         "passages",
         Some(citations.clone()),
         None,
+        vec![],
     );
 
     if early_not_found {
@@ -600,14 +645,34 @@ async fn finish_grounded_answer(
         return Ok(());
     }
 
-    emit_stage(&app, &message_id, "writing", None, None);
+    emit_stage(
+        &app,
+        &message_id,
+        "writing",
+        None,
+        Some("Quoting the sources".into()),
+        vec![],
+    );
 
     let messages = build_generation_messages(&query, &history, &citations);
     let gen_started = Instant::now();
-    let raw = match ollama_stream::chat_completion_json(
+    let app_write = app.clone();
+    let mid_write = message_id.clone();
+    let mut emitted_draft_len = 0usize;
+    let raw = match ollama_stream::chat_completion_json_streaming(
         chat_model,
         messages,
         answer_format_schema(),
+        |acc| {
+            let draft_now: Vec<String> = ollama_stream::draft_sentences_from_partial(acc)
+                .into_iter()
+                .map(|s| repair_latex_escapes(&s))
+                .collect();
+            if draft_now.len() > emitted_draft_len {
+                emitted_draft_len = draft_now.len();
+                emit_stage(&app_write, &mid_write, "writing", None, None, draft_now);
+            }
+        },
     )
     .await
     {
@@ -615,18 +680,13 @@ async fn finish_grounded_answer(
         Err(e) => {
             emit_final(
                 &app,
-                &ChatFinalResult {
-                    message_id,
-                    citations,
-                    retrieval_mode: "error".into(),
-                    error: Some(e),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title,
-                    scope_ids: result_scope_ids,
-                    timings: Some(timings),
-                    suggestions: vec![],
-                    trace: None,
+                &{
+                    let mut r = ChatFinalResult::failure(message_id, e);
+                    r.citations = citations;
+                    r.scope_title = scope_title;
+                    r.scope_ids = result_scope_ids;
+                    r.timings = Some(timings);
+                    r
                 },
             );
             return Ok(());
@@ -639,18 +699,13 @@ async fn finish_grounded_answer(
         Err(e) => {
             emit_final(
                 &app,
-                &ChatFinalResult {
-                    message_id,
-                    citations,
-                    retrieval_mode: "error".into(),
-                    error: Some(e),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title,
-                    scope_ids: result_scope_ids,
-                    timings: Some(timings),
-                    suggestions: vec![],
-                    trace: None,
+                &{
+                    let mut r = ChatFinalResult::failure(message_id, e);
+                    r.citations = citations;
+                    r.scope_title = scope_title;
+                    r.scope_ids = result_scope_ids;
+                    r.timings = Some(timings);
+                    r
                 },
             );
             return Ok(());
@@ -664,49 +719,52 @@ async fn finish_grounded_answer(
     };
 
     let n_sentences = draft.answer.len();
+    let writing_draft: Vec<String> = draft.answer.iter().map(|a| a.sentence.clone()).collect();
     emit_stage(
         &app,
         &message_id,
         "checking",
         None,
         Some(format!("Checking {n_sentences} sentences")),
+        writing_draft,
     );
 
     let passages: Vec<Value> = citations
         .iter()
         .map(|c| {
             let idx = if c.index == 0 { 1 } else { c.index };
-            json!({ "index": idx, "text": c.snippet })
+            let body = if c.text.is_empty() {
+                c.snippet.as_str()
+            } else {
+                c.text.as_str()
+            };
+            json!({ "index": idx, "title": c.title, "text": body })
         })
         .collect();
 
     let check_started = Instant::now();
-    let check = match state.sidecar.with_session(|s| {
-        s.request(
-            "check_answer",
-            json!({
-                "app_data": app_data,
-                "passages": passages,
-                "draft": draft,
-            }),
-        )
-    }) {
+    let check = match sidecar_request(
+        &state,
+        "check_answer",
+        json!({
+            "app_data": app_data,
+            "passages": passages,
+            "draft": draft,
+        }),
+    )
+    .await
+    {
         Ok(v) => v,
         Err(e) => {
             emit_final(
                 &app,
-                &ChatFinalResult {
-                    message_id,
-                    citations,
-                    retrieval_mode: "error".into(),
-                    error: Some(e.to_string()),
-                    not_found: false,
-                    sentences: vec![],
-                    scope_title,
-                    scope_ids: result_scope_ids,
-                    timings: Some(timings),
-                    suggestions: vec![],
-                    trace: None,
+                &{
+                    let mut r = ChatFinalResult::failure(message_id, e.to_string());
+                    r.citations = citations;
+                    r.scope_title = scope_title;
+                    r.scope_ids = result_scope_ids;
+                    r.timings = Some(timings);
+                    r
                 },
             );
             return Ok(());
@@ -735,6 +793,24 @@ async fn finish_grounded_answer(
         timings.generation_ms,
         timings.check_ms
     );
+    #[cfg(debug_assertions)]
+    {
+        eprintln!("chat draft json: {raw}");
+        for (i, item) in draft.answer.iter().enumerate() {
+            let status = sentences
+                .get(i)
+                .map(|s| s.status.as_str())
+                .unwrap_or("");
+            let reason = sentences
+                .get(i)
+                .and_then(|s| s.reason.as_deref())
+                .unwrap_or("");
+            eprintln!(
+                "chat sentence {i} status={status} reason={reason} quotes={}",
+                item.quotes.len()
+            );
+        }
+    }
 
     emit_final(
         &app,
@@ -760,31 +836,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_rejects_answerable_sentence_without_quotes() {
+    fn repair_latex_escapes_restores_commands() {
+        assert_eq!(
+            repair_latex_escapes(&format!("$81.5{}ext{{{}extperthousand}}$", '\t', '\t')),
+            r"$81.5\text{\textperthousand}$"
+        );
+        assert_eq!(
+            repair_latex_escapes(&format!("${}rac{{1}}{{2}}$", '\u{000c}')),
+            r"$\frac{1}{2}$"
+        );
+        assert_eq!(
+            repair_latex_escapes(&format!("${}eta$", '\u{0008}')),
+            r"$\beta$"
+        );
+        assert_eq!(
+            repair_latex_escapes(&format!("${}abla$", '\n')),
+            r"$\nabla$"
+        );
+    }
+
+    #[test]
+    fn parse_dedupes_identical_sentences() {
         let raw = r#"{
             "answerable": true,
-            "quotes": [{"source": 1, "text": "hello"}],
-            "answer": [{"sentence": "Hello.", "quotes": []}]
+            "answer": [
+                {"quotes": [{"source": 1, "text": "a"}], "sentence": "GCN reaches 81.5% on Cora."},
+                {"quotes": [{"source": 2, "text": "b"}], "sentence": "GCN reaches 81.5% on Cora!"}
+            ]
         }"#;
-        let err = parse_grounded_answer(raw).unwrap_err();
-        assert!(err.contains("no quote indexes"), "{err}");
+        let d = parse_grounded_answer(raw).unwrap();
+        assert_eq!(d.answer.len(), 1);
+        assert_eq!(d.answer[0].sentence, "GCN reaches 81.5% on Cora.");
+    }
+
+    #[test]
+    fn parse_marks_unanswerable_when_no_sentence_has_quotes() {
+        let raw = r#"{
+            "answerable": true,
+            "answer": [{"quotes": [], "sentence": "Hello."}]
+        }"#;
+        let d = parse_grounded_answer(raw).unwrap();
+        assert!(!d.answerable);
+        assert!(d.answer.is_empty());
+    }
+
+    #[test]
+    fn parse_keeps_answerable_when_some_sentences_lack_quotes() {
+        let raw = r#"{
+            "answerable": true,
+            "answer": [
+                {"quotes": [{"source": 1, "text": "hello"}], "sentence": "Hello."},
+                {"quotes": [], "sentence": "Extra."}
+            ]
+        }"#;
+        let d = parse_grounded_answer(raw).unwrap();
+        assert!(d.answerable);
+        assert_eq!(d.answer.len(), 2);
+        assert!(d.answer[1].quotes.is_empty());
     }
 
     #[test]
     fn parse_accepts_answerable_with_quotes() {
         let raw = r#"{
             "answerable": true,
-            "quotes": [{"source": 1, "text": "hello"}],
-            "answer": [{"sentence": "Hello.", "quotes": [0]}]
+            "answer": [{
+                "quotes": [{"source": 1, "text": "hello"}],
+                "sentence": "Hello."
+            }]
         }"#;
         let d = parse_grounded_answer(raw).unwrap();
         assert!(d.answerable);
-        assert_eq!(d.answer[0].quotes, vec![0]);
+        assert_eq!(d.answer[0].quotes.len(), 1);
+        assert_eq!(d.answer[0].quotes[0].source, 1);
+        assert_eq!(d.answer[0].quotes[0].text, "hello");
     }
 
     #[test]
     fn parse_allows_unanswerable_empty() {
-        let raw = r#"{"answerable": false, "quotes": [], "answer": []}"#;
+        let raw = r#"{"answerable": false, "answer": []}"#;
         let d = parse_grounded_answer(raw).unwrap();
         assert!(!d.answerable);
         assert!(d.answer.is_empty());

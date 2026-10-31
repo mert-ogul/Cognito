@@ -7,25 +7,26 @@ import json
 import re
 import sqlite3
 import struct
-import uuid
 from typing import Any
 
 import numpy as np
 from rapidfuzz import fuzz
 
-from common.model_store import extract_spans, mock_models_enabled, unload_gliner
-from common.ollama import chat, embed_texts
+from common.model_store import extract_spans_batch, mock_models_enabled
 from common.sqlite_vec_util import connect_with_vec, mock_embed_enabled, table_dimension
 from common.text_norm import normalize_date, normalize_name
 from query.entity_labels import labels_for_document
 
-_WINDOW_WORDS = 350
+_WINDOW_WORDS = 200
+_WINDOW_OVERLAP = 30
 _GLINER_THRESHOLD = 0.5
-_EMBED_MERGE_COSINE = 0.92
+_CHUNK_LIMIT = 40
 _SIMILAR_COSINE = 0.75
 _SIMILAR_TOP_K = 3
 _TITLE_PARTIAL_RATIO = 90
 _TITLE_MIN_WORDS = 4
+# GLiNER's word pattern; windows must stay under its 384-token cap.
+_GLINER_WORD_RE = re.compile(r"\w+(?:[-_]\w+)*|\S")
 _GENERIC_TAIL = frozenset(
     {
         "dataset",
@@ -49,7 +50,15 @@ _ABBR_RE = re.compile(
     r"(?P<full>(?:[A-Z][A-Za-z0-9]+)(?:[\s\-]+(?:[A-Z][A-Za-z0-9]+)){1,10})"
     r"\s*\((?P<abbr>[A-Z][A-Z0-9]{1,12})\)"
 )
-_WORD_RE = re.compile(r"[0-9A-Za-z]+(?:'[0-9A-Za-z]+)?")
+_WORD_RE = re.compile(r"[^\W_]+(?:'[^\W_]+)?")
+_YEAR_IN_TEXT = re.compile(r"\b(1[0-9]{3}|20[0-9]{2}|2100)\b")
+
+# Raw spans buffered across incremental extract_entities calls, keyed by document id.
+_doc_span_buffers: dict[str, list[dict[str, Any]]] = {}
+
+
+def clear_entity_buffers() -> None:
+    _doc_span_buffers.clear()
 
 
 def _param(params: dict[str, Any], *keys: str, default: Any = None) -> Any:
@@ -68,13 +77,18 @@ def _word_count(text: str) -> int:
     return len(_WORD_RE.findall(text or ""))
 
 
-def _windows(text: str, max_words: int = _WINDOW_WORDS) -> list[tuple[int, int, str]]:
-    """Return (start, end, window_text) char spans covering ~max_words each."""
+def _windows(
+    text: str,
+    max_words: int = _WINDOW_WORDS,
+    overlap: int = _WINDOW_OVERLAP,
+) -> list[tuple[int, int, str]]:
+    """Return (start, end, window_text) char spans with a word overlap between windows."""
     if not text:
         return []
     words = list(_WORD_RE.finditer(text))
     if not words:
         return [(0, len(text), text)]
+    step = max(1, max_words - max(0, overlap))
     out: list[tuple[int, int, str]] = []
     i = 0
     while i < len(words):
@@ -88,8 +102,12 @@ def _windows(text: str, max_words: int = _WINDOW_WORDS) -> list[tuple[int, int, 
         out.append((start, end, text[start:end]))
         if j >= len(words):
             break
-        i = j
+        i = i + step
     return out
+
+
+def gliner_token_count(text: str) -> int:
+    return len(_GLINER_WORD_RE.findall(text or ""))
 
 
 def _abbr_pairs_from_text(text: str) -> list[tuple[str, str]]:
@@ -123,7 +141,10 @@ def merge_within_doc(
         if label.lower() == "date":
             nd = normalize_date(text)
             if not nd:
-                continue
+                ym = _YEAR_IN_TEXT.search(text)
+                if not ym:
+                    continue
+                nd = ym.group(1)
             name = nd
             normalized = nd
         else:
@@ -228,34 +249,6 @@ def _blob_to_vec(blob: bytes) -> np.ndarray:
     return np.asarray(struct.unpack(f"{n}f", blob), dtype=np.float64)
 
 
-def pca_points(vectors: np.ndarray) -> np.ndarray:
-    """Return Nx2 PCA coordinates via SVD. Stable for fixed inputs."""
-    if vectors.size == 0:
-        return np.zeros((0, 2), dtype=np.float64)
-    n, d = vectors.shape
-    if n == 1:
-        return np.zeros((1, 2), dtype=np.float64)
-    mean = vectors.mean(axis=0)
-    centered = vectors - mean
-    # Economy SVD on centered data.
-    _u, _s, vt = np.linalg.svd(centered, full_matrices=False)
-    comps = vt[:2].T  # d x 2
-    if comps.shape[1] == 1:
-        comps = np.concatenate([comps, np.zeros((d, 1))], axis=1)
-    pts = centered @ comps
-    if pts.shape[1] == 1:
-        pts = np.concatenate([pts, np.zeros((n, 1))], axis=1)
-    # Flip signs for stability: first nonzero in each component positive.
-    for j in range(min(2, pts.shape[1])):
-        col = pts[:, j]
-        for v in col:
-            if abs(v) > 1e-12:
-                if v < 0:
-                    pts[:, j] *= -1
-                break
-    return pts[:, :2]
-
-
 def similar_links(
     doc_ids: list[str],
     vectors: np.ndarray,
@@ -281,56 +274,103 @@ def similar_links(
     return out
 
 
-def agglomerative_clusters(
-    vectors: np.ndarray,
-    *,
-    target_size: int = 8,
-) -> list[list[int]]:
-    """Average-linkage clustering on cosine distance; cluster count from target size."""
-    n = vectors.shape[0]
-    if n == 0:
+_FTS_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "how",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "was",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "with",
+    }
+)
+
+
+def _significant_title_words(title: str) -> list[str]:
+    out: list[str] = []
+    for m in _WORD_RE.finditer(title or ""):
+        t = m.group(0).lower()
+        if t.endswith("'s"):
+            t = t[:-2]
+        if len(t) < 2 or t in _FTS_STOPWORDS:
+            continue
+        out.append(t)
+    return out
+
+
+def _fts_phrase_from_title(title: str) -> str | None:
+    words = _significant_title_words(title)
+    if not words:
+        return None
+    return " ".join('"' + w.replace('"', '""') + '"' for w in words)
+
+
+def _has_chunks_fts(con: sqlite3.Connection) -> bool:
+    row = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_fts'"
+    ).fetchone()
+    return row is not None
+
+
+def _candidate_chunks_for_title(
+    con: sqlite3.Connection | None,
+    document_id: str,
+    title: str,
+    chunks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """FTS5 phrase filter on title words; fall back to all chunks when FTS is unavailable."""
+    if con is None or not _has_chunks_fts(con):
+        return chunks
+    phrase = _fts_phrase_from_title(title)
+    if not phrase:
+        return chunks
+    try:
+        rows = con.execute(
+            """
+            SELECT c.id, c.text
+            FROM chunks_fts
+            JOIN chunks c ON c.rowid = chunks_fts.rowid
+            WHERE c.document_id = ?
+              AND chunks_fts MATCH ?
+            ORDER BY c.ordinal
+            """,
+            (document_id, phrase),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return chunks
+    if not rows:
         return []
-    if n == 1:
-        return [[0]]
-    # Cosine distance matrix.
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    norms = np.maximum(norms, 1e-12)
-    unit = vectors / norms
-    sim = unit @ unit.T
-    dist = np.clip(1.0 - sim, 0.0, 2.0)
-    np.fill_diagonal(dist, 0.0)
-
-    n_clusters = max(1, min(n, n // max(1, target_size)))
-    if n <= 15:
-        n_clusters = max(1, min(n, max(1, n // 3)))
-    if n >= 20:
-        # Aim for cluster sizes in ~3–15.
-        n_clusters = max(2, min(n // 3, max(1, n // 8)))
-
-    clusters: list[list[int]] = [[i] for i in range(n)]
-    # Cluster distance = average linkage.
-    while len(clusters) > n_clusters:
-        best = None
-        best_d = float("inf")
-        for i in range(len(clusters)):
-            for j in range(i + 1, len(clusters)):
-                total = 0.0
-                count = 0
-                for a in clusters[i]:
-                    for b in clusters[j]:
-                        total += float(dist[a, b])
-                        count += 1
-                d = total / max(1, count)
-                if d < best_d:
-                    best_d = d
-                    best = (i, j)
-        if best is None:
-            break
-        i, j = best
-        merged = clusters[i] + clusters[j]
-        clusters = [c for k, c in enumerate(clusters) if k != i and k != j]
-        clusters.append(merged)
-    return clusters
+    by_id = {str(c.get("id") or ""): c for c in chunks}
+    out: list[dict[str, Any]] = []
+    for cid, text in rows:
+        key = str(cid)
+        if key in by_id:
+            out.append(by_id[key])
+        else:
+            out.append({"id": key, "text": str(text or "")})
+    return out
 
 
 def _phrase_in_text(haystack_norm: str, needle: str) -> bool:
@@ -344,6 +384,7 @@ def _phrase_in_text(haystack_norm: str, needle: str) -> bool:
 
 def find_mentions_links(
     docs: list[dict[str, Any]],
+    con: sqlite3.Connection | None = None,
 ) -> list[tuple[str, str, str | None, float]]:
     """Return (source_id, target_id, evidence_chunk_id, weight) for title/alias mentions."""
     links: list[tuple[str, str, str | None, float]] = []
@@ -360,22 +401,27 @@ def find_mentions_links(
             hit = False
             title_words = _word_count(title)
             title_norm = normalize_name(title)
-            for ch in chunks:
-                text = str(ch.get("text") or "")
-                text_norm = normalize_name(text)
-                cid = str(ch.get("id") or "") or None
-                if title_words >= _TITLE_MIN_WORDS and title_norm:
+            if title_words >= _TITLE_MIN_WORDS and title_norm:
+                for ch in _candidate_chunks_for_title(con, sid, title, chunks):
+                    text = str(ch.get("text") or "")
+                    text_norm = normalize_name(text)
+                    cid = str(ch.get("id") or "") or None
                     if fuzz.partial_ratio(title_norm, text_norm) >= _TITLE_PARTIAL_RATIO:
                         hit = True
                         evidence = cid
                         break
-                for alias in aliases:
-                    if _phrase_in_text(text_norm, alias):
-                        hit = True
-                        evidence = cid
+            if not hit:
+                for ch in chunks:
+                    text = str(ch.get("text") or "")
+                    text_norm = normalize_name(text)
+                    cid = str(ch.get("id") or "") or None
+                    for alias in aliases:
+                        if _phrase_in_text(text_norm, alias):
+                            hit = True
+                            evidence = cid
+                            break
+                    if hit:
                         break
-                if hit:
-                    break
             if hit:
                 links.append((sid, tid, evidence, 1.0))
     return links
@@ -418,98 +464,6 @@ def _upsert_alias(con: sqlite3.Connection, entity_id: str, alias: str) -> None:
     )
 
 
-def _merge_entities(con: sqlite3.Connection, keep_id: str, drop_id: str) -> None:
-    if keep_id == drop_id:
-        return
-    keep = con.execute(
-        "SELECT label, name, normalized FROM entities WHERE id = ?", (keep_id,)
-    ).fetchone()
-    drop = con.execute(
-        "SELECT label, name, normalized FROM entities WHERE id = ?", (drop_id,)
-    ).fetchone()
-    if not keep or not drop:
-        return
-    con.execute(
-        "UPDATE mentions SET entity_id = ? WHERE entity_id = ?",
-        (keep_id, drop_id),
-    )
-    # Collapse duplicate mention rows after merge.
-    con.execute(
-        """
-        DELETE FROM mentions WHERE rowid NOT IN (
-          SELECT MIN(rowid) FROM mentions
-          GROUP BY entity_id, chunk_id, document_id, start, end
-        )
-        """
-    )
-    _upsert_alias(con, keep_id, str(drop[1]))
-    _upsert_alias(con, keep_id, str(drop[2]))
-    for (alias,) in con.execute(
-        "SELECT alias FROM entity_aliases WHERE entity_id = ?", (drop_id,)
-    ).fetchall():
-        _upsert_alias(con, keep_id, str(alias))
-    con.execute("DELETE FROM entity_aliases WHERE entity_id = ?", (drop_id,))
-    con.execute("DELETE FROM entities WHERE id = ?", (drop_id,))
-    _refresh_entity_counts(con, [keep_id])
-
-
-def _cross_doc_embed_merge(con: sqlite3.Connection, embed_model: str | None) -> int:
-    if mock_embed_enabled() or mock_models_enabled() or not embed_model:
-        return 0
-    rows = con.execute(
-        "SELECT id, label, name, normalized, mention_count FROM entities"
-    ).fetchall()
-    by_label: dict[str, list[tuple[str, str, str, int]]] = {}
-    for eid, label, name, _norm, mc in rows:
-        by_label.setdefault(str(label).lower(), []).append(
-            (str(eid), str(name), str(label), int(mc or 0))
-        )
-    merged = 0
-    for _lab, group in by_label.items():
-        if len(group) < 2:
-            continue
-        names = [g[1] for g in group]
-        try:
-            vecs = embed_texts(embed_model, names)
-        except Exception:
-            continue
-        if len(vecs) != len(group):
-            continue
-        arr = [np.asarray(v, dtype=np.float64) for v in vecs]
-        parent = list(range(len(group)))
-
-        def find(i: int) -> int:
-            while parent[i] != i:
-                parent[i] = parent[parent[i]]
-                i = parent[i]
-            return i
-
-        def union(i: int, j: int) -> None:
-            ri, rj = find(i), find(j)
-            if ri == rj:
-                return
-            # Keep more frequent mentions.
-            if group[rj][3] > group[ri][3]:
-                ri, rj = rj, ri
-            elif group[rj][3] == group[ri][3] and group[rj][0] < group[ri][0]:
-                ri, rj = rj, ri
-            parent[rj] = ri
-
-        for i in range(len(group)):
-            for j in range(i + 1, len(group)):
-                if _cosine(arr[i], arr[j]) >= _EMBED_MERGE_COSINE:
-                    union(i, j)
-        # Merge drops into roots.
-        roots: dict[int, int] = {}
-        for i in range(len(group)):
-            r = find(i)
-            roots.setdefault(r, r)
-            if i != r:
-                _merge_entities(con, group[r][0], group[i][0])
-                merged += 1
-    return merged
-
-
 def rpc_purge_document_entities(params: dict[str, Any]) -> dict[str, Any]:
     sqlite_path = str(_param(params, "sqlitePath", "sqlite_path"))
     document_id = str(_param(params, "documentId", "document_id"))
@@ -528,175 +482,205 @@ def rpc_purge_document_entities(params: dict[str, Any]) -> dict[str, Any]:
             "DELETE FROM document_links WHERE source_id = ? OR target_id = ?",
             (document_id, document_id),
         )
-        con.execute("DELETE FROM document_points WHERE document_id = ?", (document_id,))
-        # Drop topics that referenced this document (full recompute preferred; prune JSON).
-        topic_rows = con.execute("SELECT id, document_ids FROM topics").fetchall()
-        for tid, raw in topic_rows:
-            try:
-                ids = json.loads(raw or "[]")
-            except (TypeError, json.JSONDecodeError):
-                ids = []
-            if not isinstance(ids, list):
-                continue
-            if document_id not in ids:
-                continue
-            left = [x for x in ids if str(x) != document_id]
-            if not left:
-                con.execute("DELETE FROM topics WHERE id = ?", (tid,))
-            else:
-                con.execute(
-                    "UPDATE topics SET document_ids = ? WHERE id = ?",
-                    (json.dumps(left), tid),
-                )
         con.commit()
     finally:
         con.close()
     return {"ok": True}
 
 
+def _commit_document_mentions(
+    con: sqlite3.Connection,
+    document_id: str,
+    raw_spans: list[dict[str, Any]],
+    context_text: str,
+) -> tuple[int, int]:
+    old_ids = [
+        str(r[0])
+        for r in con.execute(
+            "SELECT DISTINCT entity_id FROM mentions WHERE document_id = ?",
+            (document_id,),
+        ).fetchall()
+    ]
+    con.execute("DELETE FROM mentions WHERE document_id = ?", (document_id,))
+    _refresh_entity_counts(con, old_ids)
+
+    merged = merge_within_doc(raw_spans, context_text=context_text)
+    mention_rows = 0
+    entity_ids: set[str] = set()
+    for it in merged:
+        label = str(it["label"])
+        name = str(it["name"])
+        normalized = str(it["normalized"])
+        eid = _entity_id(label.lower(), normalized)
+        entity_ids.add(eid)
+        row = con.execute(
+            "SELECT id, name FROM entities WHERE id = ?", (eid,)
+        ).fetchone()
+        if row:
+            if len(name) > len(str(row[1] or "")):
+                con.execute(
+                    "UPDATE entities SET name = ?, label = ? WHERE id = ?",
+                    (name, label, eid),
+                )
+        else:
+            existing = con.execute(
+                """
+                SELECT id, name FROM entities
+                WHERE lower(label) = lower(?) AND normalized = ?
+                """,
+                (label, normalized),
+            ).fetchone()
+            if existing:
+                eid = str(existing[0])
+                entity_ids.add(eid)
+                if len(name) > len(str(existing[1] or "")):
+                    con.execute(
+                        "UPDATE entities SET name = ? WHERE id = ?",
+                        (name, eid),
+                    )
+            else:
+                con.execute(
+                    """
+                    INSERT INTO entities(
+                      id, label, name, normalized, doc_count, mention_count
+                    ) VALUES (?, ?, ?, ?, 0, 0)
+                    """,
+                    (eid, label, name, normalized),
+                )
+        surface = str(it.get("text") or name)
+        if normalize_name(surface) and normalize_name(surface) != normalized:
+            _upsert_alias(con, eid, surface)
+        if name != surface:
+            _upsert_alias(con, eid, name)
+
+        con.execute(
+            """
+            INSERT INTO mentions(
+              entity_id, chunk_id, document_id, start, end
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                eid,
+                str(it["chunk_id"]),
+                document_id,
+                int(it["start"]),
+                int(it["end"]),
+            ),
+        )
+        mention_rows += 1
+
+    _refresh_entity_counts(con, list(entity_ids))
+    return mention_rows, len(entity_ids)
+
+
 def rpc_extract_entities(params: dict[str, Any]) -> dict[str, Any]:
     sqlite_path = str(_param(params, "sqlitePath", "sqlite_path"))
     document_id = str(_param(params, "documentId", "document_id"))
     app_data = str(_param(params, "app_data", "appData") or "")
-    extra_labels = [str(x).strip() for x in (_param(params, "labels") or []) if str(x).strip()]
-    embed_model = _param(params, "embed_model", "embedModel")
-    embed_model_s = str(embed_model) if embed_model else None
+    extra_labels = [
+        str(x).strip() for x in (_param(params, "labels") or []) if str(x).strip()
+    ]
+    chunk_offset = int(_param(params, "chunkOffset", "chunk_offset", default=0) or 0)
+    chunk_limit = int(
+        _param(params, "chunkLimit", "chunk_limit", default=_CHUNK_LIMIT) or _CHUNK_LIMIT
+    )
+    if chunk_limit <= 0:
+        chunk_limit = _CHUNK_LIMIT
+    if chunk_offset < 0:
+        chunk_offset = 0
 
+    con = sqlite3.connect(sqlite_path)
     try:
-        con = sqlite3.connect(sqlite_path)
-        try:
-            card_row = con.execute(
-                "SELECT type FROM document_cards WHERE document_id = ?",
-                (document_id,),
-            ).fetchone()
-            card_type = str(card_row[0]) if card_row and card_row[0] else None
+        card_row = con.execute(
+            "SELECT type FROM document_cards WHERE document_id = ?",
+            (document_id,),
+        ).fetchone()
+        card_type = str(card_row[0]) if card_row and card_row[0] else None
+
+        chunks = con.execute(
+            """
+            SELECT id, text, IFNULL(role, 'body')
+            FROM chunks
+            WHERE document_id = ?
+            ORDER BY ordinal
+            """,
+            (document_id,),
+        ).fetchall()
+        total_chunks = len(chunks)
+
+        if card_type:
             labels = labels_for_document(card_type, extra_labels)
+        else:
+            has_refs = any(str(role or "body") == "references" for _cid, _t, role in chunks)
+            labels = labels_for_document("paper" if has_refs else None, extra_labels)
 
-            # Clear prior mentions for this document before re-extract.
-            old_ids = [
-                str(r[0])
-                for r in con.execute(
-                    "SELECT DISTINCT entity_id FROM mentions WHERE document_id = ?",
-                    (document_id,),
-                ).fetchall()
-            ]
-            con.execute("DELETE FROM mentions WHERE document_id = ?", (document_id,))
-            _refresh_entity_counts(con, old_ids)
+        if chunk_offset == 0:
+            _doc_span_buffers[document_id] = []
 
-            chunks = con.execute(
-                """
-                SELECT id, text, IFNULL(role, 'body')
-                FROM chunks
-                WHERE document_id = ?
-                ORDER BY ordinal
-                """,
-                (document_id,),
-            ).fetchall()
+        buffer = _doc_span_buffers.setdefault(document_id, [])
+        slice_chunks = chunks[chunk_offset : chunk_offset + chunk_limit]
 
-            raw_spans: list[dict[str, Any]] = []
-            context_parts: list[str] = []
-            for chunk_id, text, role in chunks:
-                body = str(text or "")
-                context_parts.append(body)
-                if str(role or "body") == "references":
-                    continue
-                for start, _end, window in _windows(body):
-                    for sp in extract_spans(
-                        app_data, window, labels, threshold=_GLINER_THRESHOLD
-                    ):
-                        raw_spans.append(
-                            {
-                                "label": sp["label"],
-                                "text": sp["text"],
-                                "start": int(sp["start"]) + start,
-                                "end": int(sp["end"]) + start,
-                                "score": sp["score"],
-                                "chunk_id": str(chunk_id),
-                                "document_id": document_id,
-                            }
-                        )
+        for chunk_id, text, role in slice_chunks:
+            body = str(text or "")
+            if str(role or "body") == "references":
+                continue
+            windows = _windows(body)
+            if not windows:
+                continue
+            window_texts = [w[2] for w in windows]
+            batched = extract_spans_batch(
+                app_data, window_texts, labels, threshold=_GLINER_THRESHOLD
+            )
+            seen: set[tuple[str, int, int]] = set()
+            for (start, _end, _window), spans in zip(windows, batched):
+                for sp in spans:
+                    abs_start = int(sp["start"]) + start
+                    abs_end = int(sp["end"]) + start
+                    label = str(sp["label"] or "")
+                    key = (label, abs_start, abs_end)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    buffer.append(
+                        {
+                            "label": label,
+                            "text": sp["text"],
+                            "start": abs_start,
+                            "end": abs_end,
+                            "score": sp["score"],
+                            "chunk_id": str(chunk_id),
+                            "document_id": document_id,
+                        }
+                    )
 
-            merged = merge_within_doc(raw_spans, context_text="\n".join(context_parts))
-            mention_rows = 0
-            entity_ids: set[str] = set()
-            for it in merged:
-                label = str(it["label"])
-                name = str(it["name"])
-                normalized = str(it["normalized"])
-                eid = _entity_id(label.lower(), normalized)
-                entity_ids.add(eid)
-                row = con.execute(
-                    "SELECT id, name FROM entities WHERE id = ?", (eid,)
-                ).fetchone()
-                if row:
-                    # Prefer longer display name.
-                    if len(name) > len(str(row[1] or "")):
-                        con.execute(
-                            "UPDATE entities SET name = ?, label = ? WHERE id = ?",
-                            (name, label, eid),
-                        )
-                else:
-                    # Also check by (label, normalized) in case of id drift.
-                    existing = con.execute(
-                        """
-                        SELECT id, name FROM entities
-                        WHERE lower(label) = lower(?) AND normalized = ?
-                        """,
-                        (label, normalized),
-                    ).fetchone()
-                    if existing:
-                        eid = str(existing[0])
-                        entity_ids.add(eid)
-                        if len(name) > len(str(existing[1] or "")):
-                            con.execute(
-                                "UPDATE entities SET name = ? WHERE id = ?",
-                                (name, eid),
-                            )
-                    else:
-                        con.execute(
-                            """
-                            INSERT INTO entities(
-                              id, label, name, normalized, doc_count, mention_count
-                            ) VALUES (?, ?, ?, ?, 0, 0)
-                            """,
-                            (eid, label, name, normalized),
-                        )
-                # Alias original surface if different.
-                surface = str(it.get("text") or name)
-                if normalize_name(surface) and normalize_name(surface) != normalized:
-                    _upsert_alias(con, eid, surface)
-                if name != surface:
-                    _upsert_alias(con, eid, name)
-
-                con.execute(
-                    """
-                    INSERT INTO mentions(
-                      entity_id, chunk_id, document_id, start, end
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        eid,
-                        str(it["chunk_id"]),
-                        document_id,
-                        int(it["start"]),
-                        int(it["end"]),
-                    ),
-                )
-                mention_rows += 1
-
-            _refresh_entity_counts(con, list(entity_ids))
-            merged_n = _cross_doc_embed_merge(con, embed_model_s)
-            con.commit()
+        next_offset = chunk_offset + len(slice_chunks)
+        done = next_offset >= total_chunks
+        if not done:
             return {
                 "ok": True,
-                "mentions": mention_rows,
-                "entities": len(entity_ids),
-                "merged": merged_n,
+                "done": False,
+                "nextOffset": next_offset,
+                "totalChunks": total_chunks,
+                "mentions": 0,
+                "entities": 0,
             }
-        finally:
-            con.close()
+
+        context_text = "\n".join(str(t or "") for _cid, t, _role in chunks)
+        mention_rows, entity_count = _commit_document_mentions(
+            con, document_id, list(buffer), context_text
+        )
+        con.commit()
+        _doc_span_buffers.pop(document_id, None)
+        return {
+            "ok": True,
+            "done": True,
+            "nextOffset": next_offset,
+            "totalChunks": total_chunks,
+            "mentions": mention_rows,
+            "entities": entity_count,
+        }
     finally:
-        unload_gliner()
+        con.close()
 
 
 def _load_docs_for_links(con: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -792,16 +776,14 @@ def _mean_pool_doc_vectors(
         con.close()
 
 
-def _mock_recompute(docs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Deterministic fake links/topics/points for tests."""
+def _mock_similar_links(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deterministic fake similar links for tests."""
     ids = [str(d["id"]) for d in docs]
     links: list[dict[str, Any]] = []
-    # Mentions from title/alias logic still applied by caller; add deterministic similar.
     for i, sid in enumerate(ids):
         for j, tid in enumerate(ids):
             if i >= j:
                 continue
-            # Fake weight from id order.
             w = 0.8 - 0.01 * abs(i - j)
             if w >= _SIMILAR_COSINE:
                 links.append(
@@ -813,85 +795,29 @@ def _mock_recompute(docs: list[dict[str, Any]]) -> dict[str, Any]:
                         "evidence_chunk_id": None,
                     }
                 )
-                if len([x for x in links if x["source_id"] == sid and x["kind"] == "similar"]) >= _SIMILAR_TOP_K:
+                if (
+                    len(
+                        [
+                            x
+                            for x in links
+                            if x["source_id"] == sid and x["kind"] == "similar"
+                        ]
+                    )
+                    >= _SIMILAR_TOP_K
+                ):
                     break
-    topics = []
-    if ids:
-        topics.append(
-            {
-                "id": "topic_mock_0",
-                "name": "Mock topic",
-                "document_ids": ids[: min(len(ids), 15)],
-            }
-        )
-    points = []
-    for i, did in enumerate(ids):
-        points.append(
-            {
-                "document_id": did,
-                "x": float(i),
-                "y": float(i % 3),
-                "topic_id": "topic_mock_0" if ids else None,
-            }
-        )
-    return {"links": links, "topics": topics, "points": points}
-
-
-def _name_topics(
-    background_model: str | None,
-    clusters: list[list[dict[str, Any]]],
-) -> list[str]:
-    names: list[str] = []
-    if mock_models_enabled() or not background_model:
-        for i, _ in enumerate(clusters):
-            names.append(f"Topic {i + 1}")
-        return names
-    # One call for all clusters.
-    blocks: list[str] = []
-    for i, docs in enumerate(clusters):
-        lines = []
-        for d in docs[:12]:
-            title = str(d.get("title") or d.get("id") or "")
-            summ = "; ".join(d.get("summary") or [])[:240]
-            lines.append(f"- {title}" + (f" :: {summ}" if summ else ""))
-        blocks.append(f"Cluster {i + 1}:\n" + "\n".join(lines))
-    prompt = (
-        "Name each cluster with a short 2-5 word topic label. "
-        "Reply with one label per line, same order, no numbering.\n\n"
-        + "\n\n".join(blocks)
-    )
-    try:
-        content = chat(
-            background_model,
-            [{"role": "user", "content": prompt}],
-            think=False,
-        )
-    except Exception:
-        return [f"Topic {i + 1}" for i in range(len(clusters))]
-    lines = [ln.strip(" -•\t") for ln in content.splitlines() if ln.strip()]
-    while len(lines) < len(clusters):
-        lines.append(f"Topic {len(lines) + 1}")
-    return lines[: len(clusters)]
+    return links
 
 
 def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
     sqlite_path = str(_param(params, "sqlitePath", "sqlite_path"))
-    _app_data = str(_param(params, "app_data", "appData") or "")
-    del _app_data  # reserved for future local models
-    embed_model = str(
-        _param(params, "embed_model", "embedModel") or "qwen3-embedding:0.6b"
-    )
-    background_model = _param(params, "background_model", "backgroundModel")
-    background_model_s = str(background_model) if background_model else None
 
     con = sqlite3.connect(sqlite_path)
     try:
         docs = _load_docs_for_links(con)
         con.execute("DELETE FROM document_links")
-        con.execute("DELETE FROM topics")
-        con.execute("DELETE FROM document_points")
 
-        mention_links = find_mentions_links(docs)
+        mention_links = find_mentions_links(docs, con=con)
         for sid, tid, evid, weight in mention_links:
             con.execute(
                 """
@@ -904,13 +830,9 @@ def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
 
         doc_ids = [str(d["id"]) for d in docs]
         similar_count = 0
-        topic_count = 0
-        point_count = 0
 
         if mock_models_enabled() or mock_embed_enabled():
-            fake = _mock_recompute(docs)
-            # Still compute real mentions (already written); add mock similar/topics/points.
-            for link in fake["links"]:
+            for link in _mock_similar_links(docs):
                 con.execute(
                     """
                     INSERT INTO document_links(
@@ -926,21 +848,6 @@ def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
                     ),
                 )
                 similar_count += 1
-            for topic in fake["topics"]:
-                con.execute(
-                    "INSERT INTO topics(id, name, document_ids) VALUES (?, ?, ?)",
-                    (topic["id"], topic["name"], json.dumps(topic["document_ids"])),
-                )
-                topic_count += 1
-            for pt in fake["points"]:
-                con.execute(
-                    """
-                    INSERT INTO document_points(document_id, x, y, topic_id)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (pt["document_id"], pt["x"], pt["y"], pt["topic_id"]),
-                )
-                point_count += 1
         else:
             vecs = _mean_pool_doc_vectors(sqlite_path, doc_ids)
             if vecs is not None and len(doc_ids) >= 2:
@@ -955,51 +862,11 @@ def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
                     )
                     similar_count += 1
 
-                clusters_idx = agglomerative_clusters(vecs)
-                cluster_docs = [[docs[i] for i in idxs] for idxs in clusters_idx]
-                names = _name_topics(background_model_s, cluster_docs)
-                topic_of_doc: dict[str, str] = {}
-                for name, idxs in zip(names, clusters_idx):
-                    tid = f"topic_{uuid.uuid4().hex[:12]}"
-                    member_ids = [doc_ids[i] for i in idxs]
-                    con.execute(
-                        "INSERT INTO topics(id, name, document_ids) VALUES (?, ?, ?)",
-                        (tid, name[:120], json.dumps(member_ids)),
-                    )
-                    topic_count += 1
-                    for mid in member_ids:
-                        topic_of_doc[mid] = tid
-
-                pts = pca_points(vecs)
-                for i, did in enumerate(doc_ids):
-                    x = float(pts[i, 0]) if i < len(pts) else 0.0
-                    y = float(pts[i, 1]) if i < len(pts) else 0.0
-                    con.execute(
-                        """
-                        INSERT INTO document_points(document_id, x, y, topic_id)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        (did, x, y, topic_of_doc.get(did)),
-                    )
-                    point_count += 1
-            elif doc_ids:
-                for did in doc_ids:
-                    con.execute(
-                        """
-                        INSERT INTO document_points(document_id, x, y, topic_id)
-                        VALUES (?, 0, 0, NULL)
-                        """,
-                        (did,),
-                    )
-                    point_count += 1
-
         con.commit()
         return {
             "ok": True,
             "mentionsLinks": len(mention_links),
             "similarLinks": similar_count,
-            "topics": topic_count,
-            "points": point_count,
         }
     finally:
         con.close()

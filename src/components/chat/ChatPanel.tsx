@@ -1,5 +1,10 @@
+import {
+  AssistantMessage,
+  citationSourceLabel,
+  normalizeAnswerMath,
+  type ScopeSearchSuggestion,
+} from "@/components/chat/AssistantMessage";
 import { Button } from "@/components/ui/button";
-import { SourceQuoteOrThumb } from "@/components/common/SourceRegionThumb";
 import {
   getDocumentPreview,
   getSuggestedQuestions,
@@ -13,7 +18,6 @@ import {
   type ChatTurn,
   type CitationItem,
   type DocumentRow,
-  type PageRegion,
   type SuggestedQuestion,
 } from "@/lib/tauri";
 import { useTauriEvent } from "@/lib/tauri-events";
@@ -23,16 +27,8 @@ import { useCitedRegionsStore } from "@/stores/citedRegionsStore";
 import { useSidePaneStore } from "@/stores/sidePaneStore";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
 
-type ScopeSearchSuggestion = {
-  documentId: string;
-  title: string;
-  label?: string | null;
-};
+export { citationSourceLabel, normalizeAnswerMath };
 
 type ChatMessage = {
   id: string;
@@ -40,6 +36,7 @@ type ChatMessage = {
   text: string;
   citations?: CitationItem[];
   sentences?: AnswerSentence[];
+  draft?: string[];
   notFound?: boolean;
   scopeTitle?: string | null;
   suggestions?: ScopeSearchSuggestion[];
@@ -52,28 +49,12 @@ type Props = {
   health: AppHealth | undefined;
 };
 
-export function citationSourceLabel(c: CitationItem): string {
-  const name = (c.title || "").trim() || fileName(c.path);
-  if (c.pageStart != null && c.pageEnd != null && c.pageEnd !== c.pageStart) {
-    return `${name}, pp. ${c.pageStart}-${c.pageEnd}`;
-  }
-  if (c.pageStart != null) {
-    return `${name}, p. ${c.pageStart}`;
-  }
-  return name;
-}
-
-/** Turn \\( \\) / \\[ \\] into $ / $$ outside code spans and blocks. */
-export function normalizeAnswerMath(text: string): string {
-  const parts = text.split(/(```[\s\S]*?```|`[^`\n]+`)/g);
-  return parts
-    .map((part) => {
-      if (part.startsWith("`")) return part;
-      return part
-        .replace(/\\\(([\s\S]+?)\\\)/g, (_m, body: string) => `$${body}$`)
-        .replace(/\\\[([\s\S]+?)\\\]/g, (_m, body: string) => `$$${body}$$`);
-    })
-    .join("");
+function formatModelBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 MB";
+  const gb = n / (1024 * 1024 * 1024);
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  const mb = n / (1024 * 1024);
+  return `${Math.max(1, Math.round(mb))} MB`;
 }
 
 function fileName(path: string): string {
@@ -89,38 +70,6 @@ function pageLabel(pageStart: number | null | undefined, pageEnd: number | null 
     return `p. ${pageStart}`;
   }
   return null;
-}
-
-/** Clamp snippet to at most three lines, starting at the best-matching sentence. */
-export function clampSnippetToMatch(text: string, query: string, maxLines = 3): string {
-  const raw = (text || "").replace(/\s+/g, " ").trim();
-  if (!raw) return "";
-  const qTerms = new Set(
-    (query || "")
-      .toLowerCase()
-      .match(/[0-9a-z]+(?:'[0-9a-z]+)?/g)
-      ?.filter((t) => t.length >= 2) ?? [],
-  );
-  const sentences = raw.split(/(?<=[.!?])\s+/).filter(Boolean);
-  let bestIdx = 0;
-  let bestScore = -1;
-  for (let i = 0; i < sentences.length; i++) {
-    const terms = sentences[i].toLowerCase().match(/[0-9a-z]+(?:'[0-9a-z]+)?/g) ?? [];
-    let score = 0;
-    for (const t of terms) {
-      if (qTerms.has(t)) score += 1;
-    }
-    if (score > bestScore) {
-      bestScore = score;
-      bestIdx = i;
-    }
-  }
-  const fromBest = sentences.slice(bestIdx).join(" ");
-  const words = fromBest.split(/\s+/);
-  const approxLine = 14;
-  const maxWords = approxLine * maxLines;
-  if (words.length <= maxWords) return fromBest;
-  return `${words.slice(0, maxWords).join(" ")}…`;
 }
 
 function assistantHistoryText(m: ChatMessage): string {
@@ -143,6 +92,7 @@ export function ChatPanel({ health }: Props) {
   const addCitedRegions = useCitedRegionsStore((s) => s.addRegions);
   const consumeIntent = useChatIntentStore((s) => s.consumeIntent);
   const pendingRelated = useChatIntentStore((s) => s.pendingRelated);
+  const libraryResetEpoch = useChatIntentStore((s) => s.libraryResetEpoch);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -157,7 +107,8 @@ export function ChatPanel({ health }: Props) {
   const lastSentRef = useRef<string | null>(null);
   const lastSentScopeRef = useRef<ScopeDoc[]>([]);
   const warmRetryErrorRef = useRef<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
 
@@ -172,11 +123,31 @@ export function ChatPanel({ health }: Props) {
     !!health?.checkingModelsReady;
 
   useEffect(() => {
-    const el = bottomRef.current;
-    if (el && typeof el.scrollIntoView === "function") {
-      el.scrollIntoView({ block: "end" });
-    }
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      stickToBottomRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight <= 80;
+    };
+    el.addEventListener("scroll", onScroll);
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !stickToBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
   }, [messages, busyId]);
+
+  useEffect(() => {
+    if (libraryResetEpoch === 0) return;
+    setMessages([]);
+    setBusyId(null);
+    setRetryUserText(null);
+    setScopeDocs([]);
+    lastSentRef.current = null;
+    lastSentScopeRef.current = [];
+  }, [libraryResetEpoch]);
 
   useLayoutEffect(() => {
     const el = textareaRef.current;
@@ -304,6 +275,7 @@ export function ChatPanel({ health }: Props) {
     stage: string;
     citations?: CitationItem[] | null;
     detail?: string | null;
+    draft?: string[];
   }>("chat-stage", (ev) => {
     const p = ev.payload;
     const stage = p.stage as ChatMessage["stage"];
@@ -323,6 +295,7 @@ export function ChatPanel({ health }: Props) {
               stage,
               stageDetail: p.detail ?? undefined,
               citations: p.citations ?? m.citations,
+              draft: p.draft && p.draft.length > 0 ? p.draft : m.draft,
             }
           : m,
       ),
@@ -359,6 +332,7 @@ export function ChatPanel({ health }: Props) {
               error: p.error ?? undefined,
               stage: "done",
               stageDetail: undefined,
+              draft: undefined,
               text: sentences.map((s) => s.text).join(" "),
             }
           : m,
@@ -366,8 +340,11 @@ export function ChatPanel({ health }: Props) {
     );
   });
 
-  useTauriEvent<{ line: string }>("models-progress", (ev) => {
-    setModelsProgress(ev.payload.line);
+  useTauriEvent<{ downloadedBytes: number; totalBytes: number }>("models-progress", (ev) => {
+    const { downloadedBytes, totalBytes } = ev.payload;
+    setModelsProgress(
+      `Downloading models, ${formatModelBytes(downloadedBytes)} of ${formatModelBytes(totalBytes)}`,
+    );
   });
 
   const openCitation = useCallback(
@@ -555,7 +532,7 @@ export function ChatPanel({ health }: Props) {
       {needsModels ? (
         <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
           <p className="text-muted">
-            Cognito needs two checking models, about 1 GB, downloaded once.
+            Cognito needs checking models, downloaded once.
           </p>
           <Button
             type="button"
@@ -576,7 +553,7 @@ export function ChatPanel({ health }: Props) {
             </Button>
           ) : null}
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
           <div className="space-y-8 pb-8">
             {messages.length === 0 && ready && suggestions.length > 0 ? (
               <div className="space-y-2">
@@ -620,8 +597,8 @@ export function ChatPanel({ health }: Props) {
                   ) : null}
                   {waiting ? <p className="text-muted">Searching your library</p> : null}
                   {assistant && !assistant.error ? (
-                    <AssistantTurn
-                      message={assistant}
+                    <AssistantMessage
+                      message={{ ...assistant, role: "assistant" }}
                       query={user.text}
                       onCite={(c) => void openCitation(c)}
                       onAskEverywhere={() => void sendWithText(user.text, [])}
@@ -635,7 +612,6 @@ export function ChatPanel({ health }: Props) {
                 </article>
               );
             })}
-            <div ref={bottomRef} />
           </div>
         </div>
         <div ref={composerRef} className="relative shrink-0 pb-4 pt-2">
@@ -713,303 +689,3 @@ export function ChatPanel({ health }: Props) {
   );
 }
 
-function SourcesList({
-  citations,
-  onCite,
-}: {
-  citations: CitationItem[];
-  onCite: (c: CitationItem) => void;
-}) {
-  const [enriched, setEnriched] = useState<CitationItem[]>(citations);
-
-  useEffect(() => {
-    setEnriched(citations);
-    let cancelled = false;
-    void (async () => {
-      const next = await Promise.all(
-        citations.map(async (c) => {
-          if (c.regions && c.regions.length > 0) return c;
-          try {
-            const prev = await getDocumentPreview(c.documentId, c.chunkId);
-            const regions: PageRegion[] | null | undefined = prev.regions;
-            if (!regions?.length && !prev.path) return c;
-            return {
-              ...c,
-              regions: regions?.length ? regions : c.regions,
-              path: prev.path || c.path,
-              pageStart: prev.pageStart ?? c.pageStart,
-              pageEnd: prev.pageEnd ?? c.pageEnd,
-            };
-          } catch {
-            return c;
-          }
-        }),
-      );
-      if (!cancelled) setEnriched(next);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [citations]);
-
-  if (citations.length === 0) return null;
-  return (
-    <div className="space-y-2">
-      <p className="text-muted">Sources</p>
-      <ol className="list-decimal space-y-2 pl-5 text-muted">
-        {enriched.map((c) => (
-          <li key={`${c.chunkId}-${c.index}`} className="space-y-1">
-            {c.regions && c.regions.length > 0 && c.path ? (
-              <SourceQuoteOrThumb
-                path={c.path}
-                regions={c.regions}
-                quote={c.snippet}
-                documentId={c.documentId}
-                title={(c.title || "").trim() || fileName(c.path)}
-              />
-            ) : (
-              <p className="text-muted">{c.snippet}</p>
-            )}
-            <button
-              type="button"
-              className="text-left text-muted hover:text-text"
-              onClick={() => onCite(c)}
-            >
-              {citationSourceLabel(c)}
-            </button>
-          </li>
-        ))}
-      </ol>
-    </div>
-  );
-}
-
-function ClosestPassages({
-  citations,
-  query,
-  onCite,
-}: {
-  citations: CitationItem[];
-  query: string;
-  onCite: (c: CitationItem) => void;
-}) {
-  const [enriched, setEnriched] = useState<CitationItem[]>(citations);
-
-  useEffect(() => {
-    setEnriched(citations);
-    let cancelled = false;
-    void (async () => {
-      const next = await Promise.all(
-        citations.map(async (c) => {
-          if (c.regions && c.regions.length > 0) return c;
-          try {
-            const prev = await getDocumentPreview(c.documentId, c.chunkId);
-            const regions: PageRegion[] | null | undefined = prev.regions;
-            if (!regions?.length && !prev.path) return c;
-            return {
-              ...c,
-              regions: regions?.length ? regions : c.regions,
-              path: prev.path || c.path,
-              pageStart: prev.pageStart ?? c.pageStart,
-              pageEnd: prev.pageEnd ?? c.pageEnd,
-            };
-          } catch {
-            return c;
-          }
-        }),
-      );
-      if (!cancelled) setEnriched(next);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [citations]);
-
-  if (citations.length === 0) return null;
-  return (
-    <ul className="space-y-3">
-      {enriched.map((c) => {
-        const title = (c.title || "").trim() || fileName(c.path);
-        const page = pageLabel(c.pageStart, c.pageEnd);
-        const snippet = clampSnippetToMatch(c.snippet || "", query);
-        return (
-          <li key={`${c.chunkId}-${c.index}`}>
-            <button
-              type="button"
-              className="w-full space-y-1 text-left text-muted hover:text-text"
-              onClick={() => onCite(c)}
-            >
-              <p className="text-muted">
-                <span>{title}</span>
-                {page ? (
-                  <>
-                    <span aria-hidden="true"> · </span>
-                    <span>{page}</span>
-                  </>
-                ) : null}
-              </p>
-              {snippet ? <p className="text-muted">{snippet}</p> : null}
-              {c.regions && c.regions.length > 0 && c.path ? (
-                <SourceQuoteOrThumb
-                  path={c.path}
-                  regions={c.regions}
-                  quote={c.snippet}
-                  documentId={c.documentId}
-                  title={title}
-                />
-              ) : null}
-            </button>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-function AssistantTurn({
-  message,
-  query,
-  onCite,
-  onAskEverywhere,
-  onSearchIn,
-}: {
-  message: ChatMessage;
-  query: string;
-  onCite: (c: CitationItem) => void;
-  onAskEverywhere: () => void;
-  onSearchIn: (s: ScopeSearchSuggestion) => void;
-}) {
-  const citations = message.citations ?? [];
-  const stage = message.stage;
-  const ranking =
-    stage === "ranking" ? message.stageDetail || "Ranking passages" : null;
-  const writing =
-    stage === "passages" || stage === "writing"
-      ? message.stageDetail || "Writing the answer"
-      : null;
-  const checking =
-    stage === "checking" ? message.stageDetail || "Checking sentences" : null;
-
-  if (message.notFound) {
-    const searchSuggestions = message.suggestions ?? [];
-    return (
-      <div className="space-y-3">
-        <p className="text-muted">Your documents don&apos;t seem to cover this.</p>
-        <ClosestPassages citations={citations} query={query} onCite={onCite} />
-        {searchSuggestions.length > 0 ? (
-          <ul className="space-y-1">
-            {searchSuggestions.map((s) => (
-              <li key={s.documentId}>
-                <button
-                  type="button"
-                  className="text-left text-muted hover:text-text"
-                  onClick={() => onSearchIn(s)}
-                >
-                  {s.label || `Search in ${s.title}`}
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </div>
-    );
-  }
-
-  if (stage === "done" && message.sentences && message.sentences.length > 0) {
-    return (
-      <div className="space-y-3">
-        {message.scopeTitle ? (
-          <p className="text-muted">
-            Answered from {message.scopeTitle}{" "}
-            <Button
-              type="button"
-              variant="quiet"
-              className="h-auto px-1 py-0 text-muted underline-offset-2 hover:underline"
-              onClick={onAskEverywhere}
-            >
-              Ask across everything
-            </Button>
-          </p>
-        ) : null}
-        <div className="space-y-2">
-          {message.sentences.map((s, i) => (
-            <SentenceBlock key={i} sentence={s} citations={citations} onCite={onCite} />
-          ))}
-        </div>
-        <SourcesList citations={citations} onCite={onCite} />
-      </div>
-    );
-  }
-
-  if (writing || checking || ranking || citations.length > 0) {
-    return (
-      <div className="space-y-3">
-        {citations.length > 0 &&
-        (stage === "passages" ||
-          stage === "ranking" ||
-          stage === "writing" ||
-          stage === "checking") ? (
-          <SourcesList citations={citations} onCite={onCite} />
-        ) : null}
-        {ranking ? <p className="text-muted">{ranking}</p> : null}
-        {writing ? <p className="text-muted">{writing}</p> : null}
-        {checking ? <p className="text-muted">{checking}</p> : null}
-      </div>
-    );
-  }
-
-  return null;
-}
-
-function SentenceBlock({
-  sentence,
-  citations,
-  onCite,
-}: {
-  sentence: AnswerSentence;
-  citations: CitationItem[];
-  onCite: (c: CitationItem) => void;
-}) {
-  const byIndex = new Map(citations.map((c) => [c.index, c]));
-  const unsupported = sentence.status === "unsupported";
-  const unchecked = sentence.status === "unchecked";
-  const muted = unsupported || unchecked;
-  return (
-    <div className={cn("space-y-0.5", muted && "text-muted")}>
-      <div
-        className={cn(
-          "answer font-read text-[15px] leading-[1.6]",
-          muted ? "text-muted" : "text-text",
-        )}
-      >
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm, remarkMath]}
-          rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
-        >
-          {normalizeAnswerMath(sentence.text)}
-        </ReactMarkdown>
-        {sentence.sources.map((n) => {
-          const c = byIndex.get(n);
-          return (
-            <sup key={n}>
-              <button
-                type="button"
-                className="font-ui text-accent"
-                onClick={() => {
-                  if (c) onCite(c);
-                }}
-                aria-label={`Source ${n}`}
-              >
-                {n}
-              </button>
-            </sup>
-          );
-        })}
-      </div>
-      {unsupported ? (
-        <p className="text-[12px] text-muted">Not found in the sources</p>
-      ) : null}
-      {unchecked ? <p className="text-[12px] text-muted">Not checked</p> : null}
-    </div>
-  );
-}

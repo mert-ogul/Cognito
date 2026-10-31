@@ -8,7 +8,7 @@ import { OllamaSetupBanner } from "@/components/onboarding/OllamaSetupBanner";
 import { SettingsSheet } from "@/components/settings/SettingsSheet";
 import { useAppHealth } from "@/hooks/useAppHealth";
 import { useLibraryRefresh } from "@/hooks/useLibraryRefresh";
-import { listDocuments, type ImportProgress } from "@/lib/tauri";
+import { getSettings, listDocuments, type ImportProgress } from "@/lib/tauri";
 import { useTauriEvent } from "@/lib/tauri-events";
 import { useChatIntentStore } from "@/stores/chatIntentStore";
 import { useMainViewStore } from "@/stores/mainViewStore";
@@ -32,16 +32,19 @@ export function AppShell() {
     queryKey: ["documents"],
     queryFn: listDocuments,
   });
+  const settings = useQuery({
+    queryKey: ["settings"],
+    queryFn: getSettings,
+  });
 
-  const entitiesQueue = useMemo(
-    () =>
-      (docs.data ?? []).filter(
-        (d) =>
-          d.status === "indexed" &&
-          (d.entitiesStatus === "pending" || d.entitiesStatus === "running"),
-      ).length,
-    [docs.data],
-  );
+  const entitiesQueue = useMemo(() => {
+    if (settings.data?.extractEntities === false) return 0;
+    return (docs.data ?? []).filter(
+      (d) =>
+        d.status === "indexed" &&
+        (d.entitiesStatus === "pending" || d.entitiesStatus === "running"),
+    ).length;
+  }, [docs.data, settings.data?.extractEntities]);
 
   useTauriEvent<ImportProgress>("import-progress", (ev) => {
     setImportProgress(ev.payload);

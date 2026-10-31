@@ -51,11 +51,10 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
       vaultPath: "/vault",
       chatModel: "qwen3.5:9b",
       embedModel: "qwen3-embedding:0.6b",
-      backgroundModel: "qwen3.5:4b",
+      backgroundModel: "qwen3.5:9b",
       summariseDocuments: true,
       extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
     })),
     listDocuments: vi.fn(async () => []),
   };
@@ -191,7 +190,7 @@ describe("ChatPanel", () => {
     });
   });
 
-  it("renders unsupported sentences muted with a note", async () => {
+  it("renders answer sentences in one paragraph with unsupported titled", async () => {
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
       e2eEmit("chat-final", {
         messageId,
@@ -207,12 +206,16 @@ describe("ChatPanel", () => {
     });
     renderChat();
     await sendPrompt("ask");
-    expect(await screen.findByText("Guessed claim.")).toBeInTheDocument();
-    expect(screen.getByText("Not found in the sources")).toBeInTheDocument();
-    expect(screen.getByText("Guessed claim.").closest(".text-muted")).not.toBeNull();
+    const guessed = await screen.findByText("Guessed claim.");
+    expect(guessed).toBeInTheDocument();
+    expect(guessed).toHaveAttribute("title", "Not found in the sources");
+    expect(screen.queryByText("Not found in the sources")).toBeNull();
+    expect(screen.getByText("Supported claim.").closest("div.answer")).toBe(
+      guessed.closest("div.answer"),
+    );
   });
 
-  it("renders unchecked sentences muted with Not checked", async () => {
+  it("renders one unchecked note under the paragraph", async () => {
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
       e2eEmit("chat-final", {
         messageId,
@@ -228,8 +231,37 @@ describe("ChatPanel", () => {
     renderChat();
     await sendPrompt("ask");
     expect(await screen.findByText("Timed out claim.")).toBeInTheDocument();
-    expect(screen.getByText("Not checked")).toBeInTheDocument();
-    expect(screen.getByText("Timed out claim.").closest(".text-muted")).not.toBeNull();
+    expect(
+      screen.getByText("This couldn't be checked against the sources."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Not checked")).toBeNull();
+  });
+
+  it("renders a formula note when any sentence reason is formula", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [cite(1)],
+        sentences: [
+          {
+            text: "$$H = AW$$",
+            status: "unchecked",
+            sources: [1],
+            reason: "formula",
+          },
+        ],
+        notFound: false,
+        error: null,
+      });
+      return messageId;
+    });
+    renderChat();
+    await sendPrompt("ask");
+    expect(
+      await screen.findByText(
+        "Rewritten from the PDF text. Open source 1 to compare it with the page.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("adds and removes @ scope documents", async () => {
@@ -249,11 +281,12 @@ describe("ChatPanel", () => {
     expect(screen.getByText("Searching all documents")).toBeInTheDocument();
   });
 
-  it("shows passages before the answer", async () => {
+  it("shows only the status line while writing, then collapsed sources", async () => {
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
       e2eEmit("chat-stage", {
         messageId,
-        stage: "passages",
+        stage: "writing",
+        detail: "Writing the answer",
         citations: [cite(1, "One", "/vault/one.pdf")],
       });
       await new Promise((r) => setTimeout(r, 20));
@@ -268,9 +301,10 @@ describe("ChatPanel", () => {
     });
     renderChat();
     await sendPrompt("ask");
-    expect(await screen.findByText("Sources")).toBeInTheDocument();
-    expect(screen.getByText("Writing the answer")).toBeInTheDocument();
+    expect(await screen.findByText("Writing the answer")).toBeInTheDocument();
+    expect(screen.queryByText(/Sources ·/)).toBeNull();
     expect(await screen.findByText("Final answer body.")).toBeInTheDocument();
+    expect(screen.getByText("Sources · 1")).toBeInTheDocument();
   });
 
   it("shows notFound passages with title and page separate from snippet", async () => {
@@ -296,16 +330,43 @@ describe("ChatPanel", () => {
     renderChat();
     await sendPrompt("classification equation");
     expect(
-      await screen.findByText("Your documents don't seem to cover this."),
+      await screen.findByText("Your documents don't answer this."),
     ).toBeInTheDocument();
+    const disclosure = screen.getByText("Closest passages").closest("details");
+    expect(disclosure).not.toBeNull();
+    expect(disclosure).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("Closest passages"));
+    expect(disclosure).toHaveAttribute("open");
     expect(screen.getByText("Closest Paper")).toBeInTheDocument();
     expect(screen.getByText("p. 3")).toBeInTheDocument();
     const btn = screen.getByRole("button", { name: /Closest Paper/ });
     expect(btn.textContent).toMatch(/Closest Paper/);
     expect(btn.textContent).toMatch(/p\. 3/);
     expect(btn.textContent).toMatch(/classification layer/);
-    // title/page are not glued onto the snippet without a separator
     expect(btn.textContent).not.toMatch(/Closest Paperp\./);
+  });
+
+  it("hides model text when notFound even if sentences were sent", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [cite(1, "Closest Paper", "/vault/c.pdf")],
+        sentences: [
+          { text: "Drafted but unconfirmed.", status: "unsupported", sources: [] },
+        ],
+        notFound: true,
+        error: null,
+        suggestions: [],
+      });
+      return messageId;
+    });
+    renderChat();
+    await sendPrompt("mars capital");
+    expect(
+      await screen.findByText("Your documents don't answer this."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Show the unconfirmed answer")).toBeNull();
+    expect(screen.queryByText("Drafted but unconfirmed.")).toBeNull();
   });
 
   it("suggestion link sets scope and resends the question", async () => {
@@ -362,7 +423,7 @@ describe("ChatPanel", () => {
     );
     expect(
       screen.getByText(
-        "Cognito needs two checking models, about 1 GB, downloaded once.",
+        "Cognito needs checking models, downloaded once.",
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Download" })).toBeInTheDocument();
@@ -455,8 +516,17 @@ describe("ChatPanel", () => {
     );
     await sendPrompt("ask");
     expect(await screen.findByLabelText("Source 2")).toBeInTheDocument();
-    expect(screen.getByText("Sources")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Two, p. 3" })).toBeInTheDocument();
+    expect(screen.getByText("Sources · 1")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Sources · 1"));
+    expect(screen.getByText("Two")).toBeInTheDocument();
+    expect(screen.getByText("p. 3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Two/ })).toBeInTheDocument();
+    expect(screen.getByText("Show 1 more passage")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Sources · 1"));
+    expect(screen.queryByText("Two")).toBeNull();
+    expect(screen.queryByText("Show 1 more passage")).toBeNull();
+    fireEvent.click(screen.getByText("Sources · 1"));
+    expect(screen.getByText("Two")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Source 2"));
     await waitFor(() => {
       expect(getDocumentPreview).toHaveBeenCalledWith("d2", "c2");

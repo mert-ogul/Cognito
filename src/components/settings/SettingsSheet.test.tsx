@@ -25,7 +25,6 @@ describe("SettingsSheet", () => {
           summariseDocuments: true,
           extractEntities: false,
       extraEntityLabels: "",
-      thoroughReranking: false,
         };
       }
       if (cmd === "list_documents") {
@@ -69,7 +68,7 @@ describe("SettingsSheet", () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByLabelText("Answer model")).toHaveValue("phi4-mini");
-    expect(screen.getByLabelText("Background model")).toHaveValue("qwen3.5:4b");
+    expect(screen.getByLabelText("Model for document cards")).toHaveValue("qwen3.5:4b");
     expect(screen.getByLabelText("Embedding model")).toHaveValue("nomic-embed-text");
     expect(
       screen.getByRole("switch", { name: "Summarise documents in the background" }),

@@ -16,9 +16,6 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
-fn sp(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
 
 fn load_context(state: &SharedState) -> CognitoResult<(PathBuf, String, String)> {
     state.with_sqlite(|c| {
@@ -31,7 +28,7 @@ fn load_context(state: &SharedState) -> CognitoResult<(PathBuf, String, String)>
 
 fn purge_then_remove(state: &SharedState, path: &Path) -> CognitoResult<()> {
     let sqlite_path = state.sqlite_path();
-    let id = state.with_sqlite(|c| sqlite::document_id_by_path(c, &sp(path)))?;
+    let id = state.with_sqlite(|c| sqlite::document_id_by_path(c, &vault::path_string(path)))?;
     let Some(doc_id) = id else {
         return Ok(());
     };
@@ -41,12 +38,12 @@ fn purge_then_remove(state: &SharedState, path: &Path) -> CognitoResult<()> {
         state.sidecar.with_session(|s| {
             s.request(
                 "purge_chunk_embeddings",
-                json!({ "sqlitePath": sp(&sqlite_path), "chunkIds": cids }),
+                json!({ "sqlitePath": vault::path_string(&sqlite_path), "chunkIds": cids }),
             )?;
             Ok(())
         })?;
     }
-    state.with_sqlite(|c| sqlite::mark_document_removed(c, &sp(path)))?;
+    state.with_sqlite(|c| sqlite::mark_document_removed(c, &vault::path_string(path)))?;
     Ok(())
 }
 

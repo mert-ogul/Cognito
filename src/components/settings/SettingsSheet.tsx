@@ -14,6 +14,8 @@ import {
   setVault,
   updateSettings,
 } from "@/lib/tauri";
+import { useChatIntentStore } from "@/stores/chatIntentStore";
+import { useMainViewStore } from "@/stores/mainViewStore";
 import { getVersion } from "@tauri-apps/api/app";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
@@ -30,10 +32,9 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
   const { data } = useQuery({ queryKey: ["settings"], queryFn: getSettings, enabled: open });
   const docs = useQuery({ queryKey: ["documents"], queryFn: listDocuments, enabled: open });
   const [chat, setChat] = useState("qwen3.5:9b");
-  const [background, setBackground] = useState("qwen3.5:4b");
+  const [background, setBackground] = useState("qwen3.5:9b");
   const [embed, setEmbed] = useState("qwen3-embedding:0.6b");
   const [summariseOn, setSummariseOn] = useState(true);
-  const [thoroughOn, setThoroughOn] = useState(false);
   const [findNamesOn, setFindNamesOn] = useState(true);
   const [alsoFind, setAlsoFind] = useState("");
   const [ver, setVer] = useState<string | null>(null);
@@ -59,7 +60,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     setBackground(data.backgroundModel);
     setEmbed(data.embedModel);
     setSummariseOn(data.summariseDocuments);
-    setThoroughOn(data.thoroughReranking ?? false);
     setFindNamesOn(data.extractEntities);
     setAlsoFind(data.extraEntityLabels ?? "");
     setConfirm(null);
@@ -93,6 +93,12 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     void qc.invalidateQueries({ queryKey: ["documents"] });
   };
 
+  const afterLibraryReset = () => {
+    void qc.invalidateQueries();
+    useChatIntentStore.getState().bumpLibraryReset();
+    useMainViewStore.getState().showConversation();
+  };
+
   const settingsPayload = () => ({
     vaultPath: data?.vaultPath ?? null,
     chatModel: chat,
@@ -101,7 +107,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
     summariseDocuments: summariseOn,
     extractEntities: findNamesOn,
     extraEntityLabels: alsoFind,
-    thoroughReranking: thoroughOn,
   });
 
   const savePlain = useMutation({
@@ -166,19 +171,23 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
           summariseDocuments: summariseOn,
           extractEntities: findNamesOn,
           extraEntityLabels: alsoFind,
-          thoroughReranking: thoroughOn,
         });
         await rebuildIndex(embed.trim());
+        afterLibraryReset();
       } else if (confirm === "rebuild") {
         await rebuildIndex();
+        afterLibraryReset();
       } else if (confirm === "change-folder" && pendingFolder) {
         await setVault(pendingFolder);
+        afterLibraryReset();
       } else if (confirm === "remove-library") {
         await clearLibrary();
+        afterLibraryReset();
+      } else {
+        invalidate();
       }
       setPendingFolder(null);
       setConfirm(null);
-      invalidate();
     } catch (e) {
       setActionError(String(e));
     } finally {
@@ -239,7 +248,7 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
             <Input id="chat-model" value={chat} onChange={(e) => setChat(e.target.value)} autoComplete="off" />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="background-model">Background model</Label>
+            <Label htmlFor="background-model">Model for document cards</Label>
             <Input
               id="background-model"
               value={background}
@@ -262,19 +271,6 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
               checked={summariseOn}
               onCheckedChange={setSummariseOn}
               aria-label="Summarise documents in the background"
-            />
-          </div>
-          <div className="flex items-center justify-between gap-3 border border-line px-3 py-2">
-            <div>
-              <p className="text-text">Thorough reranking (slower)</p>
-              <p className="text-muted">
-                Optional Qwen3-Reranker on Apple GPU when available; off by default.
-              </p>
-            </div>
-            <Switch
-              checked={thoroughOn}
-              onCheckedChange={setThoroughOn}
-              aria-label="Thorough reranking (slower)"
             />
           </div>
         </section>

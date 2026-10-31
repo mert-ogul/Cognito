@@ -50,6 +50,8 @@ def test_build_fts_query_apostrophes_equation_empty() -> None:
     assert build_fts_query("Equation (2) from Kipf") == '"Equation" OR "2" OR "Kipf"'
     assert build_fts_query("what's GCN") == '"what\'s" OR "GCN"'
     assert build_fts_query('say "hi" now') == '"say" OR "hi" OR "now"'
+    assert build_fts_query("Veličković") == '"Veličković"'
+    assert build_fts_query("öğrenciler") == '"öğrenciler"'
 
 
 def test_reciprocal_rank_fusion_order() -> None:
