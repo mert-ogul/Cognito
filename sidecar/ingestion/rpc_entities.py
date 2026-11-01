@@ -632,9 +632,7 @@ def rpc_extract_entities(params: dict[str, Any]) -> dict[str, Any]:
         if not windows:
             continue
         window_texts = [w[2] for w in windows]
-        batched = extract_spans_batch(
-            app_data, window_texts, labels, threshold=_GLINER_THRESHOLD
-        )
+        batched = extract_spans_batch(app_data, window_texts, labels, threshold=_GLINER_THRESHOLD)
         seen: set[tuple[str, int, int]] = set()
         for (start, _end, _window), spans in zip(windows, batched):
             for sp in spans:

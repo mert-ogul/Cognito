@@ -131,16 +131,8 @@ def main() -> int:
             f"SQLite not found: {sqlite_path}\nPass --sqlite PATH or set COGNITO_SQLITE."
         )
 
-    app_data = (
-        args.app_data.expanduser().resolve()
-        if args.app_data
-        else sqlite_path.parent
-    )
-    embed_model = (
-        args.embed_model
-        or _read_setting(sqlite_path, "embed_model")
-        or _DEFAULT_EMBED
-    )
+    app_data = args.app_data.expanduser().resolve() if args.app_data else sqlite_path.parent
+    embed_model = args.embed_model or _read_setting(sqlite_path, "embed_model") or _DEFAULT_EMBED
 
     from common.text_norm import normalize_search_text
     from query.chat_pipeline import (
@@ -187,14 +179,13 @@ def main() -> int:
     print(f"labels: {labels}")
     print(f"profile_matches ({len(profile_matches)}):")
     for m in profile_matches[:8]:
-        print(
-            f"  score={m.get('score')} title={m.get('title')!r} "
-            f"id={m.get('documentId')}"
-        )
+        print(f"  score={m.get('score')} title={m.get('title')!r} id={m.get('documentId')}")
     print(f"find: {args.find!r} -> {len(hits)} chunk(s)")
     print()
 
-    def _lists(doc_ids: list[str] | None) -> tuple[
+    def _lists(
+        doc_ids: list[str] | None,
+    ) -> tuple[
         list[dict[str, Any]],
         list[dict[str, Any]],
         list[dict[str, Any]],
@@ -213,9 +204,7 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"vector_top_k failed (scope={doc_ids}): {exc}")
             v_chunks = []
-        k_chunks = keyword_top_k(
-            str(sqlite_path), search_text, _KEYWORD_K, document_ids=doc_ids
-        )
+        k_chunks = keyword_top_k(str(sqlite_path), search_text, _KEYWORD_K, document_ids=doc_ids)
         x_chunks = exact_token_top_k(
             str(sqlite_path), search_text, _KEYWORD_K, document_ids=doc_ids
         )
@@ -294,7 +283,9 @@ def main() -> int:
         # Rebuild ranked scores for pool order from candidates + rerank via pool re-score path
         from query.chat_pipeline import _rerank_pool
 
-        ranked, rr_meta = _rerank_pool(str(app_data), str(prep.get("searchText") or search_text), pool)
+        ranked, rr_meta = _rerank_pool(
+            str(app_data), str(prep.get("searchText") or search_text), pool
+        )
         for rank, (chunk, score) in enumerate(ranked, start=1):
             cid = str(chunk.get("chunk_id") or "")
             rerank_scores[cid] = float(score)
@@ -310,9 +301,7 @@ def main() -> int:
         print(f"skip_rerank=1 retrieval_ms={prep.get('retrievalMs')}")
         print()
 
-    final_ids = {
-        str(c.get("chunkId") or c.get("chunk_id") or "") for c in final_cites
-    }
+    final_ids = {str(c.get("chunkId") or c.get("chunk_id") or "") for c in final_cites}
 
     for hit in hits:
         cid = hit["chunk_id"]
@@ -320,7 +309,9 @@ def main() -> int:
         print(f"id: {cid}")
         print(f"title: {hit['title']}")
         print(f"path: {hit['path']}")
-        print(f"role: {hit['role']}  pages: {hit['page_start']}-{hit['page_end']}  ordinal: {hit['ordinal']}")
+        print(
+            f"role: {hit['role']}  pages: {hit['page_start']}-{hit['page_end']}  ordinal: {hit['ordinal']}"
+        )
         snippet = hit["text"].replace("\n", " ")
         if len(snippet) > 220:
             snippet = snippet[:220] + "…"

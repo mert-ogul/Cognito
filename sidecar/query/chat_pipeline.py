@@ -157,9 +157,7 @@ def _chunks_have_text_quality(con: sqlite3.Connection) -> bool:
 
 
 def _quality_sql(alias: str = "c") -> str:
-    return (
-        f" AND ({alias}.text_quality IS NULL OR {alias}.text_quality >= {TEXT_QUALITY_MIN})"
-    )
+    return f" AND ({alias}.text_quality IS NULL OR {alias}.text_quality >= {TEXT_QUALITY_MIN})"
 
 
 def reciprocal_rank_fusion(

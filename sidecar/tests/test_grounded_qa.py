@@ -276,17 +276,15 @@ def test_quote_in_passage_markdown_list_lines() -> None:
         "- Richard F. Gordon, Jr.\n"
         "- Alan L. Bean\n"
     )
-    quote = (
-        "Apollo 11\n"
-        "- Neil A. Armstrong\n"
-        "- Michael Collins\n"
-        "- Edwin E. Aldrin, Jr."
-    )
+    quote = "Apollo 11\n- Neil A. Armstrong\n- Michael Collins\n- Edwin E. Aldrin, Jr."
     assert quote_in_passage(quote, passage) is True
-    assert quote_in_passage(
-        "Apollo 11\nNeil A. Armstrong\nMichael Collins\nEdwin E. Aldrin, Jr.",
-        passage,
-    ) is True
+    assert (
+        quote_in_passage(
+            "Apollo 11\nNeil A. Armstrong\nMichael Collins\nEdwin E. Aldrin, Jr.",
+            passage,
+        )
+        is True
+    )
 
 
 def test_check_answer_keeps_full_crew_lists(monkeypatch: pytest.MonkeyPatch) -> None:

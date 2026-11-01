@@ -10,7 +10,9 @@ import fitz
 from ingestion.parsing import parse_file, _scan_status_from_pages, _title_is_junk
 
 
-def _text_page(doc: fitz.Document, text: str = "Mission report paragraph about lunar module.") -> None:
+def _text_page(
+    doc: fitz.Document, text: str = "Mission report paragraph about lunar module."
+) -> None:
     page = doc.new_page(width=400, height=600)
     page.insert_textbox(fitz.Rect(40, 40, 360, 560), (text + " ") * 12)
 

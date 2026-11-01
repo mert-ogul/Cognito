@@ -73,12 +73,15 @@ def test_dots_only_page_uses_ocr_when_mocked(tmp_path: Path) -> None:
     doc.close()
 
     ocr_blocks = [{"text": "Recovered OCR sentence.", "bbox": [10.0, 10.0, 200.0, 40.0]}]
-    with mock.patch(
-        "ingestion.parsing.platform.system",
-        return_value="Darwin",
-    ), mock.patch(
-        "ingestion.parsing._ocr_page_darwin",
-        return_value=("Recovered OCR sentence.", ocr_blocks),
+    with (
+        mock.patch(
+            "ingestion.parsing.platform.system",
+            return_value="Darwin",
+        ),
+        mock.patch(
+            "ingestion.parsing._ocr_page_darwin",
+            return_value=("Recovered OCR sentence.", ocr_blocks),
+        ),
     ):
         parsed = parse_file(pdf)
     assert parsed["pages"][0].get("ocr") is True

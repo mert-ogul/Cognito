@@ -26,9 +26,7 @@ def mock_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_extract_rare_tokens_codes_and_numbers() -> None:
-    toks = extract_rare_tokens(
-        "What caused the 1202 and 1201 alarms on AS-204 and MSC-00171?"
-    )
+    toks = extract_rare_tokens("What caused the 1202 and 1201 alarms on AS-204 and MSC-00171?")
     assert "1202" in toks
     assert "1201" in toks
     assert "AS-204" in toks
@@ -42,7 +40,7 @@ def test_chunk_text_quality_rejects_ocr_junk() -> None:
     )
     junk = (
         "\x1a\x17-'\x14/\u0601\u0bad\u0c49\x04\x01 &\x13 /#\x18!)!\x17'\x0e$\x18/!\x15/ "
-        "\x10\x1a \x16/(\x1a*\x14/\x14 \x1b%(\x14/(\x19\".\x1b \x16/\x16&\","
+        '\x10\x1a \x16/(\x1a*\x14/\x14 \x1b%(\x14/(\x19".\x1b \x16/\x16&",'
     )
     assert chunk_text_quality(prose) >= TEXT_QUALITY_MIN
     assert chunk_is_searchable(prose)
