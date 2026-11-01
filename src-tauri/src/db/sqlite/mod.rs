@@ -110,7 +110,9 @@ mod tests {
 
     #[test]
     fn open_sqlite_sets_busy_timeout_above_five_seconds() {
-        assert!(SQLITE_BUSY_TIMEOUT_SECS > 5);
+        const {
+            assert!(SQLITE_BUSY_TIMEOUT_SECS > 5);
+        }
         let dir = tempfile::tempdir().expect("tempdir");
         let p = dir.path().join("busy.sqlite");
         let c = open_sqlite(&p).expect("open");
