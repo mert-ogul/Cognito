@@ -200,14 +200,7 @@ fn embed_document_in_batches(
         } else {
             let _ = chat_gate::wait_until_chat_idle(state, IMPORT_CHAT_WAIT_CAP);
         }
-        let emb = embed_items_rpc(
-            state,
-            sqlite_path,
-            embed,
-            chat,
-            document_id,
-            batch.to_vec(),
-        )?;
+        let emb = embed_items_rpc(state, sqlite_path, embed, chat, document_id, batch.to_vec())?;
         let batch_failed = emb
             .get("failed")
             .and_then(|x| x.as_array())
@@ -1095,12 +1088,7 @@ mod tests {
         let main_py = sidecar_cwd.join("main.py");
         let log_path = data.path().join("logs").join("sidecar.log");
         std::fs::create_dir_all(log_path.parent().unwrap()).expect("logs");
-        let pool = SidecarPool::new(
-            main_py,
-            sidecar_cwd,
-            log_path,
-            data.path().to_path_buf(),
-        );
+        let pool = SidecarPool::new(main_py, sidecar_cwd, log_path, data.path().to_path_buf());
         let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
 
         state.chat_in_flight.fetch_add(1, Ordering::SeqCst);

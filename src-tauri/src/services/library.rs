@@ -111,7 +111,8 @@ mod tests {
                     c, "d1", "/a.md", "A", "markdown", "h", None, "indexed", None, None,
                 )?;
                 sqlite::insert_chunk_row(
-                    c, "c1", "d1", 0, None, None, "Ada", 1, "h1", "body", "[]", None, None)?;
+                    c, "c1", "d1", 0, None, None, "Ada", 1, "h1", "body", "[]", None, None,
+                )?;
                 c.execute(
                     "INSERT INTO entities(id, label, name, normalized, doc_count, mention_count)
                      VALUES ('e1', 'person', 'Ada', 'ada', 1, 1)",

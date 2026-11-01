@@ -304,7 +304,9 @@ mod tests {
             "h1",
             "body",
             "[]",
-            None, None)
+            None,
+            None,
+        )
         .expect("c1");
         let n: i64 = c
             .query_row(
@@ -347,7 +349,9 @@ mod tests {
             "h0",
             "body",
             "[]",
-            None, None)
+            None,
+            None,
+        )
         .expect("c0");
         insert_chunk_row(
             &c,
@@ -361,7 +365,9 @@ mod tests {
             "h1",
             "body",
             "[]",
-            None, None)
+            None,
+            None,
+        )
         .expect("c1");
         insert_chunk_row(
             &c,
@@ -375,7 +381,9 @@ mod tests {
             "h2",
             "body",
             "[]",
-            None, None)
+            None,
+            None,
+        )
         .expect("c2");
 
         let first = chunk_window(&c, "d1", "c0").expect("q").expect("first");
@@ -431,13 +439,17 @@ mod tests {
             "h0",
             "body",
             "[]",
-            None, None)
+            None,
+            None,
+        )
         .expect("c0");
         insert_chunk_row(
-            &c, "c1", "d_rare", 0, None, None, "Cora", 1, "h1", "body", "[]", None, None)
+            &c, "c1", "d_rare", 0, None, None, "Cora", 1, "h1", "body", "[]", None, None,
+        )
         .expect("c1");
         insert_chunk_row(
-            &c, "c2", "d_common", 0, None, None, "IEEE", 1, "h2", "body", "[]", None, None)
+            &c, "c2", "d_common", 0, None, None, "IEEE", 1, "h2", "body", "[]", None, None,
+        )
         .expect("c2");
         c.execute_batch(
             "
@@ -482,10 +494,12 @@ mod tests {
         )
         .expect("d2");
         insert_chunk_row(
-            &c, "c1", "d1", 0, None, None, "Ada", 1, "h1", "body", "[]", None, None)
+            &c, "c1", "d1", 0, None, None, "Ada", 1, "h1", "body", "[]", None, None,
+        )
         .expect("c1");
         insert_chunk_row(
-            &c, "c2", "d2", 0, None, None, "Ada", 1, "h2", "body", "[]", None, None)
+            &c, "c2", "d2", 0, None, None, "Ada", 1, "h2", "body", "[]", None, None,
+        )
         .expect("c2");
         c.execute_batch(
             "

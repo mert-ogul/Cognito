@@ -147,7 +147,6 @@ def main() -> int:
         _KEYWORD_K,
         _RERANK_POOL,
         _VECTOR_K,
-        _retrieve_pool,
         apply_label_boost,
         embed_query_text,
         exact_token_top_k,

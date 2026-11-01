@@ -569,7 +569,9 @@ mod tests {
         let before = ollama_stream::UNLOAD_CALLS.load(AtomicOrdering::SeqCst);
         let handle = {
             let state = state.clone();
-            thread::spawn(move || chat_gate::wait_while_chat_in_flight(&state, "doc-unload", WaitKind::Card))
+            thread::spawn(move || {
+                chat_gate::wait_while_chat_in_flight(&state, "doc-unload", WaitKind::Card)
+            })
         };
         thread::sleep(Duration::from_millis(600));
         let mid = ollama_stream::UNLOAD_CALLS.load(AtomicOrdering::SeqCst);
@@ -651,7 +653,9 @@ mod tests {
                     "h",
                     "body",
                     "[]",
-                    None, None)?;
+                    None,
+                    None,
+                )?;
                 c.execute(
                     "UPDATE documents SET card_status = 'pending' WHERE id = 'doc-pause'",
                     [],
