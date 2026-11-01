@@ -1,6 +1,6 @@
 # Manual QA checklist
 
-Use this list before tagging a release candidate or public alpha.
+Run through this before tagging a release candidate or a public alpha. Tick items on a real machine with Ollama installed; automated CI does not cover these paths.
 
 ## Environment
 
@@ -8,7 +8,7 @@ Use this list before tagging a release candidate or public alpha.
 - [ ] Missing Ollama: with Ollama stopped, the banner and chat stay blocked with a clear message.
 - [ ] Missing model: a wrong or unpulled model name surfaces a readable error; Retry after pull works.
 
-## Vault and import
+## Library and import
 
 - [ ] Choosing a folder indexes PDF and Markdown within the 100-document first-import cap.
 - [ ] Import progress shows in Sources without freezing the shell.
@@ -19,7 +19,7 @@ Use this list before tagging a release candidate or public alpha.
 
 - [ ] After import, document cards fill in and Connections Index lists extracted names when find-names is on.
 - [ ] Embedding failures mark documents failed; the rest of the app stays usable.
-- [ ] Entity extraction failure does not corrupt the vault; chat still works.
+- [ ] Entity extraction failure does not corrupt the library; chat still works.
 
 ## Chat and citations
 
@@ -37,8 +37,8 @@ Use this list before tagging a release candidate or public alpha.
 ## Reliability
 
 - [ ] With Ollama off after an index exists, missing query embeddings produce an explicit message.
-- [ ] Restarting the app recovers without reinstalling; vault data stays intact.
-- [ ] Removing a vault file is handled without crashing the shell.
+- [ ] Restarting the app recovers without reinstalling; library data stays intact.
+- [ ] Removing a library file is handled without crashing the shell.
 
 ## Packaged build
 

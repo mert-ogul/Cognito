@@ -44,7 +44,9 @@ mod tests {
             assert_eq!(d, 3);
             complete_ok(&c, "j1").expect("done");
             let s: String = c
-                .query_row("SELECT status FROM import_jobs WHERE id='j1'", [], |r| r.get(0))
+                .query_row("SELECT status FROM import_jobs WHERE id='j1'", [], |r| {
+                    r.get(0)
+                })
                 .expect("s");
             assert_eq!(s, "completed");
         }

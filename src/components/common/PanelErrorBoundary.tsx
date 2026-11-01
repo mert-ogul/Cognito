@@ -24,7 +24,7 @@ export class PanelErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       return (
         <div className="flex h-full min-h-0 flex-col gap-2 p-3">
-          <p className="font-medium text-text">This panel hit an error</p>
+          <p className="font-medium text-text">Something went wrong in this panel</p>
           <p className="text-danger" role="alert">
             {this.state.error.message}
           </p>

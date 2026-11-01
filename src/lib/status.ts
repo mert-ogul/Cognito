@@ -7,7 +7,7 @@ export type StatusLine = {
   tone: StatusTone;
 };
 
-/** Single most important status line for the toolbar, or null when all is well. */
+/** Toolbar status when something needs attention; null when all is well. */
 export function describeStatus(
   health: AppHealth | undefined,
   importProgress: ImportProgress | null | undefined,
@@ -41,6 +41,9 @@ export function describeStatus(
     importProgress.status !== "failed" &&
     importProgress.phase !== "done"
   ) {
+    if (importProgress.phase === "paused_for_chat") {
+      return { text: "Indexing paused while answering", tone: "muted" };
+    }
     return {
       text: `Indexing ${importProgress.completedFiles} of ${importProgress.totalFiles}`,
       tone: "muted",

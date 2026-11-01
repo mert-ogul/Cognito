@@ -4,6 +4,13 @@ import {
   E2E_DOCUMENT_CARD,
   E2E_HEALTH,
   E2E_SUGGESTED_QUESTIONS,
+  e2eAppendTurn,
+  e2eClearConversations,
+  e2eCreateConversation,
+  e2eDeleteConversation,
+  e2eFinishAssistant,
+  e2eGetConversation,
+  e2eListConversations,
 } from "@/lib/e2e-fixtures";
 import { e2eEmit } from "@/lib/tauri-events";
 
@@ -136,9 +143,85 @@ export async function setVault(path: string): Promise<string | null> {
 
 export async function clearLibrary(): Promise<void> {
   if (e2e) {
+    e2eClearConversations();
     return;
   }
   return invoke("clear_library");
+}
+
+export type ConversationListItem = {
+  id: string;
+  title: string;
+  updatedAt: string;
+};
+
+export type StoredChatMessage = {
+  id: string;
+  conversationId: string;
+  position: number;
+  role: string;
+  status: string;
+  content: string;
+  payload: Record<string, unknown> | null;
+  createdAt: string;
+};
+
+export type ConversationDetail = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: StoredChatMessage[];
+};
+
+export async function listConversations(): Promise<ConversationListItem[]> {
+  if (e2e) {
+    return e2eListConversations();
+  }
+  return invoke("list_conversations");
+}
+
+export async function getConversation(
+  id: string,
+): Promise<ConversationDetail | null> {
+  if (e2e) {
+    const c = e2eGetConversation(id);
+    if (!c) return null;
+    return {
+      id: c.id,
+      title: c.title,
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+      messages: c.messages.map((m) => ({
+        id: m.id,
+        conversationId: m.conversationId,
+        position: m.position,
+        role: m.role,
+        status: m.status,
+        content: m.content,
+        payload: m.payload,
+        createdAt: m.createdAt,
+      })),
+    };
+  }
+  return invoke("get_conversation", { id });
+}
+
+export async function createConversation(
+  title: string,
+): Promise<ConversationListItem> {
+  if (e2e) {
+    return e2eCreateConversation(title);
+  }
+  return invoke("create_conversation", { title });
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+  if (e2e) {
+    e2eDeleteConversation(id);
+    return;
+  }
+  return invoke("delete_conversation", { id });
 }
 
 export async function listDocuments(): Promise<DocumentRow[]> {
@@ -313,8 +396,10 @@ export async function sendChatQuery(
   messageId: string,
   history: ChatTurn[] = [],
   scopeIds: string[] = [],
+  conversationId = "",
 ): Promise<string> {
   if (e2e) {
+    e2eAppendTurn(conversationId, query, messageId);
     const citations = [
       {
         documentId: "e2e-doc-1",
@@ -328,22 +413,33 @@ export async function sendChatQuery(
         index: 1,
       },
     ];
+    const sentences = [
+      {
+        text: "Hello world.",
+        status: "supported",
+        sources: [1],
+      },
+    ];
     window.setTimeout(() => {
       e2eEmit("chat-stage", {
         messageId,
+        conversationId,
         stage: "passages",
         citations,
       });
+      e2eFinishAssistant(messageId, "Hello world.", {
+        citations,
+        sentences,
+        notFound: false,
+        scopeTitle: null,
+        suggestions: [],
+        error: null,
+      });
       e2eEmit("chat-final", {
         messageId,
+        conversationId,
         citations,
-        sentences: [
-          {
-            text: "Hello world.",
-            status: "supported",
-            sources: [1],
-          },
-        ],
+        sentences,
         notFound: false,
         retrievalMode: "hybrid",
         error: null,
@@ -353,7 +449,13 @@ export async function sendChatQuery(
     }, 30);
     return messageId;
   }
-  return invoke<string>("send_chat_query", { query, messageId, history, scopeIds });
+  return invoke<string>("send_chat_query", {
+    query,
+    messageId,
+    conversationId,
+    history,
+    scopeIds,
+  });
 }
 
 export async function prepareModels(): Promise<ModelsStatus> {
@@ -507,16 +609,32 @@ export async function sendRelatedQuery(
   entityIdA: string,
   entityIdB: string,
   messageId: string,
+  conversationId = "",
 ): Promise<string> {
   if (e2e) {
+    e2eAppendTurn(
+      conversationId,
+      `How are ${entityIdA} and ${entityIdB} related?`,
+      messageId,
+    );
     window.setTimeout(() => {
       e2eEmit("chat-stage", {
         messageId,
+        conversationId,
         stage: "passages",
         citations: [],
       });
+      e2eFinishAssistant(messageId, "", {
+        citations: [],
+        sentences: [],
+        notFound: true,
+        scopeTitle: null,
+        suggestions: [],
+        error: null,
+      });
       e2eEmit("chat-final", {
         messageId,
+        conversationId,
         citations: [],
         sentences: [],
         notFound: true,
@@ -532,6 +650,7 @@ export async function sendRelatedQuery(
     entityIdA,
     entityIdB,
     messageId,
+    conversationId,
   });
 }
 

@@ -27,7 +27,7 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msv
 npx tauri build --target aarch64-apple-darwin
 ```
 
-Prefer native runners for Apple binaries when possible.
+Prefer native runners for Apple binaries when you can.
 
 ## Development vs packaged paths
 

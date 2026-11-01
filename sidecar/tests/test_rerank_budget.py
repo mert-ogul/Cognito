@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import pytest
+
 from common import model_store as ms
 
 

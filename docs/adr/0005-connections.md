@@ -6,7 +6,7 @@ Accepted (supersedes the earlier DuckDB / LightRAG graph and the Map view)
 
 ## Context
 
-Cognito used a background LLM pass to extract graph nodes and edges into a second database, then showed a free-form graph pane and later a Map of document points. Extraction was slow, relation quality was uneven on small local models, and a second database made backup and purge harder. Document cards already surface people and organisations per file. What users need is reliable names that link documents, not a free-form knowledge graph or a map of topics.
+Cognito used a background LLM pass to extract graph nodes and edges into a second database, then showed a free-form graph pane and later a Map of document points. Extraction was slow, relation quality was uneven on small local models, and a second database made backup and purge harder. Document cards already surface people and organisations per file. What users need is reliable names that link documents — not a free-form knowledge graph or a map of topics.
 
 ## Decision
 

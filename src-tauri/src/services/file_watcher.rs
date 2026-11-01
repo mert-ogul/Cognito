@@ -16,7 +16,6 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
-
 fn load_context(state: &SharedState) -> CognitoResult<(PathBuf, String, String)> {
     state.with_sqlite(|c| {
         let v = sqlite::get_setting(c, "vault_path")?
@@ -72,20 +71,21 @@ pub fn handle_watch_paths(state: &SharedState, app: Option<&AppHandle>, paths: &
 fn watch_thread(root: PathBuf, stop: Arc<AtomicBool>, out: Sender<Vec<PathBuf>>) {
     use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
     let tx = out.clone();
-    let debouncer = new_debouncer(Duration::from_millis(800), move |res: DebounceEventResult| {
-        if let Ok(events) = res {
-            let paths: Vec<PathBuf> = events.iter().map(|e| e.path.clone()).collect();
-            if !paths.is_empty() {
-                let _ = tx.send(paths);
+    let debouncer = new_debouncer(
+        Duration::from_millis(800),
+        move |res: DebounceEventResult| {
+            if let Ok(events) = res {
+                let paths: Vec<PathBuf> = events.iter().map(|e| e.path.clone()).collect();
+                if !paths.is_empty() {
+                    let _ = tx.send(paths);
+                }
             }
-        }
-    });
+        },
+    );
     let Ok(mut debouncer) = debouncer else {
         return;
     };
-    let _ = debouncer
-        .watcher()
-        .watch(&root, RecursiveMode::Recursive);
+    let _ = debouncer.watcher().watch(&root, RecursiveMode::Recursive);
     while !stop.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(200));
     }

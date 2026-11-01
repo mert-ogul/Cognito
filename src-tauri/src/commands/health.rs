@@ -14,9 +14,7 @@ pub async fn get_app_health(state: tauri::State<'_, SharedState>) -> Result<AppH
 }
 
 #[tauri::command]
-pub async fn warm_chat_model(
-    state: tauri::State<'_, SharedState>,
-) -> Result<(), String> {
+pub async fn warm_chat_model(state: tauri::State<'_, SharedState>) -> Result<(), String> {
     if state.chat_warm_ready().is_none() {
         return Ok(());
     }

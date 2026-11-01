@@ -22,7 +22,7 @@ const base: AppHealth = {
 describe("OllamaSetupBanner", () => {
   it("shows not-running message when Ollama is unreachable", () => {
     render(<OllamaSetupBanner health={{ ...base, ollamaReachable: false }} />);
-    expect(screen.getByText("Ollama is not running")).toBeInTheDocument();
+    expect(screen.getByText("Ollama isn't running")).toBeInTheDocument();
     expect(screen.getByText(/ollama serve/)).toBeInTheDocument();
   });
 
@@ -36,7 +36,7 @@ describe("OllamaSetupBanner", () => {
         }}
       />,
     );
-    expect(screen.getByText("Required Ollama models are missing")).toBeInTheDocument();
+    expect(screen.getByText("These Ollama models are missing")).toBeInTheDocument();
     expect(screen.getByText("ollama pull qwen3.5:9b")).toBeInTheDocument();
     expect(screen.getByText("ollama pull qwen3-embedding:0.6b")).toBeInTheDocument();
   });

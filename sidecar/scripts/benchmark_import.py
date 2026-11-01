@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""
-Measure import/index pipeline phases on a fixture corpus (local dev / RC).
+"""Time import phases on a fixture corpus (local / RC).
 
-Phases (seconds):
-  parse, chunk, sqlite insert, embed, graph extraction (optional), query (optional)
+Reports seconds for parse, chunk, SQLite insert, embed, and optional query.
+Needs sidecar deps (`uv sync`). Defaults to COGNITO_MOCK_EMBED=1 so Ollama is
+not required for parse/chunk/embed. Entity extraction runs in the desktop app
+and is not timed here.
 
-Requires: sidecar deps (`uv sync`). Default uses COGNITO_MOCK_EMBED=1 so Ollama is not needed
-for parse/chunk/embed timings. Graph extraction runs in the Rust desktop app (not timed here).
-
-Memory: `getrusage` max RSS at start/end (`memoryMaxRssBytes`); **macOS reports bytes**, Linux reports KiB converted to bytes in the script.
+`memoryMaxRssBytes` uses getrusage max RSS (bytes on macOS; Linux KiB converted
+to bytes in this script).
 """
 
 from __future__ import annotations
@@ -25,7 +24,6 @@ from pathlib import Path
 
 # ru_maxrss: bytes on macOS, kilobytes on Linux (see getrusage(2)).
 
-# Repo root: sidecar/scripts -> parents[1] == sidecar
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -93,7 +91,9 @@ def main() -> int:
         default=True,
         help="Use COGNITO_MOCK_EMBED=1 (default: true)",
     )
-    parser.add_argument("--skip-query", action="store_true", help="Skip prepare_chat_retrieval timing")
+    parser.add_argument(
+        "--skip-query", action="store_true", help="Skip prepare_chat_retrieval timing"
+    )
     parser.add_argument(
         "--embed-model",
         default=os.environ.get("COGNITO_BENCH_EMBED_MODEL", "nomic-embed-text"),
@@ -119,7 +119,6 @@ def main() -> int:
             print(json.dumps({"error": "no corpus files"}, indent=2))
             return 1
 
-        # --- parse (batch RPC) ---
         t_parse0 = time.perf_counter()
         vault_root = str(paths[0].parent.resolve())
         abs_paths = [str(p.resolve()) for p in paths]
@@ -128,7 +127,6 @@ def main() -> int:
         items = parsed.get("items") or []
         errs = parsed.get("errors") or []
 
-        # --- chunk ---
         t_chunk0 = time.perf_counter()
         chunked = rpc_chunk_documents({"items": items})
         chunk_s = time.perf_counter() - t_chunk0
@@ -141,7 +139,6 @@ def main() -> int:
         now = "2020-01-01T00:00:00Z"
         by_path = {str(Path(it["path"]).resolve()): it for it in items}
 
-        # --- insert rows + embed per document ---
         t_db0 = time.perf_counter()
         t_embed_total = 0.0
         for idx, pack in enumerate(chunk_items):

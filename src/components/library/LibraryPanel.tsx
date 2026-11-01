@@ -15,6 +15,7 @@ import {
 } from "@/lib/tauri";
 import { useTauriEvent } from "@/lib/tauri-events";
 import { cn } from "@/lib/utils";
+import { fileName } from "@/lib/format";
 import { useChatIntentStore } from "@/stores/chatIntentStore";
 import { useMainViewStore } from "@/stores/mainViewStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -24,10 +25,6 @@ import engravedLight from "@/assets/branding/cognito-engraved-light.svg";
 
 type SortKey = "title" | "type" | "date" | "pages";
 
-function fileName(path: string): string {
-  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return i >= 0 ? path.slice(i + 1) : path;
-}
 
 function folderName(path: string | null | undefined): string {
   if (!path) return "";
@@ -51,20 +48,7 @@ function peopleOrOrgs(d: DocumentRow): string[] {
   return [...people, ...orgs].filter((s) => s.trim().length > 0);
 }
 
-function scanStatusWords(status: string | null | undefined): string | null {
-  if (status == null || status.trim() === "") return null;
-  const s = status.trim().toLowerCase();
-  if (
-    s === "no_text" ||
-    s === "empty" ||
-    s === "no text found" ||
-    s.includes("no_text") ||
-    s.includes("no text")
-  ) {
-    return "No text found";
-  }
-  return "Scanned, text recognised";
-}
+
 
 function secondaryLine(d: DocumentRow): string {
   const parts: string[] = [];
@@ -74,8 +58,6 @@ function secondaryLine(d: DocumentRow): string {
   const names = peopleOrOrgs(d).slice(0, 2);
   if (names.length) parts.push(names.join(", "));
   if (d.pageCount != null) parts.push(`${d.pageCount} pages`);
-  const scan = scanStatusWords(d.scanStatus);
-  if (scan) parts.push(scan);
   return parts.join(" · ");
 }
 

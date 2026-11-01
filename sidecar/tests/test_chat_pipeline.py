@@ -98,9 +98,7 @@ def test_citations_carry_index_no_messages(
     monkeypatch.setattr(cp, "vector_top_k", lambda *a, **k: _fake_chunks())
     monkeypatch.setattr(cp, "keyword_top_k", lambda *a, **k: [])
     d = tempfile.mkdtemp()
-    out = cp.prepare_chat_retrieval(
-        str(Path(d) / "v.sqlite"), "what is ml", "nomic-embed-text"
-    )
+    out = cp.prepare_chat_retrieval(str(Path(d) / "v.sqlite"), "what is ml", "nomic-embed-text")
     assert "messages" not in out
     assert out["notFound"] is False
     assert [c["index"] for c in out["citations"]] == [1, 2]
@@ -120,9 +118,7 @@ def test_embed_query_includes_previous_user_question() -> None:
     )
 
 
-def test_vector_search_uses_embed_query(
-    mock_embed: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_vector_search_uses_embed_query(mock_embed: None, monkeypatch: pytest.MonkeyPatch) -> None:
     import query.chat_pipeline as cp
 
     seen: list[str] = []

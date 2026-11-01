@@ -14,4 +14,4 @@ Retrieval is fixed. The query runs vector search and keyword search, and also ma
 
 ## Consequences
 
-The same index and models produce the same retrieval shape, which keeps tests and debugging straightforward. Rerank or check failures surface as empty or refused answers rather than inventing unsupported text.
+The same index and models produce the same retrieval shape, which keeps tests and debugging straightforward. Rerank or check failures surface as empty or refused answers; they do not invent unsupported text.

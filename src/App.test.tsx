@@ -25,6 +25,9 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "list_documents") {
       return [];
     }
+    if (cmd === "list_conversations") {
+      return [];
+    }
     if (cmd === "get_graph_snapshot") {
       return { nodes: [], edges: [] };
     }
@@ -58,7 +61,8 @@ describe("App shell", () => {
       </QueryClientProvider>,
     );
     expect(screen.getByRole("img", { name: "Cognito" })).toBeInTheDocument();
-    expect(screen.getByText("Library")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Library", pressed: true })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Chats" })).toBeInTheDocument();
     expect(screen.getByLabelText("Chat message")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connections" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open settings" })).toBeInTheDocument();

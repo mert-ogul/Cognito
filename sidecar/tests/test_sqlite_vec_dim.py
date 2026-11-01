@@ -11,9 +11,19 @@ from common.sqlite_vec_util import (
     connect_with_vec,
     ensure_chunk_embedding_table,
     insert_chunk_embedding,
+    require_sqlite_path,
     table_dimension,
 )
 from ingestion.rpc_ingest import rpc_reset_index
+
+
+def test_require_sqlite_path_rejects_none() -> None:
+    with pytest.raises(ValueError, match="SQLite path is missing"):
+        require_sqlite_path(None)
+    with pytest.raises(ValueError, match="SQLite path is missing"):
+        require_sqlite_path("None")
+    with pytest.raises(ValueError, match="SQLite path is missing"):
+        connect_with_vec(None)  # type: ignore[arg-type]
 
 
 def test_table_dimension_reads_size(tmp_path: Path) -> None:

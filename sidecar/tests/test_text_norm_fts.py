@@ -28,7 +28,9 @@ def test_line_end_hyphen_joined() -> None:
 
 
 def test_fix_pdf_accents_before_nfkc() -> None:
-    nfkc = lambda s: unicodedata.normalize("NFKC", s)
+    def nfkc(s: str) -> str:
+        return unicodedata.normalize("NFKC", s)
+
     assert nfkc(fix_pdf_accents(f"Barab{ACUTE}asi")) == nfkc("Barabási")
     assert nfkc(fix_pdf_accents(f"Veli{CARON}ckovi{ACUTE}c")) == nfkc("Veličković")
     assert nfkc(fix_pdf_accents(f"Li{GRAVE}o")) == nfkc("Liò")

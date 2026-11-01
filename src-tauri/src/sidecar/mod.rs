@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -56,7 +56,12 @@ fn prepare_log_file(log_path: &Path) -> CognitoResult<File> {
 }
 
 impl SidecarSession {
-    pub fn spawn(main_py: &Path, cwd: &Path, log_path: &Path, app_data: &Path) -> CognitoResult<Self> {
+    pub fn spawn(
+        main_py: &Path,
+        cwd: &Path,
+        log_path: &Path,
+        app_data: &Path,
+    ) -> CognitoResult<Self> {
         let py = resolve_python_executable(cwd);
         let program = py.to_string_lossy().into_owned();
         let log_file = prepare_log_file(log_path)?;
@@ -366,7 +371,12 @@ for line in sys.stdin:
         let dir = tempfile::tempdir().expect("tmpdir");
         let main_py = write_tiny_sidecar(dir.path());
         let log = dir.path().join("sidecar.log");
-        let pool = SidecarPool::new(main_py, dir.path().to_path_buf(), log, dir.path().to_path_buf());
+        let pool = SidecarPool::new(
+            main_py,
+            dir.path().to_path_buf(),
+            log,
+            dir.path().to_path_buf(),
+        );
 
         pool.with_session(|s| s.request("ping", json!({})))
             .expect("initial ping");
@@ -377,9 +387,8 @@ for line in sys.stdin:
         pool.with_session(|s| s.request("ping", json!({})))
             .expect("ping after crash");
 
-        let hang = pool.with_session(|s| {
-            s.request_with_timeout("hang", json!({}), Duration::from_secs(1))
-        });
+        let hang = pool
+            .with_session(|s| s.request_with_timeout("hang", json!({}), Duration::from_secs(1)));
         assert!(hang.is_err(), "hang should timeout");
 
         pool.with_session(|s| s.request("ping", json!({})))

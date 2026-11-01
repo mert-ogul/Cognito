@@ -26,15 +26,11 @@ _SPACING_ACCENTS = {
         (0x02DD, 0x030B),
     )
 }
-_ACCENT_BEFORE_LETTER_RE = re.compile(
-    "([" + "".join(_SPACING_ACCENTS) + r"])([^\W\d_])"
-)
+_ACCENT_BEFORE_LETTER_RE = re.compile("([" + "".join(_SPACING_ACCENTS) + r"])([^\W\d_])")
 
 
 def fix_pdf_accents(text: str) -> str:
-    return _ACCENT_BEFORE_LETTER_RE.sub(
-        lambda m: m.group(2) + _SPACING_ACCENTS[m.group(1)], text
-    )
+    return _ACCENT_BEFORE_LETTER_RE.sub(lambda m: m.group(2) + _SPACING_ACCENTS[m.group(1)], text)
 
 
 _MONTHS = {

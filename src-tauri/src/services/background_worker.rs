@@ -5,16 +5,16 @@ use crate::db::sqlite;
 use crate::errors::CognitoResult;
 use crate::events::{BACKGROUND_PROGRESS, LIBRARY_CHANGED};
 use crate::models::BackgroundProgress;
+use crate::services::chat_gate::{self, WaitKind};
 use crate::services::document_cards;
 use crate::services::ollama_stream;
+use crate::vault;
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
-use crate::vault;
-
 
 pub(crate) fn emit_progress(
     app: Option<&AppHandle>,
@@ -39,7 +39,7 @@ pub(crate) fn emit_progress(
 
 fn background_and_chat_models(state: &SharedState) -> (String, String) {
     state
-        .with_sqlite(|c| sqlite::load_settings(c))
+        .with_sqlite(sqlite::load_settings)
         .map(|s| (s.background_model, s.chat_model))
         .unwrap_or_else(|_| ("qwen3.5:9b".into(), "qwen3.5:9b".into()))
 }
@@ -50,56 +50,6 @@ fn unload_background(state: &SharedState) {
         return;
     }
     ollama_stream::unload_model_blocking(&background);
-}
-
-enum WaitKind {
-    Entities,
-    Card,
-}
-
-fn wait_while_chat_in_flight(
-    state: &SharedState,
-    document_id: &str,
-    kind: WaitKind,
-) -> CognitoResult<bool> {
-    let mut unloaded = false;
-    while state.chat_in_flight.load(Ordering::SeqCst) > 0 {
-        if !unloaded {
-            unload_background(state);
-            unloaded = true;
-        }
-        match kind {
-            WaitKind::Card => {
-                let still = state.with_sqlite(|c| sqlite::document_card_still_running(c, document_id))?;
-                if !still {
-                    return Ok(false);
-                }
-                let enabled = state
-                    .with_sqlite(|c| sqlite::load_settings(c))?
-                    .summarise_documents;
-                if !enabled {
-                    state.with_sqlite(|c| sqlite::mark_document_card_pending(c, document_id))?;
-                    return Ok(false);
-                }
-            }
-            WaitKind::Entities => {
-                let still =
-                    state.with_sqlite(|c| sqlite::document_entities_still_running(c, document_id))?;
-                if !still {
-                    return Ok(false);
-                }
-                let enabled = state
-                    .with_sqlite(|c| sqlite::load_settings(c))?
-                    .extract_entities;
-                if !enabled {
-                    state.with_sqlite(|c| sqlite::mark_document_entities_pending(c, document_id))?;
-                    return Ok(false);
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-    Ok(true)
 }
 
 enum DocOutcome {
@@ -122,7 +72,7 @@ fn process_one_entities(
     app: Option<&AppHandle>,
     document_id: &str,
 ) -> CognitoResult<DocOutcome> {
-    let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
+    let settings = state.with_sqlite(sqlite::load_settings)?;
     if !settings.extract_entities {
         return Ok(DocOutcome::Finished);
     }
@@ -132,7 +82,7 @@ fn process_one_entities(
         Ok(())
     })?;
     emit_progress(app, None, document_id, "entities", None);
-    if !wait_while_chat_in_flight(state, document_id, WaitKind::Entities)? {
+    if !chat_gate::wait_while_chat_in_flight(state, document_id, WaitKind::Entities)? {
         return Ok(DocOutcome::Finished);
     }
     let sqlite_path = state.sqlite_path();
@@ -146,7 +96,7 @@ fn process_one_entities(
         .collect();
     let mut chunk_offset = 0i64;
     loop {
-        if !wait_while_chat_in_flight(state, document_id, WaitKind::Entities)? {
+        if !chat_gate::wait_while_chat_in_flight(state, document_id, WaitKind::Entities)? {
             return Ok(DocOutcome::Finished);
         }
         let res = state.sidecar.with_session(|s| {
@@ -194,7 +144,8 @@ fn process_one_entities(
                 let detail = format!("{shown} of {total} passages");
                 emit_progress(app, None, document_id, "entities", Some(&detail));
                 if done {
-                    state.with_sqlite(|c| sqlite::mark_document_entities_ok(c, document_id, None))?;
+                    state
+                        .with_sqlite(|c| sqlite::mark_document_entities_ok(c, document_id, None))?;
                     emit_progress(app, None, document_id, "ok", None);
                     if let Some(a) = app {
                         let _ = a.emit(LIBRARY_CHANGED, &());
@@ -206,7 +157,8 @@ fn process_one_entities(
             Err(e) => {
                 let msg = e.to_string();
                 if crate::services::checking_models::is_missing_model_error(&msg) {
-                    state.with_sqlite(|c| sqlite::mark_document_entities_pending(c, document_id))?;
+                    state
+                        .with_sqlite(|c| sqlite::mark_document_entities_pending(c, document_id))?;
                     emit_progress(app, None, document_id, "pending", Some(&msg));
                     if let Some(a) = app {
                         let _ = a.emit(LIBRARY_CHANGED, &());
@@ -214,16 +166,16 @@ fn process_one_entities(
                     return Ok(DocOutcome::Pause);
                 }
                 if ollama_stream::ollama_unreachable(&e) {
-                    state.with_sqlite(|c| sqlite::mark_document_entities_pending(c, document_id))?;
+                    state
+                        .with_sqlite(|c| sqlite::mark_document_entities_pending(c, document_id))?;
                     emit_progress(app, None, document_id, "pending", Some(&msg));
                     if let Some(a) = app {
                         let _ = a.emit(LIBRARY_CHANGED, &());
                     }
                     return Ok(DocOutcome::Pause);
                 }
-                state.with_sqlite(|c| {
-                    sqlite::mark_document_entities_failed(c, document_id, &msg)
-                })?;
+                state
+                    .with_sqlite(|c| sqlite::mark_document_entities_failed(c, document_id, &msg))?;
                 emit_progress(app, None, document_id, "failed", Some(&msg));
                 if let Some(a) = app {
                     let _ = a.emit(LIBRARY_CHANGED, &());
@@ -239,13 +191,13 @@ fn process_one_card(
     app: Option<&AppHandle>,
     document_id: &str,
 ) -> CognitoResult<DocOutcome> {
-    let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
+    let settings = state.with_sqlite(sqlite::load_settings)?;
     if !settings.summarise_documents {
         return Ok(DocOutcome::Finished);
     }
     state.with_sqlite(|c| sqlite::mark_document_card_running(c, document_id))?;
     emit_progress(app, None, document_id, "summarising", None);
-    if !wait_while_chat_in_flight(state, document_id, WaitKind::Card)? {
+    if !chat_gate::wait_while_chat_in_flight(state, document_id, WaitKind::Card)? {
         return Ok(DocOutcome::Finished);
     }
     match document_cards::build_and_store_card(state, document_id) {
@@ -264,7 +216,7 @@ fn process_one_card(
             if let Some(a) = app {
                 let _ = a.emit(LIBRARY_CHANGED, &());
             }
-            let _ = wait_while_chat_in_flight(state, document_id, WaitKind::Card)?;
+            let _ = chat_gate::wait_while_chat_in_flight(state, document_id, WaitKind::Card)?;
             Ok(DocOutcome::Finished)
         }
         Err(e) => {
@@ -305,14 +257,14 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> ProcessP
 
     loop {
         let enabled = state
-            .with_sqlite(|c| sqlite::load_settings(c))
+            .with_sqlite(sqlite::load_settings)
             .map(|s| s.extract_entities)
             .unwrap_or(true);
         if !enabled {
             break;
         }
         let next = state
-            .with_sqlite(|c| sqlite::next_pending_entities_document(c))
+            .with_sqlite(sqlite::next_pending_entities_document)
             .ok()
             .flatten();
         let Some(doc_id) = next else {
@@ -336,7 +288,8 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> ProcessP
                     pause = true;
                     break;
                 }
-                let _ = state.with_sqlite(|c| sqlite::mark_document_entities_failed(c, &doc_id, &msg));
+                let _ =
+                    state.with_sqlite(|c| sqlite::mark_document_entities_failed(c, &doc_id, &msg));
                 emit_progress(app, None, &doc_id, "failed", Some(&msg));
                 if let Some(a) = app {
                     let _ = a.emit(LIBRARY_CHANGED, &());
@@ -347,27 +300,27 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> ProcessP
     }
 
     let entity_queue_empty = state
-        .with_sqlite(|c| sqlite::next_pending_entities_document(c))
+        .with_sqlite(sqlite::next_pending_entities_document)
         .ok()
         .flatten()
         .is_none();
     if entity_queue_empty {
-        let _ = state.sidecar.with_session(|s| {
-            s.request("unload_entity_model", json!({}))
-        });
+        let _ = state
+            .sidecar
+            .with_session(|s| s.request("unload_entity_model", json!({})));
     }
 
     if !pause {
         loop {
             let summarise = state
-                .with_sqlite(|c| sqlite::load_settings(c))
+                .with_sqlite(sqlite::load_settings)
                 .map(|s| s.summarise_documents)
                 .unwrap_or(true);
             if !summarise {
                 break;
             }
             let next = state
-                .with_sqlite(|c| sqlite::next_pending_card_document(c))
+                .with_sqlite(sqlite::next_pending_card_document)
                 .ok()
                 .flatten();
             let Some(doc_id) = next else {
@@ -381,7 +334,8 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> ProcessP
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    let _ = state.with_sqlite(|c| sqlite::mark_document_card_failed(c, &doc_id, &msg));
+                    let _ =
+                        state.with_sqlite(|c| sqlite::mark_document_card_failed(c, &doc_id, &msg));
                     emit_progress(app, None, &doc_id, "failed", Some(&msg));
                     if let Some(a) = app {
                         let _ = a.emit(LIBRARY_CHANGED, &());
@@ -394,14 +348,17 @@ pub fn process_pending(state: &SharedState, app: Option<&AppHandle>) -> ProcessP
 
     if !pause {
         let busy = state
-            .with_sqlite(|c| sqlite::pending_entities_or_cards_remain(c))
+            .with_sqlite(sqlite::pending_entities_or_cards_remain)
             .unwrap_or(true);
         if !busy {
             recompute_links(state);
         }
         unload_background(state);
     }
-    ProcessPendingOutcome { finished, paused: pause }
+    ProcessPendingOutcome {
+        finished,
+        paused: pause,
+    }
 }
 
 pub fn spawn(state: SharedState, app: AppHandle) {
@@ -428,13 +385,8 @@ fn drain_pending(state: &SharedState, app: Option<&AppHandle>) {
 }
 
 fn worker_loop(state: SharedState, app: AppHandle, rx: Receiver<()>) {
-    loop {
-        match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(()) | Err(RecvTimeoutError::Timeout) => {
-                drain_pending(&state, Some(&app));
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
+    while let Ok(()) | Err(RecvTimeoutError::Timeout) = rx.recv_timeout(Duration::from_secs(30)) {
+        drain_pending(&state, Some(&app));
     }
 }
 
@@ -444,8 +396,8 @@ mod tests {
     use crate::app::state::AppState;
     use crate::sidecar::SidecarPool;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::Ordering as AtomicOrdering;
+    use std::sync::{Arc, Mutex};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -489,20 +441,18 @@ mod tests {
                     "[]",
                     "qwen3.5:9b",
                 )?;
-                let n: i64 = c
-                    .query_row(
-                        "SELECT COUNT(*) FROM document_cards WHERE document_id = ?1",
-                        [doc_id],
-                        |r| r.get(0),
-                    )?;
+                let n: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM document_cards WHERE document_id = ?1",
+                    [doc_id],
+                    |r| r.get(0),
+                )?;
                 assert_eq!(n, 1);
                 sqlite::delete_document_by_id(c, doc_id)?;
-                let n2: i64 = c
-                    .query_row(
-                        "SELECT COUNT(*) FROM document_cards WHERE document_id = ?1",
-                        [doc_id],
-                        |r| r.get(0),
-                    )?;
+                let n2: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM document_cards WHERE document_id = ?1",
+                    [doc_id],
+                    |r| r.get(0),
+                )?;
                 assert_eq!(n2, 0);
                 Ok(())
             })
@@ -516,7 +466,12 @@ mod tests {
         let data = tempfile::tempdir().expect("data tempdir");
         let sidecar_cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sidecar");
         let main_py = sidecar_cwd.join("main.py");
-        let pool = SidecarPool::new(main_py, sidecar_cwd, data.path().join("sidecar.log"), data.path().to_path_buf());
+        let pool = SidecarPool::new(
+            main_py,
+            sidecar_cwd,
+            data.path().join("sidecar.log"),
+            data.path().to_path_buf(),
+        );
         let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
         state.sidecar.ensure().expect("sidecar");
         state
@@ -547,8 +502,7 @@ mod tests {
                     "h",
                     "body",
                     "[]",
-                    None,
-                )?;
+                    None, None)?;
                 c.execute(
                     "UPDATE documents SET entities_status = 'pending', card_status = 'pending' WHERE id = 'doc-ent'",
                     [],
@@ -615,7 +569,9 @@ mod tests {
         let before = ollama_stream::UNLOAD_CALLS.load(AtomicOrdering::SeqCst);
         let handle = {
             let state = state.clone();
-            thread::spawn(move || wait_while_chat_in_flight(&state, "doc-unload", WaitKind::Card))
+            thread::spawn(move || {
+                chat_gate::wait_while_chat_in_flight(&state, "doc-unload", WaitKind::Card)
+            })
         };
         thread::sleep(Duration::from_millis(600));
         let mid = ollama_stream::UNLOAD_CALLS.load(AtomicOrdering::SeqCst);
@@ -697,6 +653,7 @@ mod tests {
                     "h",
                     "body",
                     "[]",
+                    None,
                     None,
                 )?;
                 c.execute(

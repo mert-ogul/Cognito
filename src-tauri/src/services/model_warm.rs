@@ -8,7 +8,7 @@ use std::time::Duration;
 
 pub fn spawn_warm_chat_model(state: SharedState) {
     std::thread::spawn(move || {
-        let settings = match state.with_sqlite(|c| sqlite::load_settings(c)) {
+        let settings = match state.with_sqlite(sqlite::load_settings) {
             Ok(s) => s,
             Err(e) => {
                 state.set_chat_warm(Err(format!(
@@ -19,10 +19,7 @@ pub fn spawn_warm_chat_model(state: SharedState) {
             }
         };
         let r = state.sidecar.with_session(|s| {
-            s.request(
-                "warm_model",
-                json!({ "chat_model": settings.chat_model }),
-            )
+            s.request("warm_model", json!({ "chat_model": settings.chat_model }))
         });
         match r {
             Ok(_) => {
@@ -48,11 +45,8 @@ pub fn spawn_warm_checking_models(state: SharedState) {
         if !models_status_local(&state.data_dir).ready {
             return;
         }
-        let _ = state.sidecar.with_session(|s| {
-            s.request(
-                "warm_checking_models",
-                json!({ "app_data": app_data }),
-            )
-        });
+        let _ = state
+            .sidecar
+            .with_session(|s| s.request("warm_checking_models", json!({ "app_data": app_data })));
     });
 }

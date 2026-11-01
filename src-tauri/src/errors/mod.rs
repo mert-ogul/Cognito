@@ -1,4 +1,4 @@
-//! Application error types for Cognito desktop core.
+//! Application error types.
 
 use thiserror::Error;
 
@@ -10,7 +10,8 @@ pub enum CognitoError {
     SidecarSpawn { program: String, detail: String },
     #[error("sidecar: {0}")]
     Sidecar(String),
-    #[error("vault: {0}")]
+    /// User-facing library / folder errors (message is shown as-is).
+    #[error("{0}")]
     Vault(String),
     #[error("interrupted by chat")]
     InterruptedByChat,

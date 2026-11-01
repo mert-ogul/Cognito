@@ -12,9 +12,7 @@ _REGION_GAP = 4.0
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
-_REF_SECTION_KEYS = frozenset(
-    {"references", "bibliography", "acknowledgments", "acknowledgements"}
-)
+_REF_SECTION_KEYS = frozenset({"references", "bibliography", "acknowledgments", "acknowledgements"})
 _CITATION_LINE_RE = re.compile(
     r"^\s*(?:\[\d+\]|\d+\.)\s+.*\b(?:19|20)\d{2}\b",
     re.IGNORECASE,
@@ -503,3 +501,30 @@ def chunk_semantic(
         blocks = _markdown_blocks(text if t else "")
         pack_ft = "markdown"
     return _pack_blocks(blocks, pack_ft)
+
+
+# Share of ASCII letters + share of vowel-bearing 3+ letter words. OCR figure
+# dumps score low; clean prose scores high. Below this, skip embed/keyword.
+TEXT_QUALITY_MIN = 0.35
+_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+
+
+def chunk_text_quality(text: str) -> float:
+    """0..1 text-quality score for search eligibility."""
+    if not text or not text.strip():
+        return 0.0
+    n = len(text)
+    ascii_letters = sum(1 for c in text if ("a" <= c <= "z") or ("A" <= c <= "Z"))
+    letter_share = ascii_letters / n
+    words = _WORD_RE.findall(text)
+    if not words:
+        word_share = 0.0
+    else:
+        good = sum(1 for w in words if any(c in "aeiouAEIOU" for c in w))
+        word_share = good / len(words)
+    return 0.5 * letter_share + 0.5 * word_share
+
+
+def chunk_is_searchable(text: str, quality: float | None = None) -> bool:
+    q = chunk_text_quality(text) if quality is None else float(quality)
+    return q >= TEXT_QUALITY_MIN

@@ -77,4 +77,121 @@ export const E2E_SUGGESTED_QUESTIONS = [
   },
 ] as const;
 
+export type E2eConversationMessage = {
+  id: string;
+  conversationId: string;
+  position: number;
+  role: "user" | "assistant";
+  status: "pending" | "done" | "error";
+  content: string;
+  payload: Record<string, unknown> | null;
+  createdAt: string;
+};
+
+export type E2eConversation = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: E2eConversationMessage[];
+};
+
+const e2eConversations = new Map<string, E2eConversation>();
+
+function e2eNow(): string {
+  return new Date().toISOString();
+}
+
+export function e2eListConversations(): {
+  id: string;
+  title: string;
+  updatedAt: string;
+}[] {
+  return [...e2eConversations.values()]
+    .map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt }))
+    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+}
+
+export function e2eGetConversation(id: string): E2eConversation | null {
+  const c = e2eConversations.get(id);
+  return c ? { ...c, messages: [...c.messages] } : null;
+}
+
+export function e2eCreateConversation(title: string): {
+  id: string;
+  title: string;
+  updatedAt: string;
+} {
+  const id = `e2e-conv-${crypto.randomUUID()}`;
+  const now = e2eNow();
+  const row: E2eConversation = {
+    id,
+    title: title.trim() || "New chat",
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+  };
+  e2eConversations.set(id, row);
+  return { id, title: row.title, updatedAt: now };
+}
+
+export function e2eDeleteConversation(id: string): void {
+  e2eConversations.delete(id);
+}
+
+export function e2eAppendTurn(
+  conversationId: string,
+  userText: string,
+  assistantId: string,
+): void {
+  const c = e2eConversations.get(conversationId);
+  if (!c) return;
+  const now = e2eNow();
+  const pos = c.messages.length;
+  if (c.messages.length === 0) {
+    c.title = userText.trim() || c.title;
+  }
+  c.messages.push({
+    id: crypto.randomUUID(),
+    conversationId,
+    position: pos,
+    role: "user",
+    status: "done",
+    content: userText,
+    payload: null,
+    createdAt: now,
+  });
+  c.messages.push({
+    id: assistantId,
+    conversationId,
+    position: pos + 1,
+    role: "assistant",
+    status: "pending",
+    content: "",
+    payload: null,
+    createdAt: now,
+  });
+  c.updatedAt = now;
+}
+
+export function e2eFinishAssistant(
+  messageId: string,
+  content: string,
+  payload: Record<string, unknown>,
+): void {
+  for (const c of e2eConversations.values()) {
+    const m = c.messages.find((x) => x.id === messageId);
+    if (!m) continue;
+    m.status = payload.error ? "error" : "done";
+    m.content = content;
+    m.payload = payload;
+    c.updatedAt = e2eNow();
+    return;
+  }
+}
+
+export function e2eClearConversations(): void {
+  e2eConversations.clear();
+}
+
 

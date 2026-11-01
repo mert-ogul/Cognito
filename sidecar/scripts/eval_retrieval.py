@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""
-Retrieval eval against a Cognito vault.sqlite.
+"""Score retrieval against a Cognito vault.sqlite.
 
 Runs prepare_chat_retrieval (skip_rerank) then rerank_chat_candidates the same
-way chat_query.rs does, and reports bestScore, notFound, and top title/page.
+way chat_query.rs does. Prints bestScore, notFound, and top title/page.
 
-Usage (from repo root):
+From the repo root:
   npm run eval
   cd sidecar && uv run python scripts/eval_retrieval.py [--sqlite PATH] [--questions PATH]
       [--embed-model M] [--app-data PATH]
@@ -53,16 +52,17 @@ def _default_sqlite() -> Path:
 
 
 def _read_setting(sqlite_path: Path, key: str) -> str | None:
+    from common.sqlite_vec_util import require_sqlite_path
+
     try:
-        con = sqlite3.connect(str(sqlite_path))
+        path = require_sqlite_path(str(sqlite_path) if sqlite_path is not None else None)
+        con = sqlite3.connect(path)
         try:
-            row = con.execute(
-                "SELECT value FROM settings WHERE key = ?", (key,)
-            ).fetchone()
+            row = con.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
             return str(row[0]) if row and row[0] is not None else None
         finally:
             con.close()
-    except sqlite3.Error:
+    except (sqlite3.Error, ValueError):
         return None
 
 
@@ -171,18 +171,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    sqlite_path = (args.sqlite or _default_sqlite()).expanduser().resolve()
+    raw_sqlite = args.sqlite or _default_sqlite()
+    if raw_sqlite is None:
+        raise SystemExit("SQLite path is missing.\nPass --sqlite PATH or set COGNITO_SQLITE.")
+    sqlite_path = raw_sqlite.expanduser().resolve()
     if not sqlite_path.is_file():
         raise SystemExit(
-            f"SQLite not found: {sqlite_path}\n"
-            "Pass --sqlite PATH or set COGNITO_SQLITE."
+            f"SQLite not found: {sqlite_path}\nPass --sqlite PATH or set COGNITO_SQLITE."
         )
 
-    app_data = (
-        args.app_data.expanduser().resolve()
-        if args.app_data
-        else sqlite_path.parent
-    )
+    app_data = args.app_data.expanduser().resolve() if args.app_data else sqlite_path.parent
     questions_path = args.questions.expanduser().resolve()
     if not questions_path.is_file():
         raise SystemExit(f"Questions file not found: {questions_path}")
@@ -237,8 +235,7 @@ def main() -> int:
             f"title={top_title!r} page={top_page} | {question!r}"
         )
         if args.trace and (
-            (expects_not_found and not not_found)
-            or (not expects_not_found and not_found)
+            (expects_not_found and not not_found) or (not expects_not_found and not_found)
         ):
             print(json.dumps(out.get("trace") or {}, indent=2, default=str))
 

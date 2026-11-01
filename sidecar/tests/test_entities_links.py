@@ -245,19 +245,13 @@ def test_recompute_links_mock_writes_rows(mock_models: None) -> None:
     con.execute(
         "INSERT INTO documents VALUES ('d2','/b.pdf','Later Survey Paper About Graphs','indexed')"
     )
-    con.execute(
-        "INSERT INTO chunks VALUES ('c1','d1',0,'Body of GCN paper.','body')"
-    )
+    con.execute("INSERT INTO chunks VALUES ('c1','d1',0,'Body of GCN paper.','body')")
     con.execute(
         "INSERT INTO chunks VALUES ('c2','d2',0,"
         "'See Semi-Supervised Classification with Graph Convolutional Networks.','references')"
     )
-    con.execute(
-        "INSERT INTO document_cards VALUES ('d1','paper','GCN paper','[\"GCN\"]','[]')"
-    )
-    con.execute(
-        "INSERT INTO document_cards VALUES ('d2','paper','Survey','[]','[]')"
-    )
+    con.execute("INSERT INTO document_cards VALUES ('d1','paper','GCN paper','[\"GCN\"]','[]')")
+    con.execute("INSERT INTO document_cards VALUES ('d2','paper','Survey','[]','[]')")
     con.commit()
     con.close()
 
@@ -330,9 +324,7 @@ def test_incremental_extract_matches_single_pass(mock_models: None) -> None:
         """
         + _ENTITIES_DDL
     )
-    con.execute(
-        "INSERT INTO documents VALUES ('d1','/a.pdf','Cora paper','indexed')"
-    )
+    con.execute("INSERT INTO documents VALUES ('d1','/a.pdf','Cora paper','indexed')")
     texts = [
         "The Cora dataset is used for citation classification in 2017.",
         "Graph Convolutional Networks (GCN) beat baselines on Cora.",
@@ -345,9 +337,7 @@ def test_incremental_extract_matches_single_pass(mock_models: None) -> None:
             "INSERT INTO chunks VALUES (?, 'd1', ?, ?, 'body')",
             (f"c{i}", i, body),
         )
-    con.execute(
-        "INSERT INTO document_cards VALUES ('d1','paper','Cora paper','[]','[]')"
-    )
+    con.execute("INSERT INTO document_cards VALUES ('d1','paper','Cora paper','[]','[]')")
     con.commit()
     con.close()
 
@@ -371,9 +361,7 @@ def test_incremental_extract_matches_single_pass(mock_models: None) -> None:
 
     offset = 0
     while True:
-        out = rpc_extract_entities(
-            {**params_base, "chunkOffset": offset, "chunkLimit": 2}
-        )
+        out = rpc_extract_entities({**params_base, "chunkOffset": offset, "chunkLimit": 2})
         if out["done"]:
             break
         offset = int(out["nextOffset"])
@@ -417,12 +405,8 @@ def test_references_without_card_uses_paper_labels(mock_models: None, monkeypatc
         + _ENTITIES_DDL
     )
     con.execute("INSERT INTO documents VALUES ('d1','/a.pdf','Untitled','indexed')")
-    con.execute(
-        "INSERT INTO chunks VALUES ('c0','d1',0,'Body about the Cora dataset.','body')"
-    )
-    con.execute(
-        "INSERT INTO chunks VALUES ('c1','d1',1,'1. Prior work.','references')"
-    )
+    con.execute("INSERT INTO chunks VALUES ('c0','d1',0,'Body about the Cora dataset.','body')")
+    con.execute("INSERT INTO chunks VALUES ('c1','d1',1,'1. Prior work.','references')")
     con.commit()
     con.close()
 

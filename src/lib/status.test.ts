@@ -105,6 +105,15 @@ describe("describeStatus", () => {
     expect(line).toEqual({ text: "Indexing 12 of 40", tone: "muted" });
   });
 
+  it("shows indexing paused while answering", () => {
+    const line = describeStatus(
+      baseHealth,
+      { ...indexing, phase: "paused_for_chat" },
+      0,
+    );
+    expect(line).toEqual({ text: "Indexing paused while answering", tone: "muted" });
+  });
+
   it("prioritises model loading over entities queue", () => {
     const line = describeStatus(
       { ...baseHealth, warmUpPending: true },

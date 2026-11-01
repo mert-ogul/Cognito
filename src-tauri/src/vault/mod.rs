@@ -1,4 +1,4 @@
-//! Vault folder scanning and import caps.
+//! Library folder scanning and the 100-document first-import cap.
 
 use crate::errors::{CognitoError, CognitoResult};
 use std::path::{Path, PathBuf};
@@ -14,7 +14,11 @@ pub fn path_string(path: &Path) -> String {
 /// Sorted PDF/Word/Markdown paths under `root`, at most `limit` files.
 pub fn collect_import_paths_bounded(root: &Path, limit: usize) -> CognitoResult<Vec<PathBuf>> {
     let mut paths = Vec::new();
-    for entry in WalkDir::new(root).max_depth(64).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(root)
+        .max_depth(64)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -35,13 +39,13 @@ pub fn slots_remaining(active_doc_count: i64) -> usize {
 pub fn ensure_folder_in_vault(vault: &Path, folder: &Path) -> CognitoResult<PathBuf> {
     let v = vault
         .canonicalize()
-        .map_err(|_| CognitoError::Vault("vault path invalid".into()))?;
+        .map_err(|_| CognitoError::Vault("library folder path is invalid".into()))?;
     let f = folder
         .canonicalize()
-        .map_err(|_| CognitoError::Vault("import path invalid".into()))?;
+        .map_err(|_| CognitoError::Vault("import path is invalid".into()))?;
     if !f.starts_with(&v) {
         return Err(CognitoError::Vault(
-            "import folder must be inside the configured vault".into(),
+            "import folder must be inside the library folder".into(),
         ));
     }
     Ok(f)
@@ -75,10 +79,10 @@ pub fn is_importable_extension(p: &Path) -> bool {
 pub fn ensure_vault_path(raw: &str) -> CognitoResult<PathBuf> {
     let p = PathBuf::from(raw);
     if !p.exists() {
-        return Err(CognitoError::Vault("path does not exist".into()));
+        return Err(CognitoError::Vault("That path does not exist.".into()));
     }
     if !p.is_dir() {
-        return Err(CognitoError::Vault("not a directory".into()));
+        return Err(CognitoError::Vault("That path is not a folder.".into()));
     }
     Ok(p)
 }

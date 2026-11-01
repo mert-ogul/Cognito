@@ -161,9 +161,7 @@ def models_status(app_data: str) -> dict:
 def _require_complete(app_data: str, repo_id: str, label: str) -> Path:
     path = _snapshot_path(app_data, repo_id)
     if not _model_present(path):
-        raise FileNotFoundError(
-            f"{label} not downloaded (missing {_COMPLETE_NAME} at {path})"
-        )
+        raise FileNotFoundError(f"{label} not downloaded (missing {_COMPLETE_NAME} at {path})")
     return path
 
 

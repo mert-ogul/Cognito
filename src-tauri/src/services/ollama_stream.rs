@@ -210,8 +210,8 @@ pub async fn chat_completion_json_streaming(
             if line.is_empty() {
                 continue;
             }
-            let v: Value = serde_json::from_str(line)
-                .map_err(|e| format!("Ollama stream JSON: {e}"))?;
+            let v: Value =
+                serde_json::from_str(line).map_err(|e| format!("Ollama stream JSON: {e}"))?;
             if let Some(c) = v
                 .get("message")
                 .and_then(|m| m.get("content"))

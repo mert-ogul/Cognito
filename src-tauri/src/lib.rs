@@ -1,4 +1,4 @@
-//! Cognito desktop shell: Tauri commands, local databases, Python sidecar bridge.
+//! Tauri commands, SQLite, and the Python sidecar bridge.
 
 mod app;
 mod commands;
@@ -41,7 +41,10 @@ pub fn run() {
             let pool = SidecarPool::new(main_py, cwd, log_path.clone(), data_dir.clone());
             let state: SharedState = Arc::new(AppState::new(data_dir.clone(), pool));
             state
-                .with_sqlite(|_| Ok(()))
+                .with_sqlite(|c| {
+                    let _ = sqlite::conversations::mark_pending_interrupted(c)?;
+                    Ok(())
+                })
                 .map_err(|e| e.to_string())?;
             for name in ["graph.duckdb", "graph.duckdb-wal", "graph.duckdb-shm"] {
                 let p = data_dir.join(name);
@@ -69,7 +72,7 @@ pub fn run() {
                 *wg = Some(reload_tx.clone());
             }
             file_watcher::spawn_background(state.clone(), app.handle().clone(), reload_rx);
-            if let Ok(s) = state.with_sqlite(|c| sqlite::load_settings(c)) {
+            if let Ok(s) = state.with_sqlite(sqlite::load_settings) {
                 if let Some(vp) = s.vault_path {
                     let _ = reload_tx.send(Some(PathBuf::from(vp)));
                 }
@@ -97,6 +100,10 @@ pub fn run() {
             commands::open_document,
             commands::send_chat_query,
             commands::send_related_query,
+            commands::list_conversations,
+            commands::get_conversation,
+            commands::create_conversation,
+            commands::delete_conversation,
             commands::prepare_models,
             commands::get_models_status,
             commands::import_documents,

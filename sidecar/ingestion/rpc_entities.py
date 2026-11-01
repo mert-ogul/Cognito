@@ -13,7 +13,13 @@ import numpy as np
 from rapidfuzz import fuzz
 
 from common.model_store import extract_spans_batch, mock_models_enabled
-from common.sqlite_vec_util import connect_with_vec, mock_embed_enabled, table_dimension
+from common.sqlite_vec_util import (
+    connect_sqlite,
+    connect_with_vec,
+    mock_embed_enabled,
+    require_sqlite_path,
+    table_dimension,
+)
 from common.text_norm import normalize_date, normalize_name
 from query.entity_labels import labels_for_document
 
@@ -465,9 +471,9 @@ def _upsert_alias(con: sqlite3.Connection, entity_id: str, alias: str) -> None:
 
 
 def rpc_purge_document_entities(params: dict[str, Any]) -> dict[str, Any]:
-    sqlite_path = str(_param(params, "sqlitePath", "sqlite_path"))
+    sqlite_path = require_sqlite_path(_param(params, "sqlitePath", "sqlite_path"))
     document_id = str(_param(params, "documentId", "document_id"))
-    con = sqlite3.connect(sqlite_path)
+    con = connect_sqlite(sqlite_path)
     try:
         entity_ids = [
             str(r[0])
@@ -513,9 +519,7 @@ def _commit_document_mentions(
         normalized = str(it["normalized"])
         eid = _entity_id(label.lower(), normalized)
         entity_ids.add(eid)
-        row = con.execute(
-            "SELECT id, name FROM entities WHERE id = ?", (eid,)
-        ).fetchone()
+        row = con.execute("SELECT id, name FROM entities WHERE id = ?", (eid,)).fetchone()
         if row:
             if len(name) > len(str(row[1] or "")):
                 con.execute(
@@ -574,12 +578,10 @@ def _commit_document_mentions(
 
 
 def rpc_extract_entities(params: dict[str, Any]) -> dict[str, Any]:
-    sqlite_path = str(_param(params, "sqlitePath", "sqlite_path"))
+    sqlite_path = require_sqlite_path(_param(params, "sqlitePath", "sqlite_path"))
     document_id = str(_param(params, "documentId", "document_id"))
     app_data = str(_param(params, "app_data", "appData") or "")
-    extra_labels = [
-        str(x).strip() for x in (_param(params, "labels") or []) if str(x).strip()
-    ]
+    extra_labels = [str(x).strip() for x in (_param(params, "labels") or []) if str(x).strip()]
     chunk_offset = int(_param(params, "chunkOffset", "chunk_offset", default=0) or 0)
     chunk_limit = int(
         _param(params, "chunkLimit", "chunk_limit", default=_CHUNK_LIMIT) or _CHUNK_LIMIT
@@ -589,14 +591,14 @@ def rpc_extract_entities(params: dict[str, Any]) -> dict[str, Any]:
     if chunk_offset < 0:
         chunk_offset = 0
 
-    con = sqlite3.connect(sqlite_path)
+    # Read with a short connection; run GLiNER with no DB handle open.
+    con = connect_sqlite(sqlite_path)
     try:
         card_row = con.execute(
             "SELECT type FROM document_cards WHERE document_id = ?",
             (document_id,),
         ).fetchone()
         card_type = str(card_row[0]) if card_row and card_row[0] else None
-
         chunks = con.execute(
             """
             SELECT id, text, IFNULL(role, 'body')
@@ -606,81 +608,83 @@ def rpc_extract_entities(params: dict[str, Any]) -> dict[str, Any]:
             """,
             (document_id,),
         ).fetchall()
-        total_chunks = len(chunks)
+    finally:
+        con.close()
 
-        if card_type:
-            labels = labels_for_document(card_type, extra_labels)
-        else:
-            has_refs = any(str(role or "body") == "references" for _cid, _t, role in chunks)
-            labels = labels_for_document("paper" if has_refs else None, extra_labels)
+    total_chunks = len(chunks)
+    if card_type:
+        labels = labels_for_document(card_type, extra_labels)
+    else:
+        has_refs = any(str(role or "body") == "references" for _cid, _t, role in chunks)
+        labels = labels_for_document("paper" if has_refs else None, extra_labels)
 
-        if chunk_offset == 0:
-            _doc_span_buffers[document_id] = []
+    if chunk_offset == 0:
+        _doc_span_buffers[document_id] = []
 
-        buffer = _doc_span_buffers.setdefault(document_id, [])
-        slice_chunks = chunks[chunk_offset : chunk_offset + chunk_limit]
+    buffer = _doc_span_buffers.setdefault(document_id, [])
+    slice_chunks = chunks[chunk_offset : chunk_offset + chunk_limit]
 
-        for chunk_id, text, role in slice_chunks:
-            body = str(text or "")
-            if str(role or "body") == "references":
-                continue
-            windows = _windows(body)
-            if not windows:
-                continue
-            window_texts = [w[2] for w in windows]
-            batched = extract_spans_batch(
-                app_data, window_texts, labels, threshold=_GLINER_THRESHOLD
-            )
-            seen: set[tuple[str, int, int]] = set()
-            for (start, _end, _window), spans in zip(windows, batched):
-                for sp in spans:
-                    abs_start = int(sp["start"]) + start
-                    abs_end = int(sp["end"]) + start
-                    label = str(sp["label"] or "")
-                    key = (label, abs_start, abs_end)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    buffer.append(
-                        {
-                            "label": label,
-                            "text": sp["text"],
-                            "start": abs_start,
-                            "end": abs_end,
-                            "score": sp["score"],
-                            "chunk_id": str(chunk_id),
-                            "document_id": document_id,
-                        }
-                    )
+    for chunk_id, text, role in slice_chunks:
+        body = str(text or "")
+        if str(role or "body") == "references":
+            continue
+        windows = _windows(body)
+        if not windows:
+            continue
+        window_texts = [w[2] for w in windows]
+        batched = extract_spans_batch(app_data, window_texts, labels, threshold=_GLINER_THRESHOLD)
+        seen: set[tuple[str, int, int]] = set()
+        for (start, _end, _window), spans in zip(windows, batched):
+            for sp in spans:
+                abs_start = int(sp["start"]) + start
+                abs_end = int(sp["end"]) + start
+                label = str(sp["label"] or "")
+                key = (label, abs_start, abs_end)
+                if key in seen:
+                    continue
+                seen.add(key)
+                buffer.append(
+                    {
+                        "label": label,
+                        "text": sp["text"],
+                        "start": abs_start,
+                        "end": abs_end,
+                        "score": sp["score"],
+                        "chunk_id": str(chunk_id),
+                        "document_id": document_id,
+                    }
+                )
 
-        next_offset = chunk_offset + len(slice_chunks)
-        done = next_offset >= total_chunks
-        if not done:
-            return {
-                "ok": True,
-                "done": False,
-                "nextOffset": next_offset,
-                "totalChunks": total_chunks,
-                "mentions": 0,
-                "entities": 0,
-            }
+    next_offset = chunk_offset + len(slice_chunks)
+    done = next_offset >= total_chunks
+    if not done:
+        return {
+            "ok": True,
+            "done": False,
+            "nextOffset": next_offset,
+            "totalChunks": total_chunks,
+            "mentions": 0,
+            "entities": 0,
+        }
 
-        context_text = "\n".join(str(t or "") for _cid, t, _role in chunks)
+    context_text = "\n".join(str(t or "") for _cid, t, _role in chunks)
+    con = connect_sqlite(sqlite_path)
+    try:
         mention_rows, entity_count = _commit_document_mentions(
             con, document_id, list(buffer), context_text
         )
         con.commit()
-        _doc_span_buffers.pop(document_id, None)
-        return {
-            "ok": True,
-            "done": True,
-            "nextOffset": next_offset,
-            "totalChunks": total_chunks,
-            "mentions": mention_rows,
-            "entities": entity_count,
-        }
     finally:
         con.close()
+    _doc_span_buffers.pop(document_id, None)
+    return {
+        "ok": True,
+        "done": True,
+        "nextOffset": next_offset,
+        "totalChunks": total_chunks,
+        "mentions": mention_rows,
+        "entities": entity_count,
+    }
 
 
 def _load_docs_for_links(con: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -744,9 +748,7 @@ def _load_docs_for_links(con: sqlite3.Connection) -> list[dict[str, Any]]:
     return docs
 
 
-def _mean_pool_doc_vectors(
-    sqlite_path: str, doc_ids: list[str]
-) -> np.ndarray | None:
+def _mean_pool_doc_vectors(sqlite_path: str, doc_ids: list[str]) -> np.ndarray | None:
     con = connect_with_vec(sqlite_path)
     try:
         dim = table_dimension(con)
@@ -796,13 +798,7 @@ def _mock_similar_links(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     }
                 )
                 if (
-                    len(
-                        [
-                            x
-                            for x in links
-                            if x["source_id"] == sid and x["kind"] == "similar"
-                        ]
-                    )
+                    len([x for x in links if x["source_id"] == sid and x["kind"] == "similar"])
                     >= _SIMILAR_TOP_K
                 ):
                     break
@@ -810,14 +806,28 @@ def _mock_similar_links(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
-    sqlite_path = str(_param(params, "sqlitePath", "sqlite_path"))
+    sqlite_path = require_sqlite_path(_param(params, "sqlitePath", "sqlite_path"))
 
-    con = sqlite3.connect(sqlite_path)
+    con = connect_sqlite(sqlite_path)
     try:
         docs = _load_docs_for_links(con)
-        con.execute("DELETE FROM document_links")
-
         mention_links = find_mentions_links(docs, con=con)
+    finally:
+        con.close()
+
+    doc_ids = [str(d["id"]) for d in docs]
+    similar_rows: list[tuple[str, str, float]] = []
+    if mock_models_enabled() or mock_embed_enabled():
+        similar_payload = _mock_similar_links(docs)
+    else:
+        similar_payload = []
+        vecs = _mean_pool_doc_vectors(sqlite_path, doc_ids)
+        if vecs is not None and len(doc_ids) >= 2:
+            similar_rows = list(similar_links(doc_ids, vecs))
+
+    con = connect_sqlite(sqlite_path)
+    try:
+        con.execute("DELETE FROM document_links")
         for sid, tid, evid, weight in mention_links:
             con.execute(
                 """
@@ -827,12 +837,9 @@ def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
                 """,
                 (sid, tid, weight, evid),
             )
-
-        doc_ids = [str(d["id"]) for d in docs]
         similar_count = 0
-
         if mock_models_enabled() or mock_embed_enabled():
-            for link in _mock_similar_links(docs):
+            for link in similar_payload:
                 con.execute(
                     """
                     INSERT INTO document_links(
@@ -849,19 +856,16 @@ def rpc_recompute_links(params: dict[str, Any]) -> dict[str, Any]:
                 )
                 similar_count += 1
         else:
-            vecs = _mean_pool_doc_vectors(sqlite_path, doc_ids)
-            if vecs is not None and len(doc_ids) >= 2:
-                for sid, tid, weight in similar_links(doc_ids, vecs):
-                    con.execute(
-                        """
-                        INSERT INTO document_links(
-                          source_id, target_id, kind, weight, evidence_chunk_id
-                        ) VALUES (?, ?, 'similar', ?, NULL)
-                        """,
-                        (sid, tid, weight),
-                    )
-                    similar_count += 1
-
+            for sid, tid, weight in similar_rows:
+                con.execute(
+                    """
+                    INSERT INTO document_links(
+                      source_id, target_id, kind, weight, evidence_chunk_id
+                    ) VALUES (?, ?, 'similar', ?, NULL)
+                    """,
+                    (sid, tid, weight),
+                )
+                similar_count += 1
         con.commit()
         return {
             "ok": True,

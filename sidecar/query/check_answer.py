@@ -45,6 +45,7 @@ _QUOTE_MARKS = str.maketrans(
 )
 _HYPHEN_BREAK_RE = re.compile(r"(\w)-\s*\n\s*(\w)")
 _WS_RE = re.compile(r"\s+")
+_LIST_MARKER_RE = re.compile(r"(?m)^\s*(?:[-*+]|\d+[.)])\s+")
 _NUMBER_RE = re.compile(
     r"\b(?:\d{1,4}[-/]\d{1,2}[-/]\d{1,4}|\d+(?:\.\d+)?(?:st|nd|rd|th)?)\b",
     re.IGNORECASE,
@@ -54,6 +55,7 @@ _NUMBER_RE = re.compile(
 def normalize_evidence_text(text: str) -> str:
     s = (text or "").translate(_LIGATURES).translate(_QUOTE_MARKS)
     s = _HYPHEN_BREAK_RE.sub(r"\1\2", s)
+    s = _LIST_MARKER_RE.sub(" ", s)
     s = _WS_RE.sub(" ", s).strip()
     return s
 
@@ -163,9 +165,7 @@ def _passage_by_index(passages: list[dict[str, Any]]) -> dict[int, str]:
     return out
 
 
-def _resolve_quote(
-    qtext: str, source: int, by_idx: dict[int, str]
-) -> dict[str, Any] | None:
+def _resolve_quote(qtext: str, source: int, by_idx: dict[int, str]) -> dict[str, Any] | None:
     passage = by_idx.get(source)
     if passage is not None and quote_in_passage(qtext, passage):
         return {"source": source, "text": qtext}
@@ -220,9 +220,7 @@ def check_answer(app_data: str, passages: list[dict], draft: dict) -> dict:
                     }
                 )
             else:
-                sentences_out.append(
-                    {"text": text, "status": "unsupported", "sources": sources}
-                )
+                sentences_out.append({"text": text, "status": "unsupported", "sources": sources})
             continue
 
         if len(kept) >= 1 and claims_supported(text, haystacks):
@@ -236,9 +234,7 @@ def check_answer(app_data: str, passages: list[dict], draft: dict) -> dict:
                 row["reason"] = reason
             sentences_out.append(row)
         else:
-            sentences_out.append(
-                {"text": text, "status": "unsupported", "sources": sources}
-            )
+            sentences_out.append({"text": text, "status": "unsupported", "sources": sources})
 
     if hhem_jobs:
         scores = hhem_scores_bounded(app_data, [(j, s) for _i, j, s in hhem_jobs])
@@ -253,7 +249,5 @@ def check_answer(app_data: str, passages: list[dict], draft: dict) -> dict:
                 sentences_out[idx]["status"] = "unchecked"
                 sentences_out[idx]["reason"] = "weak"
 
-    any_shown = any(
-        s["status"] in ("supported", "unchecked") for s in sentences_out
-    )
+    any_shown = any(s["status"] in ("supported", "unchecked") for s in sentences_out)
     return {"notFound": not any_shown, "sentences": sentences_out}

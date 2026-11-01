@@ -1,4 +1,4 @@
-# CI: PR and main — lint, tests, compile (no full OS-specific bundle on Ubuntu).
+# PR and main: typecheck, lint, tests, compile. No full OS-specific installer on Ubuntu.
 name: CI
 
 on:
@@ -21,6 +21,7 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
+      - run: npm run typecheck
       - run: npm run test:unit
       - run: npm run build
       - run: npx playwright install --with-deps chromium
@@ -38,6 +39,8 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: astral-sh/setup-uv@v4
       # Tauri / gtk-rs need GLib/GTK + WebKit dev packages on Linux (same family as tauri-smoke).
       - name: Install Linux dependencies
@@ -55,6 +58,10 @@ jobs:
       - working-directory: sidecar
         run: uv sync
       - working-directory: src-tauri
+        run: cargo fmt --check
+      - working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - working-directory: src-tauri
         run: cargo test -- --include-ignored
       - working-directory: src-tauri
         run: cargo build --release
@@ -66,6 +73,10 @@ jobs:
       - uses: astral-sh/setup-uv@v4
       - working-directory: sidecar
         run: uv sync --extra dev
+      - working-directory: sidecar
+        run: uv run ruff check
+      - working-directory: sidecar
+        run: uv run ruff format --check
       - working-directory: sidecar
         run: uv run pytest
 

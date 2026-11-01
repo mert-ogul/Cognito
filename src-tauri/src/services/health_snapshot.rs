@@ -1,9 +1,9 @@
 //! Compose [`AppHealth`](crate::models::AppHealth) from local probes and sidecar status.
 
 use crate::db::sqlite;
-use crate::services::checking_models::models_status_local;
 use crate::errors::{CognitoError, CognitoResult};
 use crate::models::AppHealth;
+use crate::services::checking_models::models_status_local;
 use crate::services::ollama_stream::ollama_base_url;
 use serde_json::Value;
 use std::sync::atomic::Ordering;
@@ -83,9 +83,7 @@ fn probe_checking_models(state: &crate::app::state::SharedState) -> bool {
     models_status_local(&state.data_dir).ready
 }
 
-pub async fn read_app_health(
-    state: crate::app::state::SharedState,
-) -> CognitoResult<AppHealth> {
+pub async fn read_app_health(state: crate::app::state::SharedState) -> CognitoResult<AppHealth> {
     let st = state.clone();
     let sync = tauri::async_runtime::spawn_blocking(move || {
         let sqlite_ok = st.with_sqlite(|_| Ok(())).is_ok();
@@ -93,7 +91,7 @@ pub async fn read_app_health(
             let o = sqlite::get_setting(c, "vault_path")?;
             Ok(o.is_some())
         })?;
-        let settings = st.with_sqlite(|c| sqlite::load_settings(c))?;
+        let settings = st.with_sqlite(sqlite::load_settings)?;
         let sidecar_reachable = st.sidecar.is_running();
         let warm_pending = st.chat_warm_ready().is_none();
         let chat_model_warmed = st.chat_warm_ready() == Some(true);
@@ -158,10 +156,7 @@ mod tests {
 
     #[test]
     fn missing_models_matches_latest_tag() {
-        let available = vec![
-            "qwen3.5:9b".into(),
-            "qwen3-embedding:0.6b".into(),
-        ];
+        let available = vec!["qwen3.5:9b".into(), "qwen3-embedding:0.6b".into()];
         assert!(missing_configured_models(
             &["qwen3.5:9b".into(), "qwen3-embedding:0.6b".into()],
             &available

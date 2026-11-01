@@ -7,6 +7,7 @@ import {
   type PageRegion,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import { fileName, pageLabel } from "@/lib/format";
 import { useEffect, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -27,6 +28,7 @@ export type AssistantChatMessage = {
   sentences?: AnswerSentence[];
   draft?: string[];
   notFound?: boolean;
+  partial?: boolean;
   scopeTitle?: string | null;
   suggestions?: ScopeSearchSuggestion[];
   error?: string;
@@ -58,23 +60,10 @@ export function normalizeAnswerMath(text: string): string {
     .join("");
 }
 
-function fileName(path: string): string {
-  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return i >= 0 ? path.slice(i + 1) : path;
-}
 
-function pageLabel(pageStart: number | null | undefined, pageEnd: number | null | undefined): string | null {
-  if (pageStart != null && pageEnd != null && pageEnd !== pageStart) {
-    return `pp. ${pageStart}-${pageEnd}`;
-  }
-  if (pageStart != null) {
-    return `p. ${pageStart}`;
-  }
-  return null;
-}
 
 /** Clamp snippet to at most three lines, starting at the best-matching sentence. */
-export function clampSnippetToMatch(text: string, query: string, maxLines = 3): string {
+function clampSnippetToMatch(text: string, query: string, maxLines = 3): string {
   const raw = (text || "").replace(/\s+/g, " ").trim();
   if (!raw) return "";
   const qTerms = new Set(
@@ -498,6 +487,9 @@ export function AssistantMessage({
           citations={citations}
           onCite={onCite}
         />
+        {message.partial ? (
+          <p className="text-muted">Your documents only cover part of this.</p>
+        ) : null}
         {citations.length > 0 ? (
           <SourcesList
             citations={citations}

@@ -63,7 +63,10 @@ pub async fn prepare_models(
             .ok_or_else(|| "download stdout".to_string())?;
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
-            for line in reader.lines().flatten() {
+            for line in reader.lines() {
+                let Ok(line) = line else {
+                    break;
+                };
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                     continue;
                 };

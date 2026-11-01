@@ -200,16 +200,9 @@ pub struct CitationItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // reserved; grounded chat emits stages + final instead
-pub struct ChatStreamEvent {
-    pub message_id: String,
-    pub token: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ChatStageEvent {
     pub message_id: String,
+    pub conversation_id: String,
     pub stage: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citations: Option<Vec<CitationItem>>,
@@ -257,6 +250,7 @@ pub struct ScopeSuggestion {
 #[serde(rename_all = "camelCase")]
 pub struct ChatFinalResult {
     pub message_id: String,
+    pub conversation_id: String,
     #[serde(default)]
     pub citations: Vec<CitationItem>,
     pub retrieval_mode: String,
@@ -264,6 +258,8 @@ pub struct ChatFinalResult {
     pub error: Option<String>,
     #[serde(default)]
     pub not_found: bool,
+    #[serde(default)]
+    pub partial: bool,
     #[serde(default)]
     pub sentences: Vec<AnswerSentence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,13 +275,19 @@ pub struct ChatFinalResult {
 }
 
 impl ChatFinalResult {
-    pub fn failure(message_id: impl Into<String>, error: impl Into<String>) -> Self {
+    pub fn failure(
+        message_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Self {
         Self {
             message_id: message_id.into(),
+            conversation_id: conversation_id.into(),
             citations: Vec::new(),
             retrieval_mode: "error".into(),
             error: Some(error.into()),
             not_found: false,
+            partial: false,
             sentences: Vec::new(),
             scope_title: None,
             scope_ids: Vec::new(),
@@ -340,10 +342,12 @@ mod chat_payload_tests {
         };
         let f = ChatFinalResult {
             message_id: "m1".into(),
+            conversation_id: "conv1".into(),
             citations: vec![c],
             retrieval_mode: "hybrid".into(),
             error: None,
             not_found: false,
+            partial: true,
             sentences: vec![],
             scope_title: None,
             scope_ids: vec![],
@@ -354,6 +358,7 @@ mod chat_payload_tests {
         let j = serde_json::to_string(&f).unwrap();
         let back: ChatFinalResult = serde_json::from_str(&j).unwrap();
         assert_eq!(back.retrieval_mode, "hybrid");
+        assert!(back.partial);
         assert_eq!(back.citations[0].chunk_id, "c1");
         assert!(!back.not_found);
         assert!(back.sentences.is_empty());

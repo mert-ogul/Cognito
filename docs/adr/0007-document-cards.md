@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-A scannable library needs more than filenames. Users want type, date, people, a short summary, and grounded facts before they ask a question. Running the full answer model on every document would compete with chat and burn local GPU time.
+A library of filenames alone is hard to scan. Users want type, date, people, a short summary, and grounded facts before they ask a question. Running the full answer model on every document would compete with chat and burn local GPU time.
 
 ## Decision
 

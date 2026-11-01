@@ -1,4 +1,4 @@
-# Release builds on version tags. Produces per-platform bundles; attach to GitHub Release manually or extend with gh-release action.
+# Builds per-platform bundles on version tags. Attach artifacts to a GitHub Release by hand, or wire a gh-release step later.
 name: Release
 
 on:

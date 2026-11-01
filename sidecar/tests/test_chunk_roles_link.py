@@ -29,9 +29,7 @@ def test_citation_lines_mark_references_role() -> None:
         ]
     )
     assert citation_line_ratio(refs) >= 0.4
-    assert (
-        assign_chunk_role(refs, [], after_references_heading=False) == "references"
-    )
+    assert assign_chunk_role(refs, [], after_references_heading=False) == "references"
 
 
 def test_ordinary_paragraph_with_year_stays_body() -> None:
@@ -44,9 +42,7 @@ def test_ordinary_paragraph_with_year_stays_body() -> None:
 
 
 def test_after_references_heading_forces_role() -> None:
-    assert (
-        assign_chunk_role("anything", [], after_references_heading=True) == "references"
-    )
+    assert assign_chunk_role("anything", [], after_references_heading=True) == "references"
 
 
 def test_extract_chunk_labels_equations_and_captions() -> None:

@@ -38,6 +38,7 @@ pub fn reset(state: &SharedState) -> CognitoResult<()> {
     state.with_sqlite(|c| {
         sqlite::delete_all_documents(c)?;
         sqlite::empty_connection_tables(c)?;
+        sqlite::conversations::delete_all_conversations(c)?;
         sqlite::clear_setting(c, "index_embed_model")?;
         Ok(())
     })?;
@@ -49,9 +50,8 @@ pub fn reset(state: &SharedState) -> CognitoResult<()> {
 pub fn switch_vault(state: &SharedState, folder: &str) -> CognitoResult<Vec<PathBuf>> {
     let vault = vault::ensure_vault_path(folder)?;
     let paths = vault::collect_import_paths_bounded(&vault, vault::slots_remaining(0))?;
-    let doc_n: i64 = state.with_sqlite(|c| {
-        Ok(c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?)
-    })?;
+    let doc_n: i64 = state
+        .with_sqlite(|c| Ok(c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?))?;
     if doc_n > 0 {
         reset(state)?;
     }
@@ -68,14 +68,16 @@ pub fn forget(state: &SharedState) -> CognitoResult<()> {
 
 /// Validates vault path and lists files for rebuild without mutating the library.
 pub fn plan_rebuild(state: &SharedState) -> CognitoResult<(PathBuf, Vec<PathBuf>)> {
-    let settings = state.with_sqlite(|c| sqlite::load_settings(c))?;
+    let settings = state.with_sqlite(sqlite::load_settings)?;
     let vault_str = settings
         .vault_path
-        .ok_or_else(|| CognitoError::Vault("Configure a vault folder first.".into()))?;
+        .ok_or_else(|| CognitoError::Vault("Choose a library folder first.".into()))?;
     let vault = vault::ensure_vault_path(&vault_str)?;
     let paths = vault::collect_import_paths_bounded(&vault, vault::slots_remaining(0))?;
     if paths.is_empty() {
-        return Err(CognitoError::Vault("No PDF, Word or Markdown files found.".into()));
+        return Err(CognitoError::Vault(
+            "No PDF, Word or Markdown files found.".into(),
+        ));
     }
     Ok((vault, paths))
 }
@@ -106,19 +108,10 @@ mod tests {
         state
             .with_sqlite(|c| {
                 sqlite::insert_document_row(
-                    c,
-                    "d1",
-                    "/a.md",
-                    "A",
-                    "markdown",
-                    "h",
-                    None,
-                    "indexed",
-                    None,
-                    None,
+                    c, "d1", "/a.md", "A", "markdown", "h", None, "indexed", None, None,
                 )?;
                 sqlite::insert_chunk_row(
-                    c, "c1", "d1", 0, None, None, "Ada", 1, "h1", "body", "[]", None,
+                    c, "c1", "d1", 0, None, None, "Ada", 1, "h1", "body", "[]", None, None,
                 )?;
                 c.execute(
                     "INSERT INTO entities(id, label, name, normalized, doc_count, mention_count)
@@ -138,11 +131,9 @@ mod tests {
 
         state
             .with_sqlite(|c| {
-                let ents: i64 =
-                    c.query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))?;
+                let ents: i64 = c.query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))?;
                 assert_eq!(ents, 0);
-                let docs: i64 =
-                    c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+                let docs: i64 = c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
                 assert_eq!(docs, 0);
                 Ok(())
             })
@@ -154,5 +145,69 @@ mod tests {
             .filter(|e| e.path().is_file())
             .collect();
         assert!(left.is_empty(), "page_cache should be empty");
+    }
+
+    #[test]
+    fn switch_vault_and_forget_remove_conversations() {
+        let data = tempfile::tempdir().expect("data");
+        let sidecar_cwd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sidecar");
+        let main_py = sidecar_cwd.join("main.py");
+        let log_path = data.path().join("logs").join("sidecar.log");
+        fs::create_dir_all(log_path.parent().unwrap()).expect("logs");
+        let pool = SidecarPool::new(main_py, sidecar_cwd, log_path, data.path().to_path_buf());
+        let state: SharedState = Arc::new(AppState::new(data.path().to_path_buf(), pool));
+        let _ = state.sidecar.ensure();
+
+        let vault_a = data.path().join("vault_a");
+        fs::create_dir_all(&vault_a).expect("vault_a");
+        fs::write(vault_a.join("a.md"), "# A\n").expect("a.md");
+
+        state
+            .with_sqlite(|c| {
+                sqlite::upsert_setting(c, "vault_path", &vault::path_string(&vault_a))?;
+                sqlite::insert_document_row(
+                    c,
+                    "d1",
+                    &vault::path_string(&vault_a.join("a.md")),
+                    "A",
+                    "markdown",
+                    "h",
+                    None,
+                    "indexed",
+                    None,
+                    None,
+                )?;
+                let conv = sqlite::conversations::create_conversation(c, "Keep me?")?;
+                sqlite::conversations::append_turn(c, &conv.id, "u1", "Keep me?", "m1")?;
+                Ok(())
+            })
+            .expect("seed");
+
+        let vault_b = data.path().join("vault_b");
+        fs::create_dir_all(&vault_b).expect("vault_b");
+        fs::write(vault_b.join("b.md"), "# B\n").expect("b.md");
+        switch_vault(&state, &vault::path_string(&vault_b)).expect("switch");
+        state
+            .with_sqlite(|c| {
+                let n = sqlite::conversations::list_conversations(c)?.len();
+                assert_eq!(n, 0);
+                Ok(())
+            })
+            .expect("after switch");
+
+        state
+            .with_sqlite(|c| {
+                let _ = sqlite::conversations::create_conversation(c, "Again")?;
+                Ok(())
+            })
+            .expect("reseed");
+        forget(&state).expect("forget");
+        state
+            .with_sqlite(|c| {
+                let n = sqlite::conversations::list_conversations(c)?.len();
+                assert_eq!(n, 0);
+                Ok(())
+            })
+            .expect("after forget");
     }
 }

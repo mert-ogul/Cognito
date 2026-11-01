@@ -16,19 +16,25 @@ from common.model_store import rerank_with_budget
 from common.ollama import embed_prefixes, embed_text
 from common.sqlite_vec_util import (
     MOCK_EMBED_DIM,
+    connect_sqlite,
     connect_with_vec,
     mock_embed_enabled,
     table_dimension,
 )
 from common.text_norm import normalize_search_text
+from ingestion.chunking import TEXT_QUALITY_MIN
 
 log = logging.getLogger("cognito.sidecar")
 
 _VECTOR_K = 30
 _KEYWORD_K = 30
 _RRF_K = 60
-_RERANK_POOL = 20
+_RERANK_POOL = 30
 _KEEP = 5
+# Codes/numbers like 1202, AS-204, MSC-00171 get their own BM25 list in RRF.
+_RARE_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])((?:[A-Za-z]+-)?\d[A-Za-z0-9.-]{2,}|\d{3,})(?![A-Za-z0-9])"
+)
 # Between the highest unanswerable score (0.0084) and the lowest answerable one (0.0316) on eval/questions.jsonl.
 NOT_FOUND_SCORE = 0.015
 _HISTORY_TURN_CAP = 2000
@@ -89,7 +95,7 @@ class EmbeddingDimMismatch(Exception):
 
 def _indexed_chunk_count(sqlite_path: str) -> int:
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
         try:
             row = con.execute("SELECT COUNT(*) FROM chunks").fetchone()
             return int(row[0]) if row else 0
@@ -126,6 +132,32 @@ def build_fts_query(text: str) -> str:
                 continue
             parts.append('"' + w.replace('"', '""') + '"')
     return " OR ".join(parts)
+
+
+def extract_rare_tokens(text: str) -> list[str]:
+    """Number/code tokens of 3+ chars (1202, AS-204, MSC-00171)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _RARE_TOKEN_RE.finditer(text or ""):
+        tok = m.group(1)
+        key = tok.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tok)
+    return out
+
+
+def _chunks_have_text_quality(con: sqlite3.Connection) -> bool:
+    try:
+        cols = con.execute("PRAGMA table_info(chunks)").fetchall()
+    except Exception:
+        return False
+    return any(str(r[1]) == "text_quality" for r in cols)
+
+
+def _quality_sql(alias: str = "c") -> str:
+    return f" AND ({alias}.text_quality IS NULL OR {alias}.text_quality >= {TEXT_QUALITY_MIN})"
 
 
 def reciprocal_rank_fusion(
@@ -195,9 +227,7 @@ def _chunk_row_dict(r: tuple[Any, ...], chunk_id: str) -> dict[str, Any]:
     return out
 
 
-def _doc_id_clause(
-    document_ids: list[str] | None, params: list[Any]
-) -> str:
+def _doc_id_clause(document_ids: list[str] | None, params: list[Any]) -> str:
     if not document_ids:
         return ""
     ph = ",".join(["?"] * len(document_ids))
@@ -246,12 +276,21 @@ def vector_top_k(
         (qblob, fetch_k),
     ).fetchall()
     allow = set(document_ids) if document_ids else None
+    quality_ok = _chunks_have_text_quality(con)
     out: list[dict[str, Any]] = []
     for chunk_id, _dist in rows:
         r = con.execute(
             """
             SELECT c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
-                   c.role, c.labels, c.regions, c.ordinal
+                   c.role, c.labels, c.regions, c.ordinal, c.text_quality
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.id = ? AND d.status = 'indexed'
+            """
+            if quality_ok
+            else """
+            SELECT c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
+                   c.role, c.labels, c.regions, c.ordinal, NULL
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE c.id = ? AND d.status = 'indexed'
@@ -262,7 +301,10 @@ def vector_top_k(
             continue
         if allow is not None and str(r[0]) not in allow:
             continue
-        out.append(_chunk_row_dict(r, chunk_id))
+        tq = r[10]
+        if tq is not None and float(tq) < TEXT_QUALITY_MIN:
+            continue
+        out.append(_chunk_row_dict(r[:10], chunk_id))
         if len(out) >= k:
             break
     con.close()
@@ -279,12 +321,14 @@ def keyword_top_k(
     if not fts_q or k <= 0:
         return []
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return []
     params: list[Any] = [fts_q]
     scope_sql = _doc_id_clause(document_ids, params)
-    params.append(k)
+    quality_sql = _quality_sql("c") if _chunks_have_text_quality(con) else ""
+    # Over-fetch then trim so quality filter does not shrink the list silently.
+    params.append(max(k * 3, k))
     try:
         rows = con.execute(
             f"""
@@ -296,6 +340,7 @@ def keyword_top_k(
             WHERE chunks_fts MATCH ?
               AND d.status = 'indexed'
               {scope_sql}
+              {quality_sql}
             ORDER BY bm25(chunks_fts)
             LIMIT ?
             """,
@@ -322,6 +367,75 @@ def keyword_top_k(
                 "ordinal": int(ordinal) if ordinal is not None else 0,
             }
         )
+        if len(out) >= k:
+            break
+    return out
+
+
+def exact_token_top_k(
+    sqlite_path: str,
+    text: str,
+    k: int,
+    document_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """BM25 rank of chunks that contain rare number/code tokens from the question."""
+    tokens = extract_rare_tokens(text)
+    if not tokens or k <= 0:
+        return []
+    fts_q = " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+    try:
+        con = connect_sqlite(sqlite_path)
+    except Exception:
+        return []
+    params: list[Any] = [fts_q]
+    scope_sql = _doc_id_clause(document_ids, params)
+    quality_sql = _quality_sql("c") if _chunks_have_text_quality(con) else ""
+    params.append(max(k * 3, k))
+    try:
+        rows = con.execute(
+            f"""
+            SELECT c.id, c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
+                   c.role, c.labels, c.regions, c.ordinal
+            FROM chunks_fts
+            JOIN chunks c ON c.rowid = chunks_fts.rowid
+            JOIN documents d ON d.id = c.document_id
+            WHERE chunks_fts MATCH ?
+              AND d.status = 'indexed'
+              {scope_sql}
+              {quality_sql}
+            ORDER BY bm25(chunks_fts)
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    except Exception:
+        return []
+    finally:
+        con.close()
+    # Keep only chunks that literally contain at least one rare token.
+    lowered = [t.lower() for t in tokens]
+    out: list[dict[str, Any]] = []
+    for chunk_id, did, body, ps, pe, title, dpath, role, labels, regions, ordinal in rows:
+        body_l = str(body or "").lower()
+        if not any(tok in body_l for tok in lowered):
+            continue
+        out.append(
+            {
+                "chunk_id": chunk_id,
+                "document_id": did,
+                "text": body,
+                "page_start": ps,
+                "page_end": pe,
+                "title": title,
+                "path": dpath,
+                "role": role or "body",
+                "labels": _parse_labels(labels),
+                "regions": _parse_regions(regions),
+                "ordinal": int(ordinal) if ordinal is not None else 0,
+            }
+        )
+        if len(out) >= k:
+            break
     return out
 
 
@@ -416,7 +530,7 @@ def build_document_profile_text(
 def rebuild_document_profile(sqlite_path: str, document_id: str) -> None:
     """Upsert documents_profile (+ FTS triggers) for one document."""
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return
     try:
@@ -481,6 +595,39 @@ def _profile_term_hits(question: str, profile: str) -> int:
     return len(q_terms & p_terms)
 
 
+def _scope_anchor_hits(
+    question: str,
+    title: str,
+    path: str,
+    *,
+    people: list[Any] | None = None,
+    organizations: list[Any] | None = None,
+    aliases: list[Any] | None = None,
+) -> int:
+    """Overlap with title, file stem, people, orgs, aliases — not page-1 body."""
+    q_terms = set(_significant_words(question))
+    if not q_terms:
+        return 0
+    parts: list[str] = [str(title or "")]
+    stem = Path(path or "").stem.replace("_", " ").replace("-", " ")
+    if stem:
+        parts.append(stem)
+    for person in people or []:
+        name = _person_name(person).strip()
+        if name:
+            parts.append(name)
+    for org in organizations or []:
+        s = str(org or "").strip()
+        if s:
+            parts.append(s)
+    for alias in aliases or []:
+        s = str(alias or "").strip()
+        if s:
+            parts.append(s)
+    anchors = set(_significant_words(" ".join(parts)))
+    return len(q_terms & anchors)
+
+
 def match_document_profiles(
     sqlite_path: str, question: str, *, limit: int = 3
 ) -> list[dict[str, Any]]:
@@ -490,7 +637,7 @@ def match_document_profiles(
     if not fts_q:
         return []
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return []
     try:
@@ -510,27 +657,48 @@ def match_document_profiles(
             """,
             (fts_q, max(limit, 3)),
         ).fetchall()
+        has_cards = _table_exists(con, "document_cards")
+        out: list[dict[str, Any]] = []
+        for did, title, path, profile, bm25_score in rows:
+            people: list[Any] = []
+            organizations: list[Any] = []
+            aliases: list[Any] = []
+            if has_cards:
+                card = con.execute(
+                    "SELECT people, organizations, aliases FROM document_cards WHERE document_id = ?",
+                    (did,),
+                ).fetchone()
+                if card:
+                    people = _card_people(card[0])
+                    organizations = _card_string_list(card[1])
+                    aliases = _card_string_list(card[2])
+            # FTS5 bm25: lower is better; expose positive relevance for margins.
+            relevance = -float(bm25_score)
+            out.append(
+                {
+                    "documentId": str(did),
+                    "title": str(title or ""),
+                    "path": str(path or ""),
+                    "score": relevance,
+                    "termHits": _profile_term_hits(q, str(profile or "")),
+                    "anchorHits": _scope_anchor_hits(
+                        q,
+                        str(title or ""),
+                        str(path or ""),
+                        people=people,
+                        organizations=organizations,
+                        aliases=aliases,
+                    ),
+                    "profile": str(profile or ""),
+                }
+            )
+        # Prefer richer question-term overlap, then BM25 relevance.
+        out.sort(key=lambda m: (-int(m["termHits"]), -float(m["score"]), m["documentId"]))
+        return out[:limit]
     except Exception:
         return []
     finally:
         con.close()
-    out: list[dict[str, Any]] = []
-    for did, title, path, profile, bm25_score in rows:
-        # FTS5 bm25: lower is better; expose positive relevance for margins.
-        relevance = -float(bm25_score)
-        out.append(
-            {
-                "documentId": str(did),
-                "title": str(title or ""),
-                "path": str(path or ""),
-                "score": relevance,
-                "termHits": _profile_term_hits(q, str(profile or "")),
-                "profile": str(profile or ""),
-            }
-        )
-    # Prefer richer question-term overlap, then BM25 relevance.
-    out.sort(key=lambda m: (-int(m["termHits"]), -float(m["score"]), m["documentId"]))
-    return out[:limit]
 
 
 def resolve_scope(
@@ -571,7 +739,9 @@ def resolve_scope(
     best = matches[0]
     runner = matches[1] if len(matches) > 1 else None
     best_hits = int(best.get("termHits") or 0)
-    if best_hits < 2:
+    anchor_hits = int(best.get("anchorHits") or 0)
+    # Notes/question lists can BM25-match hard while their title does not name the topic.
+    if best_hits < 2 or anchor_hits < 1:
         return {
             "scopeIds": [],
             "scopeTitle": None,
@@ -642,9 +812,7 @@ def _chunk_has_label(chunk: dict[str, Any], wanted: list[str]) -> bool:
     return False
 
 
-def apply_label_boost(
-    chunks: list[dict[str, Any]], labels: list[str]
-) -> list[dict[str, Any]]:
+def apply_label_boost(chunks: list[dict[str, Any]], labels: list[str]) -> list[dict[str, Any]]:
     if not labels or not chunks:
         return chunks
     hit = [c for c in chunks if _chunk_has_label(c, labels)]
@@ -661,7 +829,7 @@ def label_chunks_for_documents(
     if not document_ids or not labels:
         return []
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return []
     try:
@@ -921,7 +1089,8 @@ def _retrieve_pool(
     vector_chunks = vector_top_k(
         sqlite_path, embed_model, search_text, top_k, document_ids=scope_filter
     )
-    keyword_chunks = keyword_top_k(
+    keyword_chunks = keyword_top_k(sqlite_path, search_text, _KEYWORD_K, document_ids=scope_filter)
+    exact_chunks = exact_token_top_k(
         sqlite_path, search_text, _KEYWORD_K, document_ids=scope_filter
     )
     label_extra: list[dict[str, Any]] = []
@@ -935,6 +1104,8 @@ def _retrieve_pool(
         if doc_ids:
             label_extra = label_chunks_for_documents(sqlite_path, doc_ids, labels)
     ranked_lists: list[list[dict[str, Any]]] = [vector_chunks, keyword_chunks]
+    if exact_chunks:
+        ranked_lists.append(exact_chunks)
     if entity_chunks:
         ranked_lists.append(entity_chunks)
     fused = reciprocal_rank_fusion(ranked_lists)
@@ -974,16 +1145,15 @@ def _rerank_pool(
 _ENTITY_DOC_CAP = 5
 
 
-def _chunks_by_ids(
-    sqlite_path: str, chunk_ids: list[str]
-) -> list[dict[str, Any]]:
+def _chunks_by_ids(sqlite_path: str, chunk_ids: list[str]) -> list[dict[str, Any]]:
     if not chunk_ids:
         return []
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return []
     try:
+        quality_ok = _chunks_have_text_quality(con)
         out: list[dict[str, Any]] = []
         seen: set[str] = set()
         for cid in chunk_ids:
@@ -993,7 +1163,15 @@ def _chunks_by_ids(
             r = con.execute(
                 """
                 SELECT c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
-                       c.role, c.labels, c.regions, c.ordinal
+                       c.role, c.labels, c.regions, c.ordinal, c.text_quality
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.id = ? AND d.status = 'indexed'
+                """
+                if quality_ok
+                else """
+                SELECT c.document_id, c.text, c.page_start, c.page_end, d.title, d.path,
+                       c.role, c.labels, c.regions, c.ordinal, NULL
                 FROM chunks c
                 JOIN documents d ON d.id = c.document_id
                 WHERE c.id = ? AND d.status = 'indexed'
@@ -1001,7 +1179,10 @@ def _chunks_by_ids(
                 (cid,),
             ).fetchone()
             if r:
-                out.append(_chunk_row_dict(r, cid))
+                tq = r[10]
+                if tq is not None and float(tq) < TEXT_QUALITY_MIN:
+                    continue
+                out.append(_chunk_row_dict(r[:10], cid))
         return out
     except Exception:
         return []
@@ -1035,13 +1216,11 @@ def _ordinal_of(c: dict[str, Any], sqlite_path: str | None) -> int | None:
     if not cid or not sqlite_path:
         return None
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return None
     try:
-        row = con.execute(
-            "SELECT ordinal FROM chunks WHERE id = ?", (cid,)
-        ).fetchone()
+        row = con.execute("SELECT ordinal FROM chunks WHERE id = ?", (cid,)).fetchone()
         if row is None or row[0] is None:
             return None
         return int(row[0])
@@ -1051,11 +1230,9 @@ def _ordinal_of(c: dict[str, Any], sqlite_path: str | None) -> int | None:
         con.close()
 
 
-def _chunk_after_ordinal(
-    sqlite_path: str, document_id: str, ordinal: int
-) -> dict[str, Any] | None:
+def _chunk_after_ordinal(sqlite_path: str, document_id: str, ordinal: int) -> dict[str, Any] | None:
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return None
     try:
@@ -1145,7 +1322,7 @@ def match_entity_mention_chunks(
 ) -> list[str]:
     """Chunk ids for entities named in the question that appear in few documents."""
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return []
     try:
@@ -1221,9 +1398,7 @@ def prepare_chat_retrieval(
     normalised_q = normalize_search_text(query or "")
     search_text = normalize_search_text(embed_query_text(normalised_q, hist_raw))
     explicit = [str(x) for x in (scope_ids or []) if x]
-    scope_info = resolve_scope(
-        sqlite_path, normalised_q, explicit_ids=explicit or None
-    )
+    scope_info = resolve_scope(sqlite_path, normalised_q, explicit_ids=explicit or None)
     profile_matches = list(scope_info.get("profileMatches") or [])
     scope_chosen = bool(scope_info.get("scopeChosen"))
     scope_title = scope_info.get("scopeTitle")
@@ -1282,9 +1457,7 @@ def prepare_chat_retrieval(
             scope_chosen=scope_chosen,
             query_embedding_failed=failed,
             profile_matches=profile_matches,
-            suggestions=_suggestions_from_profiles(profile_matches)
-            if not explicit
-            else [],
+            suggestions=_suggestions_from_profiles(profile_matches) if not explicit else [],
             trace=trace,
             search_text=search_text,
         )
@@ -1361,9 +1534,7 @@ def prepare_chat_retrieval(
                 continue
             if not pool2:
                 continue
-            ranked2, rr2 = _rerank_pool(
-                app_data, search_text, pool2
-            )
+            ranked2, rr2 = _rerank_pool(app_data, search_text, pool2)
             rr = {
                 "rerankMs": int(rr.get("rerankMs") or 0) + int(rr2.get("rerankMs") or 0),
                 "scored": int(rr.get("scored") or 0) + int(rr2.get("scored") or 0),
@@ -1373,9 +1544,7 @@ def prepare_chat_retrieval(
                 second_pass = True
                 ranked = ranked2
                 best_score = best2
-                candidate_cites = [
-                    _citation_from_chunk(c, i + 1) for i, c in enumerate(pool2)
-                ]
+                candidate_cites = [_citation_from_chunk(c, i + 1) for i, c in enumerate(pool2)]
                 effective_scope = [did]
                 scope_title = m.get("title") or None
                 scope_chosen = True
@@ -1480,9 +1649,7 @@ def rerank_chat_candidates(
             "bestScore": 0.0,
             "rerankMs": 0,
             "rerankScored": 0,
-            "suggestions": _suggestions_from_profiles(matches)
-            if not explicit_scope
-            else [],
+            "suggestions": _suggestions_from_profiles(matches) if not explicit_scope else [],
             "scopeIds": list(scope_ids or []),
             "scopeTitle": None,
             "scopeChosen": False,
@@ -1499,9 +1666,7 @@ def rerank_chat_candidates(
     out_scope_chosen = False
     out_scope_reason = scope_reason or ""
     suggestions: list[dict[str, Any]] = []
-    label_list = list(labels or []) or question_label_mentions(
-        normalised_question or search_text
-    )
+    label_list = list(labels or []) or question_label_mentions(normalised_question or search_text)
 
     if (
         best_score < NOT_FOUND_SCORE
@@ -1527,12 +1692,9 @@ def rerank_chat_candidates(
                 continue
             if not pool2:
                 continue
-            ranked2, rr2 = _rerank_pool(
-                app_data, search_text, pool2
-            )
+            ranked2, rr2 = _rerank_pool(app_data, search_text, pool2)
             rr = {
-                "rerankMs": int(rr.get("rerankMs") or 0)
-                + int(rr2.get("rerankMs") or 0),
+                "rerankMs": int(rr.get("rerankMs") or 0) + int(rr2.get("rerankMs") or 0),
                 "scored": int(rr.get("scored") or 0) + int(rr2.get("scored") or 0),
             }
             best2 = float(ranked2[0][1]) if ranked2 else 0.0
@@ -1548,9 +1710,7 @@ def rerank_chat_candidates(
         else:
             suggestions = _suggestions_from_profiles(matches)
 
-    matched_doc_ids = {
-        str(m["documentId"]) for m in matches if m.get("documentId")
-    }
+    matched_doc_ids = {str(m["documentId"]) for m in matches if m.get("documentId")}
     matched_doc_ids.update(str(x) for x in out_scope_ids if x)
     ranked, label_covers = _pin_label_chunks(
         ranked,
@@ -1565,8 +1725,7 @@ def rerank_chat_candidates(
         normalised_question=normalised_question or search_text,
         profile_matches=matches,
         scope_ids=out_scope_ids,
-        scope_reason=out_scope_reason
-        or ("not_found" if not found else "rerank"),
+        scope_reason=out_scope_reason or ("not_found" if not found else "rerank"),
         vector_n=int(counts.get("vector") or 0),
         keyword_n=int(counts.get("keyword") or 0),
         label_n=int(counts.get("label") or 0),
@@ -1663,7 +1822,7 @@ def prepare_related_retrieval(
     a_list: list[str] = []
     b_list: list[str] = []
     try:
-        con = sqlite3.connect(sqlite_path)
+        con = connect_sqlite(sqlite_path)
     except Exception:
         return empty
     try:
