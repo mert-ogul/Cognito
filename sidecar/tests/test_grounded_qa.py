@@ -189,6 +189,58 @@ def test_resolve_scope_explicit_wins() -> None:
     assert out["scopeReason"] == "explicit"
 
 
+def test_resolve_scope_skips_notes_without_title_overlap() -> None:
+    """A notes file that lists mission questions must not steal Apollo 11 scope."""
+    d = tempfile.mkdtemp()
+    path = str(Path(d) / "v.sqlite")
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(_DOCUMENTS_FTS_DDL)
+        con.execute(
+            "INSERT INTO documents VALUES (?,?,?,?)",
+            ("notes", "Open questions", "/library/open-questions.md", "indexed"),
+        )
+        con.execute(
+            "INSERT INTO documents VALUES (?,?,?,?)",
+            (
+                "a11",
+                "Apollo 11 - Technical Air-to-Ground Voice Transcription",
+                "/library/apollo-11-transcript.pdf",
+                "indexed",
+            ),
+        )
+        notes = (
+            "# Open questions\n"
+            "- What caused the 1202 alarms during the Apollo 11 landing?\n"
+            "- Do the Apollo 11 transcript and the mission report agree?\n"
+        )
+        transcript = (
+            "Apollo 11 Technical Air-to-Ground Voice Transcription\n"
+            "Mission Control landing timeline.\n"
+        )
+        con.execute(
+            "INSERT INTO chunks VALUES (?,?,?,?,?,?,?,?,?)",
+            ("c_notes", "notes", 0, notes, 1, 1, "body", "[]", None),
+        )
+        con.execute(
+            "INSERT INTO chunks VALUES (?,?,?,?,?,?,?,?,?)",
+            ("c_a11", "a11", 0, transcript, 1, 1, "body", "[]", None),
+        )
+        con.commit()
+    finally:
+        con.close()
+    rebuild_document_profile(path, "notes")
+    rebuild_document_profile(path, "a11")
+    q = (
+        "What caused the 1202 and 1201 alarms during the Apollo 11 landing, "
+        "and what did Mission Control decide?"
+    )
+    out = resolve_scope(path, q)
+    assert out["scopeChosen"] is False
+    assert out["scopeIds"] == []
+    assert out["scopeReason"] == "ambiguous_or_weak"
+
+
 def test_author_lines_from_front_stops_at_abstract() -> None:
     text = (
         "Semi-Supervised Classification with Graph Convolutional Networks\n"
@@ -211,6 +263,135 @@ def test_quote_in_passage_exact_and_line_break() -> None:
     passage = "We use the renorm-\nalization trick for training."
     assert quote_in_passage("renormalization trick", passage) is True
     assert quote_in_passage("We use the renormalization trick", passage) is True
+
+
+def test_quote_in_passage_markdown_list_lines() -> None:
+    passage = (
+        "Apollo 11\n"
+        "- Neil A. Armstrong\n"
+        "- Michael Collins\n"
+        "- Edwin E. Aldrin, Jr.\n"
+        "Apollo 12\n"
+        "- Charles Conrad, Jr.\n"
+        "- Richard F. Gordon, Jr.\n"
+        "- Alan L. Bean\n"
+    )
+    quote = (
+        "Apollo 11\n"
+        "- Neil A. Armstrong\n"
+        "- Michael Collins\n"
+        "- Edwin E. Aldrin, Jr."
+    )
+    assert quote_in_passage(quote, passage) is True
+    assert quote_in_passage(
+        "Apollo 11\nNeil A. Armstrong\nMichael Collins\nEdwin E. Aldrin, Jr.",
+        passage,
+    ) is True
+
+
+def test_check_answer_keeps_full_crew_lists(monkeypatch: pytest.MonkeyPatch) -> None:
+    passage = (
+        "Crew lists\n"
+        "Apollo 11\n"
+        "- Neil A. Armstrong\n"
+        "- Michael Collins\n"
+        "- Edwin E. Aldrin, Jr.\n"
+        "Apollo 12\n"
+        "- Charles Conrad, Jr.\n"
+        "- Richard F. Gordon, Jr.\n"
+        "- Alan L. Bean\n"
+        "Apollo 13\n"
+        "- James A. Lovell, Jr.\n"
+        "- John L. Swigert, Jr.\n"
+        "- Fred W. Haise, Jr.\n"
+        "Apollo 14\n"
+        "- Alan B. Shepard, Jr.\n"
+        "- Stuart A. Roosa\n"
+        "- Edgar D. Mitchell\n"
+        "Apollo 15\n"
+        "- David R. Scott\n"
+        "- Alfred M. Worden\n"
+        "- James B. Irwin\n"
+        "Apollo 16\n"
+        "- John W. Young\n"
+        "- Thomas K. Mattingly II\n"
+        "- Charles M. Duke, Jr.\n"
+        "Apollo 17\n"
+        "- Eugene A. Cernan\n"
+        "- Ronald E. Evans\n"
+        "- Harrison H. Schmitt\n"
+    )
+    sentences = [
+        (
+            "Apollo 11",
+            "Neil A. Armstrong",
+            "Michael Collins",
+            "Edwin E. Aldrin, Jr.",
+            "Apollo 11 flew with Neil A. Armstrong, Michael Collins, and Edwin E. Aldrin, Jr.",
+        ),
+        (
+            "Apollo 12",
+            "Charles Conrad, Jr.",
+            "Richard F. Gordon, Jr.",
+            "Alan L. Bean",
+            "Apollo 12 flew with Charles Conrad, Jr., Richard F. Gordon, Jr., and Alan L. Bean.",
+        ),
+        (
+            "Apollo 13",
+            "James A. Lovell, Jr.",
+            "John L. Swigert, Jr.",
+            "Fred W. Haise, Jr.",
+            "Apollo 13 flew with James A. Lovell, Jr., John L. Swigert, Jr., and Fred W. Haise, Jr.",
+        ),
+        (
+            "Apollo 14",
+            "Alan B. Shepard, Jr.",
+            "Stuart A. Roosa",
+            "Edgar D. Mitchell",
+            "Apollo 14 flew with Alan B. Shepard, Jr., Stuart A. Roosa, and Edgar D. Mitchell.",
+        ),
+        (
+            "Apollo 15",
+            "David R. Scott",
+            "Alfred M. Worden",
+            "James B. Irwin",
+            "Apollo 15 flew with David R. Scott, Alfred M. Worden, and James B. Irwin.",
+        ),
+        (
+            "Apollo 16",
+            "John W. Young",
+            "Thomas K. Mattingly II",
+            "Charles M. Duke, Jr.",
+            "Apollo 16 flew with John W. Young, Thomas K. Mattingly II, and Charles M. Duke, Jr.",
+        ),
+        (
+            "Apollo 17",
+            "Eugene A. Cernan",
+            "Ronald E. Evans",
+            "Harrison H. Schmitt",
+            "Apollo 17 flew with Eugene A. Cernan, Ronald E. Evans, and Harrison H. Schmitt.",
+        ),
+    ]
+    answer = []
+    for mission, a, b, c, sentence in sentences:
+        quote = f"{mission}\n- {a}\n- {b}\n- {c}"
+        answer.append(
+            {
+                "quotes": [{"source": 1, "text": quote}],
+                "sentence": sentence,
+            }
+        )
+    draft = {"answerable": True, "partial": True, "answer": answer}
+    monkeypatch.setattr(
+        "query.check_answer.hhem_scores_bounded",
+        lambda *_a, **_k: [0.9] * len(answer),
+    )
+    out = check_answer("/tmp", [{"index": 1, "title": "Crews", "text": passage}], draft)
+    assert out["notFound"] is False
+    assert len(out["sentences"]) == 7
+    joined = " ".join(s["text"] for s in out["sentences"])
+    for _mission, a, b, c, _sentence in sentences:
+        assert a in joined and b in joined and c in joined
 
 
 def test_quote_in_passage_one_stray_token() -> None:

@@ -236,6 +236,46 @@ describe("ChatPanel", () => {
     );
   });
 
+  it("shows partial line only when partial is true", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [cite(1)],
+        sentences: [{ text: "Seven crews are listed.", status: "supported", sources: [1] }],
+        notFound: false,
+        partial: true,
+        error: null,
+      });
+      return messageId;
+    });
+    renderChat();
+    await sendPrompt("crew lists");
+    expect(await screen.findByText("Seven crews are listed.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Your documents only cover part of this."),
+    ).toBeInTheDocument();
+  });
+
+  it("hides partial line when partial is false", async () => {
+    vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
+      e2eEmit("chat-final", {
+        messageId,
+        citations: [cite(1)],
+        sentences: [{ text: "Full answer.", status: "supported", sources: [1] }],
+        notFound: false,
+        partial: false,
+        error: null,
+      });
+      return messageId;
+    });
+    renderChat();
+    await sendPrompt("ask");
+    expect(await screen.findByText("Full answer.")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Your documents only cover part of this."),
+    ).toBeNull();
+  });
+
   it("renders one unchecked note under the paragraph", async () => {
     vi.mocked(sendChatQuery).mockImplementation(async (_q, messageId) => {
       e2eEmit("chat-final", {

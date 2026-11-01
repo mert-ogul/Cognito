@@ -48,23 +48,7 @@ function peopleOrOrgs(d: DocumentRow): string[] {
   return [...people, ...orgs].filter((s) => s.trim().length > 0);
 }
 
-function scanStatusWords(status: string | null | undefined): string | null {
-  if (status == null || status.trim() === "") return null;
-  const s = status.trim().toLowerCase();
-  if (
-    s === "no_text" ||
-    s === "empty" ||
-    s === "no text found" ||
-    s.includes("no_text") ||
-    s.includes("no text")
-  ) {
-    return "No text found";
-  }
-  if (s === "partial_text" || s.includes("partial_text")) {
-    return "Some pages have no text";
-  }
-  return "Scanned, text recognised";
-}
+
 
 function secondaryLine(d: DocumentRow): string {
   const parts: string[] = [];
@@ -74,8 +58,6 @@ function secondaryLine(d: DocumentRow): string {
   const names = peopleOrOrgs(d).slice(0, 2);
   if (names.length) parts.push(names.join(", "));
   if (d.pageCount != null) parts.push(`${d.pageCount} pages`);
-  const scan = scanStatusWords(d.scanStatus);
-  if (scan) parts.push(scan);
   return parts.join(" · ");
 }
 

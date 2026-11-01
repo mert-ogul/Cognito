@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import platform
 import re
+import statistics
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 import fitz  # PyMuPDF
 
 from common.text_norm import normalize_pdf_text, normalize_search_text
+
+log = logging.getLogger("cognito.sidecar")
 
 _SMALL_CAPS_JOIN = re.compile(r"\b([A-Z]) ([A-Z]{2,})")
 _DASH_JOIN = re.compile(r"(\w) -(\w)")
@@ -34,6 +39,12 @@ _TITLE_CASE_SMALL = frozenset(
 )
 _SCANNED_TEXT_MIN = 20
 _HEADING_STYLE_RE = re.compile(r"^heading\s*(\d+)$", re.IGNORECASE)
+_SINGLE_LETTER_OK = frozenset({"a", "A", "I"})
+_VOWELS = frozenset("aeiouyAEIOUY")
+_LETTER_SPACED_SHARE = 0.3
+_LETTER_CHAR_MIN = 0.3
+_ARXIV_STEM_RE = re.compile(r"^\d{4}\.\d+")
+_CODE_PREFIX_RE = re.compile(r"^[A-Za-z]\d+$")
 
 
 def hash_bytes(data: bytes) -> str:
@@ -72,27 +83,62 @@ def _metadata_title_ok(title: str) -> bool:
         return False
     if low.endswith(".doc") or low.endswith(".docx"):
         return False
-    return _title_candidate_ok(t)
+    return not _title_is_junk(t)
+
+
+def _title_is_junk(title: str) -> bool:
+    """Reject letter-spaced, punctuation-heavy, or one-character-dominated titles."""
+    t = (title or "").strip()
+    if len(t) < 3:
+        return True
+    letters = sum(1 for c in t if c.isalpha())
+    if letters / len(t) < 0.6:
+        return True
+    alpha_words = re.findall(r"[A-Za-z]+", t)
+    if not any(len(w) >= 3 and any(c in _VOWELS for c in w) for w in alpha_words):
+        return True
+    tokens = t.split()
+    if tokens:
+        single = sum(1 for tok in tokens if len(tok) == 1)
+        if single > len(tokens) / 2:
+            return True
+    counts = Counter(c.lower() for c in t if not c.isspace())
+    total = sum(counts.values())
+    if total and counts.most_common(1)[0][1] / total > 0.4:
+        return True
+    return False
 
 
 def _title_candidate_ok(title: str) -> bool:
-    """Reject letter-spaced junk (e.g. 'p R E s s K') and titles under 3 letters."""
-    t = (title or "").strip()
-    if len(t) < 3:
-        return False
-    tokens = t.split()
-    if not tokens:
-        return False
-    single = sum(1 for tok in tokens if len(tok) == 1)
-    if single > len(tokens) / 2:
-        return False
-    return True
+    return not _title_is_junk(title)
+
+
+def _filename_display(stem: str) -> str:
+    spaced = stem.replace("_", " ").replace("-", " ").strip()
+    cleaned = clean_title(spaced)
+    return cleaned or spaced
 
 
 def _filename_title(path: Path) -> str:
-    stem = path.stem.replace("_", " ").strip()
-    cleaned = clean_title(stem)
-    return cleaned or stem
+    return _filename_display(path.stem)
+
+
+def _filename_reads_like_name(stem: str) -> bool:
+    """True when the stem looks like a human title, not a code or arXiv id."""
+    raw = (stem or "").strip()
+    if not raw or _ARXIV_STEM_RE.match(raw):
+        return False
+    parts = re.split(r"[_\-\s]+", raw)
+    if parts and _CODE_PREFIX_RE.match(parts[0] or ""):
+        return False
+    spaced = _filename_display(raw)
+    letter_words = [w for w in re.findall(r"[A-Za-z]+", spaced) if len(w) >= 2]
+    if len(letter_words) < 2:
+        return False
+    digits = sum(1 for c in raw if c.isdigit())
+    if digits > len(raw) * 0.3:
+        return False
+    return not _title_is_junk(spaced)
 
 
 def _line_upright(line: dict) -> bool:
@@ -168,23 +214,24 @@ def _largest_font_title(page: fitz.Page) -> str | None:
     return " ".join(parts)
 
 
-def pdf_title(doc: fitz.Document, fallback: str) -> str:
+def pdf_title(doc: fitz.Document, path: Path) -> str:
+    """Pick a readable title: metadata → filename if name-like → page-1 font → spaced filename."""
     meta = doc.metadata or {}
     meta_title = str(meta.get("title") or "").strip()
     if _metadata_title_ok(meta_title):
         cleaned = clean_title(meta_title)
-        if cleaned and _title_candidate_ok(cleaned):
+        if cleaned and not _title_is_junk(cleaned):
             return cleaned
+    stem = path.stem
+    if _filename_reads_like_name(stem):
+        return _filename_display(stem)
     if len(doc) > 0:
         page_title = _largest_font_title(doc.load_page(0))
         if page_title:
             cleaned = clean_title(page_title)
-            if cleaned and _title_candidate_ok(cleaned):
+            if cleaned and not _title_is_junk(cleaned):
                 return cleaned
-    fb = (fallback or "").strip()
-    if _title_candidate_ok(fb):
-        return fb
-    return fallback
+    return _filename_display(stem)
 
 
 def markdown_title(text: str, fallback: str) -> str:
@@ -295,35 +342,136 @@ def _page_has_large_image(page: fitz.Page) -> bool:
     return False
 
 
+def text_quality(text: str) -> tuple[float, float]:
+    """Return (single_letter_share, letter_char_share) for alphabetic quality checks."""
+    raw = text or ""
+    tokens = re.findall(r"[A-Za-z]+", raw)
+    if not tokens:
+        single_share = 1.0 if raw.strip() else 0.0
+    else:
+        singles = sum(1 for t in tokens if len(t) == 1 and t not in _SINGLE_LETTER_OK)
+        single_share = singles / len(tokens)
+    if not raw:
+        letter_share = 0.0
+    else:
+        letter_share = sum(1 for c in raw if c.isalpha()) / len(raw)
+    return single_share, letter_share
+
+
+def _repair_line_from_chars(line: dict) -> str:
+    """Rebuild a line from character positions, ignoring the PDF's own spaces."""
+    chars: list[tuple[float, float, str, float]] = []
+    for span in line.get("spans") or []:
+        try:
+            size = float(span.get("size") or 10.0)
+        except (TypeError, ValueError):
+            size = 10.0
+        for ch in span.get("chars") or []:
+            c = str(ch.get("c") or "")
+            if not c or c.isspace():
+                continue
+            bbox = ch.get("bbox")
+            if not bbox or len(bbox) < 4:
+                continue
+            try:
+                x0, _y0, x1, _y1 = (
+                    float(bbox[0]),
+                    float(bbox[1]),
+                    float(bbox[2]),
+                    float(bbox[3]),
+                )
+            except (TypeError, ValueError):
+                continue
+            chars.append((x0, x1, c, size))
+    if not chars:
+        return ""
+    if len(chars) == 1:
+        return chars[0][2]
+    gaps = [chars[i + 1][0] - chars[i][1] for i in range(len(chars) - 1)]
+    median_gap = statistics.median(gaps) if gaps else 0.0
+    words: list[str] = []
+    current = [chars[0][2]]
+    for i, gap in enumerate(gaps):
+        size = chars[i][3]
+        if gap > median_gap + 0.25 * size:
+            words.append("".join(current))
+            current = [chars[i + 1][2]]
+        else:
+            current.append(chars[i + 1][2])
+    words.append("".join(current))
+    return " ".join(w for w in words if w)
+
+
+def repair_page_from_rawdict(page: fitz.Page) -> tuple[str, list[dict]]:
+    """Rebuild page text from character gaps; keep original block bboxes."""
+    raw = page.get_text("rawdict") or {}
+    blocks_out: list[dict] = []
+    text_parts: list[str] = []
+    for block in raw.get("blocks") or []:
+        try:
+            block_type = int(block.get("type")) if block.get("type") is not None else -1
+        except (TypeError, ValueError):
+            continue
+        if block_type != 0:
+            continue
+        line_texts: list[str] = []
+        for line in block.get("lines") or []:
+            lt = _repair_line_from_chars(line)
+            if lt:
+                line_texts.append(lt)
+        if not line_texts:
+            continue
+        block_text = normalize_pdf_text("\n".join(line_texts))
+        text_parts.append(block_text)
+        bbox = block.get("bbox")
+        if bbox and len(bbox) >= 4:
+            try:
+                box = [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])]
+            except (TypeError, ValueError):
+                continue
+            blocks_out.append({"text": block_text, "bbox": box})
+    return normalize_pdf_text("\n\n".join(text_parts)), blocks_out
+
+
+def _try_ocr_page(page: fitz.Page) -> tuple[str, list[dict]] | None:
+    if platform.system() != "Darwin":
+        return None
+    ocr_text, ocr_blocks = _ocr_page_darwin(page)
+    if not ocr_text:
+        return None
+    return normalize_pdf_text(ocr_text), ocr_blocks
+
+
 def _parse_pdf_page(page: fitz.Page, page_no: int) -> dict:
     plain = normalize_pdf_text((page.get_text("text") or "").strip())
     if len(plain) < _SCANNED_TEXT_MIN:
         if not _page_has_large_image(page):
-            # Blank / nearly empty page: skip OCR and do not count as scanned.
             return {
                 "page": page_no,
                 "text": "",
                 "blocks": [],
                 "scanned": False,
                 "ocr": False,
+                "repaired": False,
                 "blank": True,
             }
-        if platform.system() == "Darwin":
-            ocr_text, ocr_blocks = _ocr_page_darwin(page)
-            if ocr_text:
-                return {
-                    "page": page_no,
-                    "text": normalize_pdf_text(ocr_text),
-                    "blocks": ocr_blocks,
-                    "scanned": True,
-                    "ocr": True,
-                }
+        ocr = _try_ocr_page(page)
+        if ocr:
+            return {
+                "page": page_no,
+                "text": ocr[0],
+                "blocks": ocr[1],
+                "scanned": True,
+                "ocr": True,
+                "repaired": False,
+            }
         return {
             "page": page_no,
             "text": "",
             "blocks": [],
             "scanned": True,
             "ocr": False,
+            "repaired": False,
         }
 
     data = page.get_text("dict") or {}
@@ -332,13 +480,34 @@ def _parse_pdf_page(page: fitz.Page, page_no: int) -> dict:
         item = _text_block_from_dict(block)
         if item:
             blocks.append(item)
-    text = "\n\n".join(b["text"] for b in blocks) if blocks else plain
+    text = normalize_pdf_text("\n\n".join(b["text"] for b in blocks) if blocks else plain)
+    single_share, letter_share = text_quality(text)
+    repaired = False
+
+    if single_share > _LETTER_SPACED_SHARE:
+        text, blocks = repair_page_from_rawdict(page)
+        repaired = True
+        single_share, letter_share = text_quality(text)
+
+    if single_share > _LETTER_SPACED_SHARE or letter_share < _LETTER_CHAR_MIN:
+        ocr = _try_ocr_page(page)
+        if ocr:
+            return {
+                "page": page_no,
+                "text": ocr[0],
+                "blocks": ocr[1],
+                "scanned": True,
+                "ocr": True,
+                "repaired": repaired,
+            }
+
     return {
         "page": page_no,
-        "text": normalize_pdf_text(text),
+        "text": text,
         "blocks": blocks,
         "scanned": False,
         "ocr": False,
+        "repaired": repaired,
     }
 
 
@@ -450,7 +619,7 @@ def parse_file(path: Path) -> dict:
     raw = path.read_bytes()
     chash = hash_bytes(raw)
     suf = path.suffix.lower()
-    fallback = _filename_title(path) if suf == ".pdf" else path.stem
+    fallback = path.stem
     if suf == ".pdf":
         doc = fitz.open(path)
         try:
@@ -458,10 +627,20 @@ def parse_file(path: Path) -> dict:
             for i in range(len(doc)):
                 pages.append(_parse_pdf_page(doc.load_page(i), i + 1))
             text = "\n\n".join(p["text"] for p in pages if p.get("text"))
-            title = pdf_title(doc, fallback)
+            title = pdf_title(doc, path)
             page_count = len(doc)
         finally:
             doc.close()
+        repaired_n = sum(1 for p in pages if p.get("repaired"))
+        ocr_n = sum(1 for p in pages if p.get("ocr"))
+        if repaired_n or ocr_n:
+            log.info(
+                "pdf %s: repaired_pages=%s ocr_pages=%s total=%s",
+                path.name,
+                repaired_n,
+                ocr_n,
+                page_count,
+            )
         scan_status = _scan_status_from_pages(pages)
         out = {
             "path": str(path.resolve()),
@@ -472,6 +651,8 @@ def parse_file(path: Path) -> dict:
             "pages": pages,
             "contentHash": chash,
             "scanStatus": scan_status,
+            "repairedPages": repaired_n,
+            "ocrPages": ocr_n,
         }
         if scan_status == "ocr":
             out["textSource"] = "ocr"

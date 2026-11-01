@@ -360,6 +360,11 @@ fn process_one_parsed(
                 }
                 Some(v) => Some(v.to_string()),
             };
+            let text_quality = ch.get("textQuality").and_then(|x| x.as_f64());
+            let searchable = ch
+                .get("searchable")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true);
             let cid = Uuid::new_v4().to_string();
             sqlite::insert_chunk_row(
                 conn,
@@ -374,7 +379,11 @@ fn process_one_parsed(
                 role,
                 &labels,
                 regions.as_deref(),
+                text_quality,
             )?;
+            if !searchable {
+                continue;
+            }
             let heading_trail = ch
                 .get("headingTrail")
                 .and_then(|x| x.as_str())
@@ -384,7 +393,13 @@ fn process_one_parsed(
                 "text": text,
                 "ordinal": ord,
                 "title": title,
+                "searchable": true,
             });
+            if let Some(q) = text_quality {
+                item.as_object_mut()
+                    .expect("embed item object")
+                    .insert("textQuality".into(), json!(q));
+            }
             if let Some(ht) = heading_trail {
                 item.as_object_mut()
                     .expect("embed item object")

@@ -13,6 +13,7 @@ export type ChatMessage = {
   sentences?: AnswerSentence[];
   draft?: string[];
   notFound?: boolean;
+  partial?: boolean;
   scopeTitle?: string | null;
   suggestions?: ScopeSearchSuggestion[];
   error?: string;
@@ -60,6 +61,7 @@ export function storedMessageToChatMessage(row: StoredChatMessage): ChatMessage 
     citations,
     sentences,
     notFound: payload.notFound === true,
+    partial: payload.partial === true,
     scopeTitle:
       typeof payload.scopeTitle === "string" || payload.scopeTitle === null
         ? (payload.scopeTitle as string | null)

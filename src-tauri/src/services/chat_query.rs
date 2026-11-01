@@ -15,23 +15,27 @@ use serde_json::{json, Value};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
-const SYSTEM_PROMPT: &str = "Answer only from the numbered passages. For each answer sentence, first copy one to three short, exact passages it relies on, with their passage numbers, then write the sentence from them. Don't repeat a fact in two sentences. Write every sentence in words. Use LaTeX only for real formulas, never for plain numbers, percentages or units: write 81.5%, not $81.5\\%$. Inside JSON strings, write each LaTeX backslash twice. Write formulas in LaTeX between $ or $$. Formulas in the passages come from PDF text and are often garbled; rewrite them as clean LaTeX. For example, h = σ(W x̃ + b) becomes $h = \\sigma(W\\tilde{x} + b)$. Each passage starts with its document's title. If the question asks about a specific paper, person or thing and the passages are about a different one, set answerable to false. If the passages don't answer the question, set answerable to false and leave the answer list empty.";
+const MAX_ANSWER_SENTENCES: usize = 8;
+const MAX_QUOTES_PER_SENTENCE: usize = 6;
+
+const SYSTEM_PROMPT: &str = "Answer only from the numbered passages. For each answer sentence, first copy one to six short, exact passages it relies on, with their passage numbers, then write the sentence from them. A quote may cover several consecutive lines of a list. For a list, quote the whole run of lines the sentence uses. Don't repeat a fact in two sentences. Write every sentence in words. Use LaTeX only for real formulas, never for plain numbers, percentages or units: write 81.5%, not $81.5\\%$. Inside JSON strings, write each LaTeX backslash twice. Write formulas in LaTeX between $ or $$. Formulas in the passages come from PDF text and are often garbled; rewrite them as clean LaTeX. For example, h = σ(W x̃ + b) becomes $h = \\sigma(W\\tilde{x} + b)$. Each passage starts with its document's title. If the question asks about a specific paper, person or thing and the passages are about a different one, set answerable to false. If the passages answer only part of the question, answer that part, set answerable to true and partial to true, and do not list what is missing from your own knowledge. Set answerable to false and leave the answer list empty only when nothing in the passages answers any part of the question. When the passages fully answer the question, set partial to false.";
 
 fn answer_format_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
             "answerable": { "type": "boolean" },
+            "partial": { "type": "boolean" },
             "answer": {
                 "type": "array",
-                "maxItems": 5,
+                "maxItems": MAX_ANSWER_SENTENCES,
                 "items": {
                     "type": "object",
                     "properties": {
                         "quotes": {
                             "type": "array",
                             "minItems": 1,
-                            "maxItems": 3,
+                            "maxItems": MAX_QUOTES_PER_SENTENCE,
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -47,7 +51,7 @@ fn answer_format_schema() -> Value {
                 }
             }
         },
-        "required": ["answerable", "answer"]
+        "required": ["answerable", "partial", "answer"]
     })
 }
 
@@ -69,6 +73,8 @@ pub struct DraftAnswerItem {
 #[serde(rename_all = "camelCase")]
 pub struct GroundedDraft {
     pub answerable: bool,
+    #[serde(default)]
+    pub partial: bool,
     pub answer: Vec<DraftAnswerItem>,
 }
 
@@ -180,8 +186,11 @@ fn validate_draft(mut draft: GroundedDraft) -> GroundedDraft {
         let any_quoted = draft.answer.iter().any(|item| !item.quotes.is_empty());
         if !any_quoted {
             draft.answerable = false;
+            draft.partial = false;
             draft.answer.clear();
         }
+    } else {
+        draft.partial = false;
     }
     draft
 }
@@ -236,6 +245,7 @@ fn assistant_payload(result: &ChatFinalResult) -> Value {
         "citations": result.citations,
         "sentences": result.sentences,
         "notFound": result.not_found,
+        "partial": result.partial,
         "scopeTitle": result.scope_title,
         "suggestions": result.suggestions,
         "error": result.error,
@@ -297,6 +307,7 @@ fn build_generation_messages(
 fn unanswerable_draft() -> GroundedDraft {
     GroundedDraft {
         answerable: false,
+        partial: false,
         answer: vec![],
     }
 }
@@ -691,6 +702,7 @@ async fn finish_grounded_answer(
                 retrieval_mode: early_mode.into(),
                 error: None,
                 not_found: true,
+                partial: false,
                 sentences: vec![],
                 scope_title,
                 scope_ids: result_scope_ids,
@@ -862,6 +874,7 @@ async fn finish_grounded_answer(
         }
     }
 
+    let partial = draft.partial && !check_not_found && !sentences.is_empty();
     emit_final(
         &state,
         &app,
@@ -872,6 +885,7 @@ async fn finish_grounded_answer(
             retrieval_mode: success_mode.into(),
             error: None,
             not_found: check_not_found,
+            partial,
             sentences,
             scope_title,
             scope_ids: result_scope_ids,
@@ -969,6 +983,41 @@ mod tests {
         let d = parse_grounded_answer(raw).unwrap();
         assert!(!d.answerable);
         assert!(d.answer.is_empty());
+    }
+
+    #[test]
+    fn answer_schema_requires_partial() {
+        let schema = answer_format_schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("partial")));
+        assert_eq!(schema["properties"]["partial"]["type"], "boolean");
+    }
+
+    #[test]
+    fn answer_schema_allows_eight_sentences_and_six_quotes() {
+        assert_eq!(MAX_ANSWER_SENTENCES, 8);
+        assert_eq!(MAX_QUOTES_PER_SENTENCE, 6);
+        let schema = answer_format_schema();
+        assert_eq!(schema["properties"]["answer"]["maxItems"], 8);
+        assert_eq!(
+            schema["properties"]["answer"]["items"]["properties"]["quotes"]["maxItems"],
+            6
+        );
+    }
+
+    #[test]
+    fn parse_keeps_partial_when_answerable() {
+        let raw = r#"{
+            "answerable": true,
+            "partial": true,
+            "answer": [{
+                "quotes": [{"source": 1, "text": "crew list"}],
+                "sentence": "Apollo 11: Armstrong, Aldrin, Collins."
+            }]
+        }"#;
+        let d = parse_grounded_answer(raw).unwrap();
+        assert!(d.answerable);
+        assert!(d.partial);
     }
 
     #[test]

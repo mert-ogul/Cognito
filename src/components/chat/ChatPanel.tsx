@@ -326,6 +326,7 @@ export function ChatPanel({
     citations: CitationItem[];
     sentences?: AnswerSentence[];
     notFound?: boolean;
+    partial?: boolean;
     scopeTitle?: string | null;
     suggestions?: ScopeSearchSuggestion[];
     error?: string | null;
@@ -351,6 +352,7 @@ export function ChatPanel({
               citations: p.citations,
               sentences,
               notFound: p.notFound ?? false,
+              partial: p.partial ?? false,
               scopeTitle: p.scopeTitle ?? null,
               suggestions: p.suggestions ?? [],
               error: p.error ?? undefined,

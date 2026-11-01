@@ -654,8 +654,7 @@ mod tests {
                     "h",
                     "body",
                     "[]",
-                    None,
-                )?;
+                    None, None)?;
                 Ok(())
             })
             .expect("seed");

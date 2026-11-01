@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
-
 
 from common.ollama import embed_prefixes, embed_texts
 from common.sqlite_vec_util import (
@@ -19,13 +19,16 @@ from common.sqlite_vec_util import (
     table_dimension,
 )
 from ingestion.chunking import (
+    chunk_is_searchable,
     chunk_semantic,
+    chunk_text_quality,
     estimate_tokens,
     extract_chunk_labels,
     hash_chunk_text,
 )
 from ingestion.parsing import parse_file
 
+log = logging.getLogger("cognito.sidecar")
 _EMBED_BATCH = 32
 
 
@@ -54,11 +57,16 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
             pages = None
         drafts = chunk_semantic(str(it.get("text", "")), ftype, pages=pages)
         chunks = []
+        junk_n = 0
         for ord_i, ch in enumerate(drafts):
             trail = " > ".join(t for t in ch.heading_trail if t)
             role = ch.role if ch.role in ("body", "references") else "body"
             labels = extract_chunk_labels(ch.text)
             regions_json = json.dumps(ch.regions) if ch.regions else None
+            quality = chunk_text_quality(ch.text)
+            searchable = chunk_is_searchable(ch.text, quality)
+            if not searchable:
+                junk_n += 1
             chunks.append(
                 {
                     "ordinal": ord_i,
@@ -71,7 +79,16 @@ def rpc_chunk_documents(params: dict[str, Any]) -> dict[str, Any]:
                     "role": role,
                     "labels": json.dumps(labels),
                     "regions": regions_json,
+                    "textQuality": quality,
+                    "searchable": searchable,
                 }
+            )
+        if junk_n:
+            log.info(
+                "chunk_documents: %s/%s low-quality chunk(s) skipped for search in %s",
+                junk_n,
+                len(chunks),
+                it.get("path"),
             )
         out.append(
             {
@@ -100,8 +117,14 @@ def rpc_embed_chunks(params: dict[str, Any]) -> dict[str, Any]:
     failed: list[dict[str, str]] = []
     prepared: list[tuple[str, str]] = []
     for item in items:
-        cid = str(item["chunkId"])
+        if item.get("searchable") is False:
+            continue
         text = str(item["text"])
+        quality = item.get("textQuality")
+        q = float(quality) if quality is not None else chunk_text_quality(text)
+        if not chunk_is_searchable(text, q):
+            continue
+        cid = str(item["chunkId"])
         title = str(item.get("title") or "")
         trail = item.get("headingTrail")
         trail_s = str(trail) if trail else None

@@ -259,6 +259,8 @@ pub struct ChatFinalResult {
     #[serde(default)]
     pub not_found: bool,
     #[serde(default)]
+    pub partial: bool,
+    #[serde(default)]
     pub sentences: Vec<AnswerSentence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_title: Option<String>,
@@ -285,6 +287,7 @@ impl ChatFinalResult {
             retrieval_mode: "error".into(),
             error: Some(error.into()),
             not_found: false,
+            partial: false,
             sentences: Vec::new(),
             scope_title: None,
             scope_ids: Vec::new(),
@@ -344,6 +347,7 @@ mod chat_payload_tests {
             retrieval_mode: "hybrid".into(),
             error: None,
             not_found: false,
+            partial: true,
             sentences: vec![],
             scope_title: None,
             scope_ids: vec![],
@@ -354,6 +358,7 @@ mod chat_payload_tests {
         let j = serde_json::to_string(&f).unwrap();
         let back: ChatFinalResult = serde_json::from_str(&j).unwrap();
         assert_eq!(back.retrieval_mode, "hybrid");
+        assert!(back.partial);
         assert_eq!(back.citations[0].chunk_id, "c1");
         assert!(!back.not_found);
         assert!(back.sentences.is_empty());

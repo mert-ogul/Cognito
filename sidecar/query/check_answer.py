@@ -45,6 +45,7 @@ _QUOTE_MARKS = str.maketrans(
 )
 _HYPHEN_BREAK_RE = re.compile(r"(\w)-\s*\n\s*(\w)")
 _WS_RE = re.compile(r"\s+")
+_LIST_MARKER_RE = re.compile(r"(?m)^\s*(?:[-*+]|\d+[.)])\s+")
 _NUMBER_RE = re.compile(
     r"\b(?:\d{1,4}[-/]\d{1,2}[-/]\d{1,4}|\d+(?:\.\d+)?(?:st|nd|rd|th)?)\b",
     re.IGNORECASE,
@@ -54,6 +55,7 @@ _NUMBER_RE = re.compile(
 def normalize_evidence_text(text: str) -> str:
     s = (text or "").translate(_LIGATURES).translate(_QUOTE_MARKS)
     s = _HYPHEN_BREAK_RE.sub(r"\1\2", s)
+    s = _LIST_MARKER_RE.sub(" ", s)
     s = _WS_RE.sub(" ", s).strip()
     return s
 

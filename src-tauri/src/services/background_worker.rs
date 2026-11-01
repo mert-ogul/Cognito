@@ -502,8 +502,7 @@ mod tests {
                     "h",
                     "body",
                     "[]",
-                    None,
-                )?;
+                    None, None)?;
                 c.execute(
                     "UPDATE documents SET entities_status = 'pending', card_status = 'pending' WHERE id = 'doc-ent'",
                     [],
@@ -652,8 +651,7 @@ mod tests {
                     "h",
                     "body",
                     "[]",
-                    None,
-                )?;
+                    None, None)?;
                 c.execute(
                     "UPDATE documents SET card_status = 'pending' WHERE id = 'doc-pause'",
                     [],

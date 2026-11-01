@@ -164,6 +164,7 @@ pub fn insert_chunk_row(
     role: &str,
     labels: &str,
     regions: Option<&str>,
+    text_quality: Option<f64>,
 ) -> CognitoResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
     let role = if role == "references" {
@@ -172,8 +173,8 @@ pub fn insert_chunk_row(
         "body"
     };
     conn.execute(
-        "INSERT INTO chunks (id, document_id, ordinal, page_start, page_end, text, token_count, content_hash, created_at, role, labels, regions)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO chunks (id, document_id, ordinal, page_start, page_end, text, token_count, content_hash, created_at, role, labels, regions, text_quality)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             id,
             document_id,
@@ -186,7 +187,8 @@ pub fn insert_chunk_row(
             now,
             role,
             labels,
-            regions
+            regions,
+            text_quality
         ],
     )?;
     Ok(())

@@ -7,7 +7,7 @@ from unittest import mock
 
 import fitz
 
-from ingestion.parsing import parse_file, _scan_status_from_pages, _title_candidate_ok
+from ingestion.parsing import parse_file, _scan_status_from_pages, _title_is_junk
 
 
 def _text_page(doc: fitz.Document, text: str = "Mission report paragraph about lunar module.") -> None:
@@ -74,7 +74,7 @@ def test_half_image_only_pages_partial_text(tmp_path: Path) -> None:
 
 
 def test_letter_spaced_title_falls_back_to_filename(tmp_path: Path) -> None:
-    assert not _title_candidate_ok("p R E s s K")
+    assert _title_is_junk("p R E s s K")
     pdf = tmp_path / "Apollo_11_Mission_Report.pdf"
     doc = fitz.open()
     _text_page(doc, "Body text without a large title span.")

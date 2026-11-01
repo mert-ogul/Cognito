@@ -28,6 +28,7 @@ export type AssistantChatMessage = {
   sentences?: AnswerSentence[];
   draft?: string[];
   notFound?: boolean;
+  partial?: boolean;
   scopeTitle?: string | null;
   suggestions?: ScopeSearchSuggestion[];
   error?: string;
@@ -486,6 +487,9 @@ export function AssistantMessage({
           citations={citations}
           onCite={onCite}
         />
+        {message.partial ? (
+          <p className="text-muted">Your documents only cover part of this.</p>
+        ) : null}
         {citations.length > 0 ? (
           <SourcesList
             citations={citations}
